@@ -62,6 +62,37 @@ public enum TurnCapture {
         public var newOffset: Int
     }
 
+    /// One `tool_use` block from an assistant line. `name` is whatever the transcript
+    /// stored (`mcp__client__…` or the bare tool name).
+    public struct ToolUse: Equatable, Sendable {
+        public var id: String
+        public var name: String
+        public var input: JSONValue
+        public init(id: String, name: String, input: JSONValue) {
+            self.id = id
+            self.name = name
+            self.input = input
+        }
+    }
+
+    /// `tool_use` blocks in complete assistant lines, in order. A block with no id is
+    /// skipped — the HTTP response has to hand the client the transcript's `toolu_…` id.
+    public static func toolUses(in data: Data) -> [ToolUse] {
+        let newline = UInt8(ascii: "\n")
+        guard let lastNewline = data.lastIndex(of: newline) else { return [] }
+        var uses: [ToolUse] = []
+        var seen = Set<String>()
+        for raw in decodeLines(Data(data[...lastNewline])) where raw.type == "assistant" {
+            guard let content = raw.message?.content else { continue }
+            for block in content.blocks where block["type"]?.stringValue == "tool_use" {
+                guard let id = block["id"]?.stringValue, !id.isEmpty, seen.insert(id).inserted else { continue }
+                uses.append(ToolUse(id: id, name: block["name"]?.stringValue ?? "",
+                                    input: block["input"] ?? .object([:])))
+            }
+        }
+        return uses
+    }
+
     /// Assistant text appended after `fromOffset`: text blocks of every complete
     /// assistant line, joined by blank lines; thinking and tool_use are skipped.
     /// Usage comes from the last assistant line that carries one.

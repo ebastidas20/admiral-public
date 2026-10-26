@@ -2,11 +2,10 @@
 """Acceptance: a stock Anthropic SDK client against Admiral's endpoint.
 
 Prereqs: Admiral dev build running, API Server toggled on (port 4141), and a
-managed claude tab whose name you pass as --tab. Every request needs the operator
-token (Settings → Bridge & API → Copy token) in ADMIRAL_API_TOKEN; the SDK sends it
-as its API key (x-api-key).
+managed claude tab whose name you pass as --tab. No API token is required.
+The Anthropic SDK still sends an API key; ADMIRAL_API_TOKEN is optional and Admiral ignores it.
 
-    ADMIRAL_API_TOKEN=<token> uv run --with anthropic python scripts/api_acceptance.py --tab "Worker"
+    uv run --with anthropic python scripts/api_acceptance.py --tab "Worker"
 
 The tab is routed by the required ADMIRAL_TAB_NAME header, sent here as an SDK
 default header; `model` stays a real model id and is only echoed back.
@@ -21,7 +20,7 @@ parser = argparse.ArgumentParser()
 parser.add_argument("--tab", required=True, help="Admiral tab name (the ADMIRAL_TAB_NAME header)")
 parser.add_argument("--base-url", default="http://127.0.0.1:4141")
 args = parser.parse_args()
-TOKEN = os.environ["ADMIRAL_API_TOKEN"]
+TOKEN = os.environ.get("ADMIRAL_API_TOKEN", "unused")
 
 client = anthropic.Anthropic(base_url=args.base_url, api_key=TOKEN, max_retries=0,
                              default_headers={"ADMIRAL_TAB_NAME": args.tab})

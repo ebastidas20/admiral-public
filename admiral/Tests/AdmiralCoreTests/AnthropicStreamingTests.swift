@@ -10,7 +10,7 @@ final class AnthropicStreamingTests: XCTestCase {
 
     override func setUp() async throws {
         backend = FakeAnthropicBackend()
-        endpoint = AnthropicEndpoint(backend: backend, tokenProvider: OperatorTokenProvider("adm_sse"), config: .init(
+        endpoint = AnthropicEndpoint(backend: backend, config: .init(
             busyWaitTimeout: 0.05, busySeenTimeout: 0.03, turnTimeout: 0.2,
             pollInterval: 0.01, pingInterval: 10,
             injectReadyTimeout: 0.05, injectVerifyTimeout: 0.02, injectMaxAttempts: 3))

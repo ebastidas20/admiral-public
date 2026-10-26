@@ -58,11 +58,6 @@ final class FakeMirror: OperatorTokenMirror, @unchecked Sendable {
     }
 }
 
-private final class FakePasteboard: OperatorTokenPasteboard {
-    var strings: [String] = []
-    func setString(_ value: String) { strings.append(value) }
-}
-
 final class OperatorTokenMirrorTests: XCTestCase {
     private var dir: URL!
     private let a = "adm_" + String(repeating: "a", count: 32)
@@ -417,17 +412,6 @@ final class OperatorTokenMirrorTests: XCTestCase {
         XCTAssertEqual(m.value, r.token)
         XCTAssertFalse(legacyExists, "a stale file must not out-vote the rotated Keychain value at next launch")
         XCTAssertEqual(OperatorTokenStore.resolve(base: dir, mirror: m), .init(token: r.token, mirror: .inSync))
-    }
-
-    // MARK: copy token
-
-    func testCopyTokenPutsValueOnPasteboardOnly() {
-        let pb = FakePasteboard()
-        XCTAssertTrue(OperatorTokenStore.copy(token: a, to: pb))
-        XCTAssertEqual(pb.strings, [a])
-        XCTAssertEqual(dirListing, [], "copy must not write anything to disk")
-        XCTAssertFalse(OperatorTokenStore.copy(token: "", to: pb))
-        XCTAssertEqual(pb.strings, [a])
     }
 
     func testLabels() {

@@ -1,9 +1,10 @@
 import Foundation
 
 /// The Anthropic-compatible endpoint: routes `POST /v1/messages` to the Admiral tab
-/// named by the required `ADMIRAL_TAB_NAME` header. Requires the operator token
-/// (`x-api-key`, which the Anthropic SDKs send as their API key, or `Authorization: Bearer`). `model` is left to mean what it
-/// means everywhere else — it is echoed back, never used to pick a tab.
+/// named by the required `ADMIRAL_TAB_NAME` header. No API token is required.
+/// `model` is echoed on the response and never picks a tab. A new scratch tab also
+/// receives it as `claude --model` when it names a `ScheduleModel` alias (`haiku`,
+/// `claude-haiku`, …); the first request's alias is the process's model.
 /// Owns the whole request lifecycle — tab resolution, delta detection, busy gate,
 /// injection, transcript capture, completion — and emits raw HTTP bytes so the
 /// socket layer stays a dumb pipe. One request in flight per tab.
@@ -63,13 +64,9 @@ public final class AnthropicEndpoint {
     private let config: Config
     private let run: TabRun
     private var inFlight: Set<UUID> = []
-    /// The operator token, the same one `/mcp` checks; read per request, so it can arrive
-    /// (or rotate) after the server is up. Empty = 503 for everyone.
-    private let tokenProvider: OperatorTokenProvider
 
-    public init(backend: AnthropicBackend, tokenProvider: OperatorTokenProvider, config: Config = Config()) {
+    public init(backend: AnthropicBackend, config: Config = Config()) {
         self.backend = backend
-        self.tokenProvider = tokenProvider
         self.config = config
         run = TabRun(backend: backend, config: TabRun.Config(
             busySeenTimeout: config.busySeenTimeout, turnTimeout: config.turnTimeout,
@@ -83,18 +80,6 @@ public final class AnthropicEndpoint {
     public func handle(_ request: HTTPRequest, emit: @escaping (Data) -> Void) async {
         guard !request.looksBrowserOriginated else {
             emit(errorResponse(403, "permission_error", "cross-origin or non-loopback request refused"))
-            return
-        }
-        // Every request types into a tab, so it needs the operator token, like /mcp.
-        switch OperatorAuthResult.check(request, expected: tokenProvider.token) {
-        case .ok: break
-        case .unavailable:
-            emit(errorResponse(503, "api_error", "token unavailable — the operator token is still "
-                + "being resolved from the Keychain; retry shortly"))
-            return
-        case .unauthorized:
-            emit(errorResponse(401, "authentication_error", "unauthorized — send the operator token "
-                + "as x-api-key or Authorization: Bearer (Settings → Bridge & API → Copy token)"))
             return
         }
         guard request.method == "POST", request.path == "/v1/messages" else {
@@ -116,12 +101,25 @@ public final class AnthropicEndpoint {
             emit(errorResponse(400, "invalid_request_error", soError))
             return
         }
+        if let message = req.clientToolsError ?? req.messageError {
+            emit(errorResponse(400, "invalid_request_error", message))
+            return
+        }
+        // Before a scratch tab is commissioned: a request that asks for both is neither
+        // an API tool tab nor a structured-output turn.
+        if req.structuredOutput != nil && req.clientTools != nil {
+            emit(errorResponse(400, "invalid_request_error",
+                               "structured output and client tools cannot be combined"))
+            return
+        }
         // Routing: a tab name must name an existing tab (fails as it always has); a
         // session id routes to whichever tab owns it — or creates a scratch tab for it.
         // NOTE: everything from here to `inFlight.insert` is synchronous on the main
         // actor, so a concurrent same-sid request resolves the freshly created tab and
         // hits the in-flight 529 — no separate creation lock is needed.
         let tab: AnthropicTab
+        var commissionedTools = false
+        let modelAlias = ScheduleModel(anthropicModel: req.model)?.rawValue
         if !rawTab.isEmpty {
             guard let named = backend.tab(named: rawTab) else {
                 emit(errorResponse(404, "not_found_error",
@@ -152,7 +150,10 @@ public final class AnthropicEndpoint {
                                        "\(Self.cwdHeaderWireName) must be an existing directory: \(cwd)"))
                     return
                 }
-                guard let created = backend.createScratchTab(sessionID: sid, cwd: cwd) else {
+                commissionedTools = req.clientTools != nil
+                guard let created = backend.createScratchTab(
+                    sessionID: sid, cwd: cwd, model: modelAlias, clientTools: req.clientTools
+                ) else {
                     emit(errorResponse(500, "api_error", "failed to create a session for \(sid)"))
                     return
                 }
@@ -170,6 +171,13 @@ public final class AnthropicEndpoint {
         inFlight.insert(tab.id)
         defer { inFlight.remove(tab.id) }
 
+        let toolMode = backend.clientToolsEnabled(tabID: tab.id)
+        if req.structuredOutput != nil && (req.clientTools != nil || toolMode) {
+            emit(errorResponse(400, "invalid_request_error",
+                               "structured output and client tools cannot be combined"))
+            return
+        }
+
         // Arm the structured-output tripwire before waiting on the tab or injecting — it
         // owns this request for its whole lifecycle, and the defer clears it on every exit
         // path (busy-gate 529, no-delta 400, timeout, success). Per design §4.2 arming
@@ -178,6 +186,11 @@ public final class AnthropicEndpoint {
             backend.armStructuredOutput(tabID: tab.id, spec: spec)
         }
         defer { if req.structuredOutput != nil { backend.clearStructuredOutput(tabID: tab.id, type: .api) } }
+
+        if req.clientTools != nil || toolMode || !req.trailingToolResults.isEmpty {
+            await handleClientTools(req, tab: tab, commissionedTools: commissionedTools, emit: emit)
+            return
+        }
 
         // Busy gate: only .busy blocks — a freshly spawned claude has no status file yet.
         let gateDeadline = Date().addingTimeInterval(config.busyWaitTimeout)
@@ -272,6 +285,222 @@ public final class AnthropicEndpoint {
                     id: messageID, model: req.model, text: result.text, usage: usage)))
             }
         }
+    }
+
+    /// A turn on an API tool tab, or any request that carries `tool_result`s.
+    ///
+    /// A matching tool_result set fulfills the parked MCP calls and skips the busy gate:
+    /// Claude is blocked inside those calls, so the tab stays `.busy` until the results
+    /// land. Plain text or a partial result set is a 400 and does not type into the tab.
+    private func handleClientTools(_ req: AnthropicMessagesRequest, tab: AnthropicTab,
+                                   commissionedTools: Bool, emit: @escaping (Data) -> Void) async {
+        if let message = req.clientToolsError ?? req.messageError {
+            emit(errorResponse(400, "invalid_request_error", message))
+            return
+        }
+        let toolMode = backend.clientToolsEnabled(tabID: tab.id)
+        if let tools = req.clientTools {
+            guard toolMode || commissionedTools else {
+                emit(errorResponse(400, "invalid_request_error",
+                                   "client tools require an API scratch session commissioned with tools "
+                                   + "(\(Self.sessionIDHeaderWireName))"))
+                return
+            }
+            // The create request already wrote the catalog inside commission, before spawn.
+            if !commissionedTools {
+                backend.installClientTools(tabID: tab.id, tools: tools)
+            }
+        }
+        guard let token = backend.sessionToken(tabID: tab.id) else {
+            emit(errorResponse(500, "api_error", "session token for this tab is not available"))
+            return
+        }
+
+        let broker = backend.clientToolBroker
+        var fulfillment: [ClientToolResultBlock]?
+        let outstanding = broker.outstanding(token: token)
+        if !outstanding.isEmpty {
+            switch ClientToolContinuation.decide(
+                outstanding: outstanding, results: req.trailingToolResults,
+                lastUserMessageHasText: req.trailingUserHasText) {
+            case let .reject(message):
+                emit(errorResponse(400, "invalid_request_error", message))
+                return
+            case let .match(blocks):
+                fulfillment = blocks
+            }
+        } else if !req.trailingToolResults.isEmpty && !req.trailingUserHasText {
+            emit(errorResponse(400, "invalid_request_error", ClientToolContinuation.noneOutstanding))
+            return
+        } else {
+            let gateDeadline = Date().addingTimeInterval(config.busyWaitTimeout)
+            while backend.liveStatus(tabID: tab.id) == .busy {
+                guard Date() < gateDeadline else {
+                    emit(errorResponse(529, "overloaded_error", "tab is busy"))
+                    return
+                }
+                await sleepPoll()
+            }
+        }
+
+        var path = backend.transcriptPath(tabID: tab.id)
+        for _ in 0..<5 where path == nil {
+            await sleepPoll()
+            path = backend.transcriptPath(tabID: tab.id)
+        }
+        guard let path else {
+            emit(errorResponse(500, "api_error", "transcript path for this tab is not available"))
+            return
+        }
+        let snapshot = (try? Data(contentsOf: URL(fileURLWithPath: path))) ?? Data()
+
+        if let blocks = fulfillment {
+            guard broker.fulfillAll(token: token, blocks: blocks) else {
+                emit(errorResponse(500, "api_error", "failed to deliver tool results"))
+                return
+            }
+        } else {
+            let delta = TurnCapture.unseen(requestTexts: req.userTexts,
+                                           transcriptTexts: TurnCapture.userTexts(in: snapshot))
+            guard !delta.isEmpty else {
+                emit(errorResponse(400, "invalid_request_error", "no new user message for this tab"))
+                return
+            }
+            await run.deliver(delta.joined(separator: "\n\n"), tabID: tab.id, path: path,
+                              baselineUserCount: TurnCapture.userTexts(in: snapshot).count)
+        }
+
+        let messageID = "msg_" + UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
+        if req.stream {
+            emit(HTTPWire.sseHead())
+            emit(HTTPWire.sseFrame(event: "message_start",
+                                   data: AnthropicWire.messageStart(id: messageID, model: req.model)))
+        }
+        let outcome = await awaitClientTurn(tabID: tab.id, token: token, path: path,
+                                            fromOffset: snapshot.count) {
+            if req.stream {
+                emit(HTTPWire.sseFrame(event: "ping", data: AnthropicWire.ping()))
+            }
+        }
+        switch outcome {
+        case let .failed(message):
+            if req.stream {
+                emit(HTTPWire.sseFrame(event: "error",
+                                       data: AnthropicWire.error(type: "api_error", message: message)))
+            } else {
+                emit(errorResponse(500, "api_error", message))
+            }
+        case let .tools(text, usage, calls):
+            let usage = usage ?? AnthropicUsage(inputTokens: 0, outputTokens: 0)
+            if req.stream {
+                emitClientToolStream(text: text, calls: calls, usage: usage, stopReason: "tool_use", emit: emit)
+            } else {
+                emit(HTTPWire.response(status: 200, body: AnthropicWire.toolUseMessage(
+                    id: messageID, model: req.model, text: text, calls: calls, usage: usage)))
+            }
+        case let .text(text, usage):
+            let usage = usage ?? AnthropicUsage(inputTokens: 0, outputTokens: 0)
+            if req.stream {
+                emitClientToolStream(text: text, calls: [], usage: usage, stopReason: "end_turn", emit: emit)
+            } else {
+                emit(HTTPWire.response(status: 200, body: AnthropicWire.message(
+                    id: messageID, model: req.model, text: text, usage: usage)))
+            }
+        }
+    }
+
+    private enum ClientTurnOutcome {
+        case text(String, AnthropicUsage?)
+        case tools(String, AnthropicUsage?, [TurnCapture.ToolUse])
+        case failed(String)
+    }
+
+    /// Poll the bytes appended after this request started. Read the transcript before
+    /// live status so a tool_use line written as the prompt landed can correlate on the
+    /// first pass. A complete parked set returns while the tab is still busy.
+    private func awaitClientTurn(tabID: UUID, token: String, path: String, fromOffset: Int,
+                                 onPing: () -> Void) async -> ClientTurnOutcome {
+        let started = Date()
+        var sawBusy = false
+        var text = ""
+        var usage: AnthropicUsage?
+        var lastActivity = Date()
+        let notParked = "client tool call was not parked"
+        while true {
+            var pending = false
+            if let tail = TabRun.readTail(path: path, fromOffset: fromOffset) {
+                let uses = TurnCapture.toolUses(in: tail)
+                if !uses.isEmpty {
+                    switch backend.clientToolBroker.correlate(token: token, uses: uses) {
+                    case let .ready(calls):
+                        let captured = TurnCapture.capture(tail, fromOffset: 0)
+                        return .tools(captured.text, captured.usage ?? usage, calls)
+                    case .waiting:
+                        pending = true
+                    }
+                }
+                let captured = TurnCapture.capture(tail, fromOffset: 0)
+                text = captured.text
+                if let next = captured.usage { usage = next }
+            }
+            if Date().timeIntervalSince(lastActivity) > config.pingInterval {
+                onPing()
+                lastActivity = Date()
+            }
+            let status = backend.liveStatus(tabID: tabID)
+            if status == .busy { sawBusy = true }
+            let elapsed = Date().timeIntervalSince(started)
+            if pending, status == .idle, elapsed > config.busySeenTimeout {
+                backend.clientToolBroker.failUncorrelated(token: token, message: notParked)
+                return .failed(notParked)
+            }
+            if !pending, sawBusy, status == .idle { return .text(text, usage) }
+            if !pending, !sawBusy, elapsed > config.busySeenTimeout, !text.isEmpty, status == .idle {
+                return .text(text, usage)
+            }
+            if elapsed > config.turnTimeout {
+                if pending {
+                    backend.clientToolBroker.failUncorrelated(token: token, message: notParked)
+                    return .failed(notParked)
+                }
+                return .text(text, usage)
+            }
+            await sleepPoll()
+        }
+    }
+
+    /// Client-tool SSE body, emitted once the turn resolved. No text block is opened
+    /// up front: the tool calls are the message, and a leading text block would take
+    /// index 0 before the turn's content is known.
+    private func emitClientToolStream(text: String, calls: [TurnCapture.ToolUse],
+                                      usage: AnthropicUsage, stopReason: String,
+                                      emit: (Data) -> Void) {
+        var index = 0
+        if calls.isEmpty || !text.isEmpty {
+            emit(HTTPWire.sseFrame(event: "content_block_start",
+                                   data: AnthropicWire.contentBlockStart(index: index)))
+            if !text.isEmpty {
+                emit(HTTPWire.sseFrame(event: "content_block_delta",
+                                       data: AnthropicWire.contentBlockDelta(text: text, index: index)))
+            }
+            emit(HTTPWire.sseFrame(event: "content_block_stop",
+                                   data: AnthropicWire.contentBlockStop(index: index)))
+            index += 1
+        }
+        for call in calls {
+            emit(HTTPWire.sseFrame(event: "content_block_start",
+                                   data: AnthropicWire.contentBlockStartToolUse(
+                                    id: call.id, name: call.name, index: index)))
+            emit(HTTPWire.sseFrame(event: "content_block_delta",
+                                   data: AnthropicWire.inputJSONDelta(
+                                    partial: AnthropicWire.jsonText(call.input), index: index)))
+            emit(HTTPWire.sseFrame(event: "content_block_stop",
+                                   data: AnthropicWire.contentBlockStop(index: index)))
+            index += 1
+        }
+        emit(HTTPWire.sseFrame(event: "message_delta",
+                               data: AnthropicWire.messageDelta(usage: usage, stopReason: stopReason)))
+        emit(HTTPWire.sseFrame(event: "message_stop", data: AnthropicWire.messageStop()))
     }
 
     /// The fulfilled structured result for this tab, or nil when the tripwire never

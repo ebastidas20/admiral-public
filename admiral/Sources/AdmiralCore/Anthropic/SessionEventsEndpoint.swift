@@ -17,26 +17,18 @@ public protocol SessionFeedSource: AnyObject {
 }
 
 /// `GET /sessions/<callsign>/events` — a live SSE stream of one session's prompts, messages,
-/// finished tool calls, status changes and turn stops. Guarded by the operator MCP token.
-/// The rules for what is sent live in `SessionEventFeed`; this is the socket side: auth,
+/// finished tool calls, status changes and turn stops. No API token is required.
+/// The rules for what is sent live in `SessionEventFeed`; this is the socket side:
 /// routing, the poll loop and SSE framing.
 @MainActor
 public final class SessionEventsEndpoint {
     private let source: SessionFeedSource
-    private let tokenProvider: OperatorTokenProvider
     private let pollInterval: TimeInterval
     private let pingInterval: TimeInterval
 
-    public convenience init(source: SessionFeedSource, expectedToken: String,
-                pollInterval: TimeInterval = 1.0, pingInterval: TimeInterval = 15) {
-        self.init(source: source, tokenProvider: OperatorTokenProvider(expectedToken),
-                  pollInterval: pollInterval, pingInterval: pingInterval)
-    }
-
-    public init(source: SessionFeedSource, tokenProvider: OperatorTokenProvider,
+    public init(source: SessionFeedSource,
                 pollInterval: TimeInterval = 1.0, pingInterval: TimeInterval = 15) {
         self.source = source
-        self.tokenProvider = tokenProvider
         self.pollInterval = pollInterval
         self.pingInterval = pingInterval
     }
@@ -61,13 +53,6 @@ public final class SessionEventsEndpoint {
         }
         guard request.method == "GET" else {
             _ = write(Self.error(405, "use GET /sessions/<callsign>/events")); return
-        }
-        switch OperatorAuthResult.check(request, expected: tokenProvider.token) {
-        case .ok: break
-        case .unavailable:
-            _ = write(Self.error(503, "token unavailable — the operator token is still being resolved; retry shortly")); return
-        case .unauthorized:
-            _ = write(Self.error(401, "unauthorized — Authorization: Bearer <operator-token>")); return
         }
         guard let tab = source.feedTab(callsign: callsign),
               let status = source.feedStatus(tabID: tab.id) else {

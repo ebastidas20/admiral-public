@@ -8,8 +8,8 @@ import AdmiralCore
 /// - `POST /v1/messages` → Anthropic chat
 /// - `POST /mcp` → operator MCP
 /// - `GET /sessions/<callsign>/events` → live SSE feed of one session
-/// Every route requires the operator token and refuses browser-originated requests (the
-/// endpoints check both).
+/// No route requires an API token. Browser-originated requests are still refused (the
+/// endpoints check that).
 ///
 /// Mirrors `BridgeSocketServer`: POSIX listener, per-connection blocking reads on a
 /// background queue, endpoint work on the main actor.

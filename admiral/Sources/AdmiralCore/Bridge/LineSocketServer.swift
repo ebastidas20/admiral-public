@@ -161,7 +161,8 @@ public final class LineSocketServer: @unchecked Sendable {
     }
 
     /// Write every byte, looping over partial writes. False once the peer is gone or stalls
-    /// past the send timeout.
+    /// past the send timeout. Internal so the client-tool socket can share it; that socket
+    /// must not be this server (a park cannot hold one of these connection slots).
     static func writeAll(_ fd: Int32, _ data: Data) -> Bool {
         data.withUnsafeBytes { (buffer: UnsafeRawBufferPointer) -> Bool in
             guard var ptr = buffer.baseAddress else { return true }

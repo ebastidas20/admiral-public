@@ -21,12 +21,23 @@ public struct AnthropicMessagesRequest {
     /// Non-text blocks (images, tool_result) contribute nothing.
     public let userTexts: [String]
     /// Parsed structured-output request, from `output_format` (json_schema) or a forced
-    /// single-tool `tool_choice`. nil = a plain text turn (including `tools` without a
-    /// forced choice, which stays ignored).
+    /// single-tool `tool_choice`. nil = a plain text turn. A `tools` array without a
+    /// forced choice is `clientTools`, not structured output.
     public let structuredOutput: StructuredOutputSpec?
     /// Non-nil when the structured-output fields are contradictory; the endpoint 400s
     /// with this message instead of guessing.
     public let structuredOutputError: String?
+    /// Tools the caller wants Claude to call through the `client` MCP server.
+    /// Nil when `tools` is absent, empty, or consumed by a forced tool_choice.
+    public let clientTools: [ClientToolSpec]?
+    /// Non-nil when `tools` is present but not a list of `{name, input_schema}`.
+    public let clientToolsError: String?
+    /// `tool_result` blocks on the last user message. Earlier turns' results are history.
+    public let trailingToolResults: [ClientToolResultBlock]
+    /// The last user message also has non-empty text. A continuation must not.
+    public let trailingUserHasText: Bool
+    /// A `tool_result` block was missing `tool_use_id`.
+    public let messageError: String?
 
     public static func decode(_ body: Data) -> AnthropicMessagesRequest? {
         struct Raw: Decodable {
@@ -52,9 +63,76 @@ public struct AnthropicMessagesRequest {
             }
         let (spec, specError) = structuredOutputSpec(
             outputFormat: raw.output_format, tools: raw.tools, toolChoice: raw.tool_choice)
+        let forced = spec?.delivery == .toolUse
+        let (clientTools, clientToolsError) = specError == nil
+            ? parseClientTools(raw.tools, forced: forced) : (nil, nil)
+        let lastUser = (raw.messages ?? []).last { $0.role == "user" }
+        let trailing = trailingUser(lastUser?.content)
         return AnthropicMessagesRequest(model: model, stream: raw.stream ?? false,
                                         userTexts: userTexts,
-                                        structuredOutput: spec, structuredOutputError: specError)
+                                        structuredOutput: spec, structuredOutputError: specError,
+                                        clientTools: clientTools, clientToolsError: clientToolsError,
+                                        trailingToolResults: trailing.results,
+                                        trailingUserHasText: trailing.hasText,
+                                        messageError: trailing.error)
+    }
+
+    /// `tools` without a forced `tool_choice` is the caller's tool catalog. A forced
+    /// choice already consumed the array as a structured-output schema.
+    static func parseClientTools(_ tools: JSONValue?, forced: Bool) -> ([ClientToolSpec]?, String?) {
+        if forced { return (nil, nil) }
+        guard let tools else { return (nil, nil) }
+        guard let array = tools.arrayValue else { return (nil, "tools must be an array") }
+        if array.isEmpty { return (nil, nil) }
+        var specs: [ClientToolSpec] = []
+        var names = Set<String>()
+        for tool in array {
+            guard let name = tool["name"]?.stringValue, !name.isEmpty else {
+                return (nil, "each tool needs a name")
+            }
+            guard names.insert(name).inserted else { return (nil, "duplicate tool name '\(name)'") }
+            let schema = tool["input_schema"] ?? tool["inputSchema"]
+            guard let schema, case .object = schema else {
+                return (nil, "tool '\(name)' needs an input_schema object")
+            }
+            specs.append(ClientToolSpec(name: name, description: tool["description"]?.stringValue ?? "",
+                                        inputSchema: schema))
+        }
+        return (specs, nil)
+    }
+
+    /// The last user message's tool results, and whether it also carries text.
+    static func trailingUser(_ content: JSONValue?) -> (results: [ClientToolResultBlock], hasText: Bool, error: String?) {
+        guard let content else { return ([], false, nil) }
+        switch content {
+        case let .string(text):
+            return ([], !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, nil)
+        case let .array(blocks):
+            var results: [ClientToolResultBlock] = []
+            var hasText = false
+            for block in blocks {
+                switch block["type"]?.stringValue {
+                case "text":
+                    if let text = block["text"]?.stringValue,
+                       !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        hasText = true
+                    }
+                case "tool_result":
+                    guard let id = block["tool_use_id"]?.stringValue, !id.isEmpty else {
+                        return ([], false, "tool_result is missing tool_use_id")
+                    }
+                    let isError = block["is_error"]?.boolValue ?? false
+                    results.append(ClientToolResultBlock(
+                        toolUseID: id,
+                        result: .from(content: block["content"] ?? .string(""), isError: isError)))
+                default:
+                    break
+                }
+            }
+            return (results, hasText, nil)
+        default:
+            return ([], false, nil)
+        }
     }
 
     /// Both wire forms reduce to one spec: a schema plus where the result goes.
@@ -153,15 +231,34 @@ public enum AnthropicWire {
         ])
     }
 
-    public static func contentBlockStartToolUse(id: String, name: String) -> Data {
-        encode(["type": "content_block_start", "index": 0,
+    public static func contentBlockStartToolUse(id: String, name: String, index: Int = 0) -> Data {
+        encode(["type": "content_block_start", "index": index,
                 "content_block": ["type": "tool_use", "id": id, "name": name,
                                   "input": [String: Any]()]])
     }
 
-    public static func inputJSONDelta(partial: String) -> Data {
-        encode(["type": "content_block_delta", "index": 0,
+    public static func inputJSONDelta(partial: String, index: Int = 0) -> Data {
+        encode(["type": "content_block_delta", "index": index,
                 "delta": ["type": "input_json_delta", "partial_json": partial]])
+    }
+
+    /// Assistant message whose content is the transcript's tool calls (real client tool
+    /// names, transcript `toolu_…` ids) plus any text that shared the message.
+    public static func toolUseMessage(id: String, model: String, text: String,
+                                      calls: [TurnCapture.ToolUse], usage: AnthropicUsage) -> Data {
+        var content: [[String: Any]] = []
+        if !text.isEmpty { content.append(["type": "text", "text": text]) }
+        for call in calls {
+            content.append([
+                "type": "tool_use", "id": call.id, "name": call.name,
+                "input": foundationObject(call.input),
+            ])
+        }
+        return encode([
+            "id": id, "type": "message", "role": "assistant", "model": model,
+            "content": content, "stop_reason": "tool_use", "stop_sequence": NSNull(),
+            "usage": usage.jsonObject,
+        ])
     }
 
     // MARK: SSE event payloads (the `data:` JSON of each frame)
@@ -174,18 +271,18 @@ public enum AnthropicWire {
         ]])
     }
 
-    public static func contentBlockStart() -> Data {
-        encode(["type": "content_block_start", "index": 0,
+    public static func contentBlockStart(index: Int = 0) -> Data {
+        encode(["type": "content_block_start", "index": index,
                 "content_block": ["type": "text", "text": ""]])
     }
 
-    public static func contentBlockDelta(text: String) -> Data {
-        encode(["type": "content_block_delta", "index": 0,
+    public static func contentBlockDelta(text: String, index: Int = 0) -> Data {
+        encode(["type": "content_block_delta", "index": index,
                 "delta": ["type": "text_delta", "text": text]])
     }
 
-    public static func contentBlockStop() -> Data {
-        encode(["type": "content_block_stop", "index": 0])
+    public static func contentBlockStop(index: Int = 0) -> Data {
+        encode(["type": "content_block_stop", "index": index])
     }
 
     public static func messageDelta(usage: AnthropicUsage, stopReason: String = "end_turn") -> Data {

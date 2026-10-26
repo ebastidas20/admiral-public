@@ -285,19 +285,3 @@ public enum OperatorTokenStore {
               e?.isTimeout == true ? "timed out" : "unavailable", e?.status ?? -1)
     }
 }
-
-/// Destination for the Settings "Copy token" action — the system pasteboard in the app, an
-/// in-memory fake in tests. The token goes to the clipboard only: never displayed, never on disk.
-public protocol OperatorTokenPasteboard: AnyObject {
-    func setString(_ value: String)
-}
-
-extension OperatorTokenStore {
-    /// Copy `token` to the pasteboard. Returns false (and copies nothing) when there is no token.
-    @discardableResult
-    public static func copy(token: String, to pasteboard: OperatorTokenPasteboard) -> Bool {
-        guard !token.isEmpty else { return false }
-        pasteboard.setString(token)
-        return true
-    }
-}

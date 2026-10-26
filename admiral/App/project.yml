@@ -47,6 +47,7 @@ targets:
     dependencies:
       - target: admiral-hook
       - target: admiral-bridge-mcp
+      - target: admiral-client-mcp
       - package: AdmiralCore
         product: AdmiralCore
       - package: SwiftTerm
@@ -57,7 +58,7 @@ targets:
           set -e
           HELPERS="$BUILT_PRODUCTS_DIR/$CONTENTS_FOLDER_PATH/Helpers"
           mkdir -p "$HELPERS"
-          for tool in admiral-hook admiral-bridge-mcp; do
+          for tool in admiral-hook admiral-bridge-mcp admiral-client-mcp; do
             cp "$BUILT_PRODUCTS_DIR/$tool" "$HELPERS/$tool"
             codesign --force --sign - "$HELPERS/$tool"
           done
@@ -89,6 +90,19 @@ targets:
     settings:
       base:
         PRODUCT_NAME: admiral-bridge-mcp
+        SWIFT_VERSION: "5.0"
+  admiral-client-mcp:
+    type: tool
+    platform: macOS
+    deploymentTarget: "15.0"
+    sources:
+      - path: ClientMCP
+    dependencies:
+      - package: AdmiralCore
+        product: AdmiralCore
+    settings:
+      base:
+        PRODUCT_NAME: admiral-client-mcp
         SWIFT_VERSION: "5.0"
   AdmiralUITests:
     type: bundle.ui-testing

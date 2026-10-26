@@ -144,7 +144,7 @@ TCC grants (Automation, Files & Folders) are asked once more, because the design
 **Fallback — no Developer ID available:** run `scripts/make-signing-cert.sh` (creates the self-signed
 `Admiral Local Signing`; `sign-app.sh` then uses it). The designated requirement is stable but there is no
 Team ID, so Keychain items stay bound to each build's cdhash and **prompt after every rebuild** (the
-operator-token API answers 503 `token unavailable` until you click Allow; the port is unaffected).
+the API does not wait on that prompt; the port is unaffected).
 Ad-hoc signing is refused unless `ADMIRAL_ALLOW_ADHOC=1`. An MDM-managed Mac that rejects self-signed
 certs needs the notarized Developer ID build.
 
@@ -166,7 +166,7 @@ not help: securityd logs `ACL partition mismatch: client cdhash:… ACL (cdhash:
 | `SecAccessCreate` + trusted-app list (`SecTrustedApplicationCreateFromPath`) | ACL entry lists the app (that check is not the problem) but securityd **still adds `cdhash:` to the partition list** → still prompts. The trusted-app list alone does not help |
 | change the partition list afterwards (`SecKeychainItemSetAccess`, `security set-generic-password-partition-list`) | needs the **login-keychain password** (ChangeACL prompt) — not available to the app |
 | partition list set at creation / wildcard-ish lists (`apple-tool:,apple:`, empty list) | not proven usable for a non-Apple client; testing was stopped |
-| sign with a Team-ID identity (`Developer ID Application` / `Apple Development`; tested with both) | signing works with no prompt; the code carries a Team ID, so securityd uses `teamid:<TEAM_ID>` as the client's partition. **Verified on the real operator-token item**: after one "Always Allow" the partition list gained `teamid:<TEAM_ID>`, and a second rebuild (different cdhash, same team) read the token with **no prompt** (securityd logged no `ACL partition mismatch`, the API answered 401 within 3 s) |
+| sign with a Team-ID identity (`Developer ID Application` / `Apple Development`; tested with both) | signing works with no prompt; the code carries a Team ID, so securityd uses `teamid:<TEAM_ID>` as the client's partition. **Verified on the real operator-token item**: after one "Always Allow" the partition list gained `teamid:<TEAM_ID>`, and a second rebuild (different cdhash, same team) read the token with **no prompt** (securityd logged no `ACL partition mismatch`, the token read succeeded within 3 s; the API no longer checks that token) |
 | data-protection keychain (`kSecUseDataProtectionKeychain`) | needs `keychain-access-groups`, a restricted entitlement. Probed 2026-10-05 with a Developer ID binary: an app-group entitlement alone gets `errSecMissingEntitlement` (-34018); `keychain-access-groups` without a profile is killed at launch. Works with a Developer ID provisioning profile — see "Keychain access group" below |
 | plain `SecItemAdd` from a Team-ID build (no `SecAccess`) | re-probed 2026-10-05: item added by one build, then read, updated and deleted by a rebuilt one (different cdhash, same identifier + team) with keychain UI disabled — all succeed, so no prompt was needed |
 
@@ -206,8 +206,8 @@ and the login keychain is used as above.
 (`Keychain.moveFromLoginKeychain`) before anything reads it: the operator token in
 `OperatorTokenStore.resolve`, the Jira items before `TicketsAuthStore`'s first read. It copies, reads back,
 and only then deletes the login-keychain item; if the group already holds a different value, the group's
-wins and the old item is kept. A failed move never mints a new operator token — the API answers 503
-`token unavailable` until the automatic retry or **Recheck** moves it.
+wins and the old item is kept. A failed move never mints a new operator token. The API does not
+need that token; resolution retries in the background until the move finishes.
 
 **Set up, once per Mac** (the profile is gitignored, like the cert):
 
@@ -224,51 +224,40 @@ wins and the old item is kept. A failed move never mints a new operator token �
 ## API server and the Keychain
 
 The API server (`:4141`) binds immediately at launch and never waits on the Keychain. `POST /mcp`,
-`POST /v1/messages` and `/sessions/<callsign>/events` answer **503 `token unavailable`** until the operator token has
-been resolved in the background, then work without a server restart (also on Rotate). A pending
-Keychain prompt therefore cannot take the API down or push it to another port.
+`POST /v1/messages` and `/sessions/<callsign>/events` do not require an operator token. A missing
+or wrong `Authorization` / `x-api-key` is not rejected. Cloudflare Access gates the public hostname.
+A pending Keychain prompt cannot take the API down or push it to another port.
 `AnthropicHTTPServer.stop()` now waits for the listen socket to actually close and `start()` retries
 the preferred port briefly on `EADDRINUSE` — a stop/start restart used to race the old listener's
 asynchronous close and fall back to a random port.
 
-## Operator MCP token: Keychain only
+## Operator token: Keychain only, not required by the API
 
-The operator token protects every route of the API server: `POST /mcp`, `POST /v1/messages` and
-`/sessions/<callsign>/events`. Clients send it as `Authorization: Bearer <token>`; an Anthropic SDK
-client can pass it as its API key instead (sent as `x-api-key`, e.g. `ANTHROPIC_API_KEY=<token>`).
-Get it with Settings → Bridge & API → **Copy token**. Requests carrying an `Origin` header or a
-non-loopback `Host` are refused (403) on every route, token or not. It lives **only in the
+`POST /mcp`, `POST /v1/messages` and `/sessions/<callsign>/events` succeed without
+`Authorization: Bearer` or `x-api-key`. Requests carrying an `Origin` header or a
+non-loopback `Host` are still refused (403). A token is still kept **only in the
 Keychain** (generic password, service `com.pedro.admiral.operator-mcp`, account `token`,
-AfterFirstUnlockThisDeviceOnly). There is no token file. A well-formed token is `adm_` + 32
-lowercase hex characters.
+AfterFirstUnlockThisDeviceOnly) so a legacy token file can be migrated. There is no token file
+after that migration. A well-formed token is `adm_` + 32 lowercase hex characters. Settings does
+not show it, and nothing fails if it is missing.
 
-At launch (and on **Recheck**) Admiral resolves it off the main thread, so a pending access prompt
-can never hang launch or the UI. Two waits apply:
+At launch Admiral resolves it off the main thread, so a pending access prompt
+can never hang launch, the UI, or the API. Two waits apply:
 
 - **Steady-state reads: 2 s.** Short, so nothing sits behind a prompt.
 - **First-run / migration calls: up to 120 s, in the background.** A human may have to answer a
-  Keychain access prompt. The API server does not wait for this: if the legacy token file exists it
-  starts immediately and keeps serving the file value until the migration finishes.
-- **Automatic retry.** If the 120 s wait still expires (status `unavailable (timeout)`), Admiral
-  re-runs the resolution every 15 s for about 5 minutes, so clicking **Allow** late takes effect
-  without any other action. **Recheck** also re-runs it (and resets the retry budget).
+  Keychain access prompt. The API server does not wait for this.
+- **Automatic retry.** If the 120 s wait still expires, Admiral re-runs the resolution every 15 s
+  for about 5 minutes, so clicking **Allow** late takes effect without any other action. A relaunch
+  also re-runs it.
 
 | Keychain | what happens |
 |----------|--------------|
-| well-formed | used |
+| well-formed | kept |
 | no item (or unusable value) | a new token is minted and stored in the Keychain — nothing is written to disk |
-| timeout / error | nothing is minted or overwritten; `/mcp` answers 503 `token unavailable` until **Recheck** succeeds. Status `unavailable (timeout)` / `unavailable (error)` |
+| timeout / error | nothing is minted or overwritten; the API keeps serving. Resolution retries in the background |
 
-### Settings → Bridge & API
-
-Shows `Keychain: in sync / unavailable (timeout) / unavailable
-(error)` and:
-
-- **Recheck** — re-resolve (and retry a pending migration).
-- **Copy token** — puts the token on the clipboard only. It is never displayed or written to disk,
-  and the clipboard is not cleared afterwards (paste it, then copy something else).
-- **Rotate** — mints a new token into the Keychain only (the running server uses it at once). Every client
-  must be updated.
+Settings → Bridge & API has no token controls.
 
 ### Migration from the old token file (automatic at startup)
 
@@ -277,45 +266,38 @@ If that file exists, `OperatorTokenStore.migrateLegacyTokenFile` (one function, 
 safe to delete once no install has the file) handles it:
 
 **End state: the Keychain holds the file's value (verified by an in-process read-back) and the file
-is gone. If the Keychain and the file differ, the FILE value wins** — it is the value clients
-already use, so nothing needs updating.
+is gone. If the Keychain and the file differ, the FILE value wins.**
 
 | Keychain | what happens |
 |----------|--------------|
 | equals the file | the file is deleted |
 | missing, malformed, **or a different value** | the file value overwrites the item (`SecItemUpdate`; if the update fails on the item's ACL, the item is deleted and re-added so the new item is owned by the current build), is read back in-process, and **only if the read-back equals the file value** the file is deleted |
-| prompt unanswered (timeout) | file kept and served; status `unavailable (timeout)`; retried automatically (see above) and on **Recheck** |
-| write error / read-back mismatch | file kept and served; retried on **Recheck** / next launch |
+| prompt unanswered (timeout) | file kept; retried automatically (see above) and on next launch |
+| write error / read-back mismatch | file kept; retried on next launch |
 
-There is no "out of sync" limbo and no choice to make in Settings; the status line is
-informational only.
+There is no "out of sync" limbo and no choice to make in Settings.
 
-The file is never deleted unless the in-process equality check passed. The token served never
-changes during a successful migration, so existing clients keep working. Until the Keychain
-answers, the file value (if present) is served; with neither available, the server starts after
-the background resolution.
+The file is never deleted unless the in-process equality check passed. The API does not read the
+token either way. Until the Keychain answers, the file is left in place; the server is already up.
 
 ### Recovery
 
-- **Keychain item lost** (deleted, new login keychain, new Mac): on next launch / **Recheck**
-  Admiral mints a **new** token and stores it. Update every client that used the old one —
-  MCP clients (`Authorization: Bearer <token>`), tunnel clients, and the copy kept in your
-  vault / password manager. Use **Copy token** to get the new value.
-- **Read the token yourself**: Settings → **Copy token**, or in Terminal (this may show a
-  Keychain access prompt, so don't run it from scripts):
+- **Keychain item lost** (deleted, new login keychain, new Mac): on next launch Admiral mints a
+  **new** token and stores it. Clients do not need it.
+- **Read the stored token** (optional; this may show a Keychain access prompt, so don't run it
+  from scripts):
 
 ```
 security find-generic-password -s com.pedro.admiral.operator-mcp -a token -w
 ```
 
 - **Start over**: `security delete-generic-password -s com.pedro.admiral.operator-mcp -a token`,
-  then relaunch (a new token is minted; update clients).
+  then relaunch (a new token is minted). The API does not change.
 - **Access prompt after a rebuild.** (Only with a Team-ID-less build — see "Keychain access that
   survives rebuilds".) The Keychain item's ACL partition is the build's cdhash (a
   self-signed cert has no team ID), so the first Keychain read after every new build can show a
   "Admiral wants to use … in your keychain" dialog (securityd logs `ACL partition mismatch`).
   A pending legacy-file migration waits for your answer in the background (up to 120 s, then
-  retries every 15 s for ~5 min); the API keeps serving the existing token meanwhile (the file
-  value if the legacy file still exists, otherwise `/mcp` answers 503). Click **Always Allow** and
-  the migration completes by itself; **Recheck** in Settings (or a relaunch) forces it. After a
+  retries every 15 s for ~5 min). The API is already serving and does not need the token.
+  Click **Always Allow** and the migration completes by itself; a relaunch forces it. After a
   steady-state read times out (no legacy file) the same retry applies.

@@ -22,8 +22,10 @@ import Foundation
 ///   context no longer holds it
 ///
 /// - `UserPromptSubmit` / `Stop` / `Notification` → also the chat ledger the Chat view renders
-/// - `PreToolUse` (AskUserQuestion only) → denies the built-in while the tab shows Chat, so the
-///   model uses the bridge mirror the chat can answer; otherwise it posts a native notification
+/// - `PreToolUse` (AskUserQuestion only, except an API tool tab which matches every tool and
+///   denies anything that is not `mcp__client__*`) → denies the built-in while the tab shows
+///   Chat, so the model uses the bridge mirror the chat can answer; otherwise it posts a
+///   native notification
 /// - `Notification` (permission / elicitation / idle / agent input) → also a native notification.
 ///   Claude never emits OSC 9/777 under `TERM_PROGRAM=Admiral`, so the hook is what reaches
 ///   Notification Center. Delivery is `notifier` (`HookNotifier.send` in the helper, nil = off
@@ -47,6 +49,12 @@ public enum HookDispatcher {
             return nil
 
         case "PreToolUse":
+            // API tool tabs register this for every tool and deny anything that is not a
+            // `client` MCP tool, so the park is the only way a tool runs. Every other tab
+            // registers it for AskUserQuestion only.
+            if let deny = ClientToolGuard.preToolUse(payload: payload, base: base, token: token) {
+                return deny
+            }
             // Registered for AskUserQuestion only: denied while the tab shows Chat; in a
             // Terminal tab it is allowed untouched and the user is told claude is asking.
             if let deny = ChatHookHandler.preToolUse(payload: payload, base: base) { return deny }
@@ -68,6 +76,12 @@ public enum HookDispatcher {
             // …and a tab with an output schema owes this turn's structured answer.
             if let sessionID = GoalsReminder.sessionID(in: payload) {
                 OutputSchemaStore.rearm(base: base, token: token, session: sessionID)
+            }
+            // An API tool tab is told its client tools instead of the goals reminder —
+            // the reminder would send it to `set_goal_self`, which this tab denies.
+            if let catalog = ClientToolCatalog.promptContext(base: base, token: token) {
+                let parts = [catalog, GroupReminder.context(payload: payload, base: base)].compactMap { $0 }
+                return ClientToolCatalog.promptJSON(parts.joined(separator: "\n\n"))
             }
             // …and remind the session of any goal it still owes, visibly, after any group
             // messages it has not seen (nil unless groups are on and it is in one).

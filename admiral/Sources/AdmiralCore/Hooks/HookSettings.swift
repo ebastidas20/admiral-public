@@ -1,9 +1,11 @@
 import Foundation
 
 /// Builds the per-session `settings.json` Admiral injects via `--settings`, exactly as it
-/// injects `--mcp-config` for the bridge relay. It contains ONLY a top-level `hooks` block, so
+/// injects `--mcp-config` for the bridge relay. It contains a top-level `hooks` block, so
 /// it merges non-destructively: `--settings` overrides only the keys it names, and hooks union
-/// across settings sources — the user's `permissions` and their own hooks are untouched.
+/// across settings sources. A normal tab leaves the user's `permissions` untouched. An API
+/// tool tab also writes `permissions` (`bypassPermissions` plus a built-in deny list) so a
+/// parked tool call is not a dialog the HTTP client cannot answer.
 ///
 /// **This is no longer a governance mechanism.** Governance lives in `hookd`, registered
 /// globally. Admiral injects these events because each of its own features below is
@@ -15,12 +17,13 @@ import Foundation
 /// | `Stop` | consults the structured-output tripwire (`set_structured_output`) |
 /// | `UserPromptSubmit` | records the prompt the session watchdog reads for triggers, and the chat ledger's prompts |
 /// | `Notification` | chat ledger: claude is blocked on a permission prompt |
-/// | `PreToolUse` | denies the built-in `AskUserQuestion` while the tab shows Chat |
+/// | `PreToolUse` | denies `AskUserQuestion` while the tab shows Chat (matcher on). An API tool tab matches every tool and denies anything that is not `mcp__client__*` |
 /// | `SessionStart` | after `/clear` or compaction, the goals reminder is sent in full again |
 ///
-/// `PreToolUse` is matched to `AskUserQuestion`, so no other tool call pays for a hook process,
-/// and `SessionStart` to `clear|compact`, the two sources that drop context; `PostToolUse`
-/// filters by tool internally, and the rest take none.
+/// On a normal tab `PreToolUse` is matched to `AskUserQuestion`, so no other tool call pays
+/// for a hook process. An API tool tab drops that matcher. `SessionStart` is matched to
+/// `clear|compact`, the two sources that drop context; `PostToolUse` filters by tool
+/// internally, and the rest take none.
 public enum HookSettings {
     /// The events Admiral still needs delivered. Adding one means a new Admiral feature
     /// that needs a hook — not governance, which lives elsewhere now.
@@ -40,8 +43,13 @@ public enum HookSettings {
     /// `acceptPeerMessages` adds `crossSessionInbound: "accept"`. An explicit value is the
     /// only thing that lifts claude's hold on socket messages to a `bypassPermissions`
     /// session, and this file's source outranks the user's own settings.
+    /// `clientTools` is an API tool tab. Its `PreToolUse` hook matches every tool (the
+    /// AskUserQuestion matcher would never see Bash), and `permissions` denies built-ins
+    /// and forces `bypassPermissions`. A normal tab stays hooks-only.
     public static func json(helper: String, providerEnv: [String: String]? = nil,
-                            acceptPeerMessages: Bool = false) -> [String: Any] {
+                            acceptPeerMessages: Bool = false, clientTools: Bool = false) -> [String: Any] {
+        var matchers = matchers
+        if clientTools { matchers.removeValue(forKey: "PreToolUse") }
         func entry(_ event: String) -> [String: Any] {
             var entry: [String: Any] = ["hooks": [["type": "command", "command": command(helper: helper, event: event)]]]
             if let matcher = matchers[event] { entry["matcher"] = matcher }
@@ -53,6 +61,12 @@ public enum HookSettings {
         var settings: [String: Any] = ["hooks": hooks]
         if let providerEnv, !providerEnv.isEmpty { settings["env"] = providerEnv }
         if acceptPeerMessages { settings["crossSessionInbound"] = "accept" }
+        if clientTools {
+            settings["permissions"] = [
+                "defaultMode": "bypassPermissions",
+                "deny": ClientToolGuard.builtInDenyList,
+            ]
+        }
         return settings
     }
 
@@ -67,10 +81,11 @@ public enum HookSettings {
     /// write failure must degrade to "no hook," never break the session.
     @discardableResult
     public static func write(helper: String, providerEnv: [String: String]? = nil,
-                             acceptPeerMessages: Bool = false, to url: URL) -> Bool {
+                             acceptPeerMessages: Bool = false, clientTools: Bool = false,
+                             to url: URL) -> Bool {
         guard let data = try? JSONSerialization.data(
             withJSONObject: json(helper: helper, providerEnv: providerEnv,
-                                 acceptPeerMessages: acceptPeerMessages),
+                                 acceptPeerMessages: acceptPeerMessages, clientTools: clientTools),
             options: .withoutEscapingSlashes
         ) else { return false }
         try? FileManager.default.createDirectory(

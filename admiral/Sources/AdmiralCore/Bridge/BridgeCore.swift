@@ -278,6 +278,7 @@ public final class BridgeCore {
     /// sanitizes it like every other typed message.
     public func inject(to: String, text: String) -> BridgeResult {
         guard let target = manager.session(forCallsign: to) else { return .failure("no station @\(to)") }
+        if let refused = refuseIfClientToolsOutstanding(target) { return refused }
         manager.inject(target.id, text: text)
         return .success("injected into @\(target.displayTitle)")
     }
@@ -296,6 +297,7 @@ public final class BridgeCore {
     /// Operator key chords into a session (`shift+left`, `ctrl+c`, …) — raw PTY bytes, no Enter.
     public func sendKeys(to: String, keys: String) -> BridgeResult {
         guard let target = manager.session(forCallsign: to) else { return .failure("no station @\(to)") }
+        if let refused = refuseIfClientToolsOutstanding(target) { return refused }
         let encoded: String
         do { encoded = try TerminalKeyChord.encode(keys) }
         catch { return .failure(String(describing: error)) }
@@ -303,6 +305,14 @@ public final class BridgeCore {
             return .failure("@\(target.displayTitle): no live terminal")
         }
         return .success("sent keys to @\(target.displayTitle): \(keys)")
+    }
+
+    /// A parked client tool call owns the turn. Typing or sending keys would land in
+    /// the input box while Claude is blocked inside the `client` MCP server.
+    private func refuseIfClientToolsOutstanding(_ target: AgentSession) -> BridgeResult? {
+        guard manager.clientToolBroker.hasOutstanding(token: target.token) else { return nil }
+        return .failure("@\(target.displayTitle) has a client tool call outstanding; "
+            + "refusing until tool_result arrives")
     }
 
     public func setGoal(fromToken: String, to: String, goals: [String]) -> BridgeResult {

@@ -33,6 +33,9 @@ final class AppModel: ObservableObject {
     var holdsSchedules: Bool { schedulerLock != nil }
     let mcp: MCPServer
     private var bridgeSocket: BridgeSocketServer?
+    /// Parks `tools/call` from API tool tabs. Same broker `SessionManager` hands the
+    /// Anthropic endpoint; the `client` MCP process is the only other side of this socket.
+    private var clientToolSocket: ClientToolSocketServer?
     /// Posts claude's terminal notifications (OSC 9 / 777) to macOS Notification Center.
     let notifications = NotificationService()
     /// Persists Settings → Watchdog (trigger rules + thresholds). Profile-aware like the
@@ -334,14 +337,13 @@ final class AppModel: ObservableObject {
         guard config.features.apiServer else { return }
         let enable = apiServerPort == nil
         if enable { startAPIServer() } else { stopAPIServer() }
-        // Intent, not outcome: a start may complete asynchronously (token resolution).
+        // Intent, not outcome: a bind can still fail (port unavailable).
         UserDefaults.standard.set(enable, forKey: Self.apiServerEnabledKey)
     }
 
-    /// The API server binds its port IMMEDIATELY and never waits for the Keychain. The operator
-    /// token is resolved in the background (`recheckOperatorToken`); until it arrives every route
-    /// (`/v1/messages`, `/mcp`, session events) answers `503 token unavailable`, and when it arrives it is
-    /// swapped into `operatorTokenProvider` with no server restart (so no port churn).
+    /// The API server binds its port immediately and never waits for the Keychain. Routes do not
+    /// require an operator token. The token is still resolved in the background
+    /// (`recheckOperatorToken`) and kept in memory; that work never gates a request.
     private func startAPIServer() {
         guard config.features.apiServer else { return }
         // A legacy token file is a fast local read that never blocks: serve it straight away.
@@ -355,11 +357,11 @@ final class AppModel: ObservableObject {
 
     private func launchAPIServer() {
         guard apiServer == nil else { return }
-        let mcpEndpoint = OperatorMCPEndpoint(mcp: mcp, tokenProvider: operatorTokenProvider)
+        let mcpEndpoint = OperatorMCPEndpoint(mcp: mcp)
         let server = AnthropicHTTPServer(
-            endpoint: AnthropicEndpoint(backend: sessions, tokenProvider: operatorTokenProvider),
+            endpoint: AnthropicEndpoint(backend: sessions),
             mcpEndpoint: mcpEndpoint,
-            eventsEndpoint: SessionEventsEndpoint(source: sessions, tokenProvider: operatorTokenProvider)
+            eventsEndpoint: SessionEventsEndpoint(source: sessions)
         )
         guard let port = server.start(preferredPort: apiServerPreferredPort) else { return }
         apiServer = server
@@ -372,31 +374,14 @@ final class AppModel: ObservableObject {
         apiServerPort = nil
     }
 
-    // MARK: - Operator MCP token (served on the same :4141 API server at POST /mcp)
+    // MARK: - Operator token (Keychain; not required by any route)
 
-    /// Bearer token for `POST /mcp` on the API server. Lives only in the Keychain; this is the
-    /// in-memory copy the server checks. Deliberately NOT published — no view can show it.
+    /// Operator token kept in the Keychain. Routes do not check it. Deliberately NOT published —
+    /// no view can show it.
     private let operatorTokenProvider = OperatorTokenProvider()
     private var operatorMCPToken: String {
         get { operatorTokenProvider.token }
         set { operatorTokenProvider.token = newValue }
-    }
-
-    /// Settings → Rotate: a fresh token into the Keychain only (off-main, verified); the running
-    /// API server picks it up immediately (no restart). Clients must be updated.
-    func rotateOperatorMCPToken() {
-        operatorTokenMirrorStatus = .checking
-        operatorTokenRetryGeneration += 1
-        operatorTokenRetryAttempts = 0
-        runTokenWork({ OperatorTokenStore.rotateToken(base: $0, mirror: $2) }) { [weak self] in
-            self?.applyOperatorResolution($0)
-        }
-    }
-
-    /// Settings → Copy token: clipboard only. Returns false when there is no token to copy.
-    @discardableResult
-    func copyOperatorToken() -> Bool {
-        OperatorTokenStore.copy(token: operatorMCPToken, to: SystemOperatorTokenPasteboard())
     }
 
     /// The token lives in the Keychain; a legacy plaintext file is migrated into it at startup
@@ -612,6 +597,8 @@ final class AppModel: ObservableObject {
     /// exported as `ADMIRAL_SOCKET`, to point each session's injected relay at the right
     /// instance. Read by Settings → Bridge & API for display.
     let bridgeSocketPath: String
+    /// Unix socket API tool tabs park `tools/call` on. Profile-aware, beside the bridge socket.
+    let clientToolSocketPath: String
     /// `start()` runs once. The window's `.onAppear` re-fires when the window is closed and
     /// reopened (the app stays alive), and re-running the restore loop would duplicate sessions.
     private var started = false
@@ -716,6 +703,7 @@ final class AppModel: ObservableObject {
         let realRecipe = (testExe == nil && !args.contains("-realDirectSpawn"))
         let hookHelper: String? = realRecipe ? AppModel.hookHelperPath() : nil
         let bridgeMCPCommand: String? = realRecipe ? AppModel.bridgeMCPCommand() : nil
+        let clientMCPCommand: String? = realRecipe ? AppModel.clientMCPCommand() : nil
         // Per-instance bridge socket: the default path, or a profile-specific one so a dev
         // instance's sessions reach ITS bridge, not the default instance's. Exported into the
         // session env so the injected admiral-bridge-mcp relay connects to the right socket.
@@ -723,6 +711,10 @@ final class AppModel: ObservableObject {
             .map { AdmiralPaths.defaultSupportDir.appendingPathComponent("bridge-\($0).sock").path }
             ?? BridgeSocketServer.defaultPath
         self.bridgeSocketPath = bridgeSocketPath
+        let clientToolSocketPath = self.profile
+            .map { AdmiralPaths.defaultSupportDir.appendingPathComponent("client-tools-\($0).sock").path }
+            ?? ClientToolSocketServer.defaultPath
+        self.clientToolSocketPath = clientToolSocketPath
         var overrides: [String: String] = [:]
         overrides["ADMIRAL_SOCKET"] = bridgeSocketPath
 
@@ -743,6 +735,8 @@ final class AppModel: ObservableObject {
             openSessionsStore: OpenSessionsStore(defaults: storeDefaults),
             hookHelper: hookHelper,
             bridgeMCPCommand: bridgeMCPCommand,
+            clientMCPCommand: clientMCPCommand,
+            clientToolSocketPath: clientToolSocketPath,
             touchedReposStore: TouchedReposStore(defaults: storeDefaults),
             // Re-read per call (like the recipe above), so a provider edited in CC Switch —
             // a rotated token, a fixed base URL — reaches the next reload or restore. The
@@ -1454,6 +1448,11 @@ final class AppModel: ObservableObject {
         let server = BridgeSocketServer(mcp: mcp, path: bridgeSocketPath)
         server.start()
         bridgeSocket = server
+        // The client-tool broker is a different socket on purpose: a park must not occupy
+        // a bridge connection slot, and it must not hop to the main actor to wait.
+        let client = ClientToolSocketServer(path: clientToolSocketPath, broker: sessions.clientToolBroker)
+        client.start()
+        clientToolSocket = client
     }
 
     // MARK: - Chat view
@@ -1941,6 +1940,15 @@ final class AppModel: ObservableObject {
     /// the helper isn't present, so SessionManager skips the injection rather than break launch.
     static func bridgeMCPCommand() -> String? {
         let helper = Bundle.main.bundleURL.appendingPathComponent("Contents/Helpers/admiral-bridge-mcp").path
+        guard FileManager.default.isExecutableFile(atPath: helper) else { return nil }
+        return helper
+    }
+
+    /// Path to the bundled client-tool MCP relay. Injected only on API tool tabs, as the
+    /// `client` server. nil when the helper isn't present, so those tabs launch without it
+    /// rather than pointing `--mcp-config` at a missing binary.
+    static func clientMCPCommand() -> String? {
+        let helper = Bundle.main.bundleURL.appendingPathComponent("Contents/Helpers/admiral-client-mcp").path
         guard FileManager.default.isExecutableFile(atPath: helper) else { return nil }
         return helper
     }

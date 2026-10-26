@@ -6,7 +6,7 @@ import AdmiralCore
 /// (`ButtonRole.close`): every setting applies as it changes, so closing loses nothing.
 /// Wired: Appearance (theme), Sessions (launch options), Watchdog (goals + the watchdog's rules),
 /// Tickets (patterns + Jira connector), Bridge & API (server/port/scratch tabs), Notifications,
-/// Experimental Features (the config's feature flags). General and Shortcuts remain placeholders.
+/// Experimental Features (the config's feature flags). Shortcuts remains a placeholder.
 ///
 /// There is no Governance section: hook governance lives in `hookd` (a separate repo),
 /// configured by editing its Python rules, not from this window.
@@ -15,13 +15,13 @@ struct SettingsWindow: View {
     @Environment(\.dismiss) private var dismiss
     @State private var section: SettingsSection
 
-    /// Opens on `section`: General from the menu, any section from `-probeSheets`.
-    init(section: SettingsSection = .general) {
+    /// Opens on `section`: Appearance from the menu, any section from `-probeSheets`.
+    init(section: SettingsSection = .appearance) {
         _section = State(initialValue: section)
     }
 
     enum SettingsSection: String, CaseIterable, Identifiable {
-        case general = "General", appearance = "Appearance", sessions = "Sessions",
+        case appearance = "Appearance", sessions = "Sessions",
              watchdog = "Watchdog", tickets = "Tickets", bridge = "Bridge & API",
              notifications = "Notifications", experimental = "Experimental Features",
              shortcuts = "Shortcuts"
@@ -30,7 +30,6 @@ struct SettingsWindow: View {
         /// The list row's symbol, and the line under the section's title.
         var face: (icon: String, summary: String) {
             switch self {
-            case .general: return ("gearshape", "Coming soon.")
             case .appearance: return ("circle.lefthalf.filled", "How Admiral looks.")
             case .sessions: return ("terminal", "How new tabs launch, and what bash tabs reopen.")
             case .watchdog: return ("eye", "Goal nudges, the watchdog, and the rules it follows.")
@@ -85,7 +84,7 @@ struct SettingsWindow: View {
         }
         .background(Theme.sidebarBackground)
         .onAppear {
-            if !sections.contains(section) { section = .general }
+            if !sections.contains(section) { section = sections.first ?? .appearance }
         }
     }
 

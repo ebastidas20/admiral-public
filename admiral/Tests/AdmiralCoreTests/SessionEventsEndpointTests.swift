@@ -44,8 +44,7 @@ final class SessionEventsEndpointTests: XCTestCase {
     /// that write (it returns false), which is what ends the loop.
     private func stream(_ source: FakeFeedSource, _ req: HTTPRequest,
                         stopAfter: @escaping (String) -> Bool) async -> String {
-        let endpoint = SessionEventsEndpoint(source: source, expectedToken: "secret",
-                                             pollInterval: 0.001, pingInterval: 60)
+        let endpoint = SessionEventsEndpoint(source: source, pollInterval: 0.001, pingInterval: 60)
         var out = ""
         await endpoint.handle(req) { data in
             let chunk = String(decoding: data, as: UTF8.self)
@@ -55,23 +54,16 @@ final class SessionEventsEndpointTests: XCTestCase {
         return out
     }
 
-    func testTokenUnavailableGives503() async {
-        let endpoint = SessionEventsEndpoint(source: FakeFeedSource([(.idle, [])]),
-                                             tokenProvider: OperatorTokenProvider(), pollInterval: 0.001)
-        var out = ""
-        await endpoint.handle(request(token: "secret")) { out += String(decoding: $0, as: UTF8.self); return true }
-        XCTAssertTrue(out.hasPrefix("HTTP/1.1 503"), out)
-    }
-
-    func testRefusesWithoutTheOperatorToken() async {
+    func testStreamsWithoutAnOperatorToken() async {
         let out = await stream(FakeFeedSource([(.idle, [])]), request(token: nil)) { _ in true }
-        XCTAssertTrue(out.hasPrefix("HTTP/1.1 401"), out)
-        XCTAssertFalse(out.contains("text/event-stream"))
+        XCTAssertTrue(out.hasPrefix("HTTP/1.1 200"), out)
+        XCTAssertTrue(out.contains("text/event-stream"), out)
         let wrong = await stream(FakeFeedSource([(.idle, [])]), request(token: "nope")) { _ in true }
-        XCTAssertTrue(wrong.hasPrefix("HTTP/1.1 401"), wrong)
+        XCTAssertTrue(wrong.hasPrefix("HTTP/1.1 200"), wrong)
+        XCTAssertTrue(wrong.contains("text/event-stream"), wrong)
     }
 
-    /// A browser page (Origin) or a DNS-rebound hostname is refused even with the token.
+    /// A browser page (Origin) or a DNS-rebound hostname is refused. Loopback needs no token.
     func testBrowserOriginatedRequestIsRefused403() async {
         for extra in [["origin": "https://evil.example"], ["host": "evil.example:4141"]] {
             var req = request()
@@ -82,7 +74,7 @@ final class SessionEventsEndpointTests: XCTestCase {
             XCTAssertFalse(out.contains("text/event-stream"))
         }
         let loopback = HTTPRequest(method: "GET", path: "/sessions/scout/events",
-                                   headers: ["authorization": "Bearer secret", "host": "127.0.0.1:4141"], body: Data())
+                                   headers: ["host": "127.0.0.1:4141"], body: Data())
         let ok = await stream(FakeFeedSource([(.idle, [])]), loopback) { _ in true }
         XCTAssertTrue(ok.hasPrefix("HTTP/1.1 200"), ok)
     }
@@ -156,7 +148,7 @@ final class SessionEventsEndpointTests: XCTestCase {
             func feedOutput(tabID: UUID) -> StructuredOutputState? { nil }
             func feedRedactedOutput(tabID: UUID) -> [RedactedOutput]? { nil }
         }
-        let endpoint = SessionEventsEndpoint(source: Gone(), expectedToken: "secret", pollInterval: 0.001)
+        let endpoint = SessionEventsEndpoint(source: Gone(), pollInterval: 0.001)
         var out = ""
         await endpoint.handle(request()) { out += String(decoding: $0, as: UTF8.self); return true }
         XCTAssertTrue(out.hasSuffix("event: closed\ndata: {}\n\n"), out)

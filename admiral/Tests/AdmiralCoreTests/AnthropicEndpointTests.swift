@@ -8,25 +8,36 @@ final class FakeAnthropicBackend: AnthropicBackend {
     var tabs: [String: AnthropicTab] = [:]
     var paths: [UUID: String] = [:]
     var tabsBySession: [String: AnthropicTab] = [:]
-    private(set) var created: [(sid: String, cwd: String)] = []
+    private(set) var created: [(sid: String, cwd: String, model: String?, clientTools: [ClientToolSpec]?)] = []
     /// Override creation (nil result = simulate failure). Default registers a managed tab.
-    var createResult: ((String, String) -> AnthropicTab?)?
+    var createResult: ((String, String, String?, [ClientToolSpec]?) -> AnthropicTab?)?
     var statuses: [SessionStatus] = [.idle]
     private(set) var injected: [(id: UUID, text: String)] = []
     var onPoll: (Int) -> Void = { _ in }   // called with the liveStatus call count
     var onInject: (Int) -> Void = { _ in } // called with the inject call count
     private var polls = 0
+    var clientToolTabs: Set<UUID> = []
+    private(set) var installedTools: [UUID: [ClientToolSpec]] = [:]
+    let clientToolBroker = ClientToolBroker()
 
     func tab(named name: String) -> AnthropicTab? {
         tabs.first { $0.key.caseInsensitiveCompare(name) == .orderedSame }?.value
     }
     func tab(sessionID: String) -> AnthropicTab? { tabsBySession[sessionID.lowercased()] }
-    func createScratchTab(sessionID: String, cwd: String) -> AnthropicTab? {
-        created.append((sessionID, cwd))
-        if let make = createResult { return make(sessionID, cwd) }
+    func createScratchTab(sessionID: String, cwd: String, model: String?,
+                          clientTools: [ClientToolSpec]?) -> AnthropicTab? {
+        created.append((sessionID, cwd, model, clientTools))
+        if let make = createResult { return make(sessionID, cwd, model, clientTools) }
         let tab = AnthropicTab(id: UUID(), name: "quirky_otter", isManaged: true)
         tabsBySession[sessionID.lowercased()] = tab
+        if clientTools != nil { clientToolTabs.insert(tab.id) }
         return tab
+    }
+    func sessionToken(tabID: UUID) -> String? { "token-\(tabID.uuidString)" }
+    func clientToolsEnabled(tabID: UUID) -> Bool { clientToolTabs.contains(tabID) }
+    func installClientTools(tabID: UUID, tools: [ClientToolSpec]) {
+        guard clientToolTabs.contains(tabID) else { return }
+        installedTools[tabID] = tools
     }
     func inject(tabID: UUID, text: String) {
         injected.append((tabID, text))
@@ -70,13 +81,12 @@ final class AnthropicEndpointTests: XCTestCase {
         pollInterval: 0.01, pingInterval: 10,
         injectReadyTimeout: 0.05, injectVerifyTimeout: 0.02, injectMaxAttempts: 3)
 
-    /// The operator token every request sends unless a test says otherwise.
+    /// A key some requests still send. The server does not require it.
     static let apiToken = "adm_endpoint_test"
-    private let tokens = OperatorTokenProvider(AnthropicEndpointTests.apiToken)
 
     override func setUp() async throws {
         backend = FakeAnthropicBackend()
-        endpoint = AnthropicEndpoint(backend: backend, tokenProvider: tokens, config: Self.cfg)
+        endpoint = AnthropicEndpoint(backend: backend, config: Self.cfg)
         tabID = UUID()
         backend.tabs["Worker"] = AnthropicTab(id: tabID, name: "Worker", isManaged: true)
         transcript = FileManager.default.temporaryDirectory
@@ -202,22 +212,84 @@ final class AnthropicEndpointTests: XCTestCase {
     }
     // MARK: operator token
 
-    /// Every request types into a tab: without the operator token nothing is injected.
-    func testMissingOrWrongTokenIs401AndNothingIsTyped() async {
-        for key in [nil, "", "adm_wrong", Self.apiToken + "x"] as [String?] {
-            let r = await post(requestBody(["q"]), apiKey: key)
-            XCTAssertEqual(r.status, 401, key ?? "nil")
-            XCTAssertEqual(errorType(r.json), "authentication_error")
-            let bySID = await post(requestBody(["q"]), tab: nil, apiKey: key, headers: [
-                "admiral_session_id": UUID().uuidString,
-                "admiral_cwd": FileManager.default.temporaryDirectory.path])
-            XCTAssertEqual(bySID.status, 401, key ?? "nil")
+    /// No API token is required: a missing, empty, or wrong key still runs the turn.
+    func testRequestSucceedsWithNoOrWrongToken() async {
+        for key in [nil, "", "adm_wrong"] as [String?] {
+            let backend = FakeAnthropicBackend()
+            let endpoint = AnthropicEndpoint(backend: backend, config: Self.cfg)
+            let tabID = UUID()
+            backend.tabs["Worker"] = AnthropicTab(id: tabID, name: "Worker", isManaged: true)
+            let transcript = FileManager.default.temporaryDirectory
+                .appendingPathComponent("endpoint-notoken-\(UUID().uuidString).jsonl")
+            try! Data().write(to: transcript)
+            backend.paths[tabID] = transcript.path
+            backend.onInject = { n in
+                guard n == 1 else { return }
+                let handle = try! FileHandle(forWritingTo: transcript)
+                handle.seekToEndOfFile()
+                handle.write(Data("{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"echoed\"}}\n".utf8))
+                try! handle.close()
+            }
+            backend.onPoll = { n in
+                guard n == 2 else { return }
+                let line = "{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"ok\"}],\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}}\n"
+                let handle = try! FileHandle(forWritingTo: transcript)
+                handle.seekToEndOfFile(); handle.write(Data(line.utf8)); try! handle.close()
+            }
+            var headers = ["admiral_tab_name": "Worker"]
+            if let key { headers["x-api-key"] = key }
+            let request = HTTPRequest(method: "POST", path: "/v1/messages", headers: headers,
+                                      body: Data(requestBody(["q"]).utf8))
+            var collected = Data()
+            await endpoint.handle(request) { collected.append($0) }
+            let text = String(data: collected, encoding: .utf8)!
+            XCTAssertTrue(text.hasPrefix("HTTP/1.1 200"), "\(key ?? "nil"): \(text.prefix(120))")
+            XCTAssertEqual(backend.injected.count, 1, key ?? "nil")
         }
-        XCTAssertTrue(backend.injected.isEmpty)
-        XCTAssertTrue(backend.created.isEmpty, "no scratch tab is made for an unauthenticated caller")
     }
 
-    /// The Bearer form works as well as x-api-key (the SDKs send one or the other).
+    /// A session-id route also runs with no token, and it does create the scratch tab.
+    func testSessionRouteSucceedsWithoutAToken() async {
+        let backend = FakeAnthropicBackend()
+        let endpoint = AnthropicEndpoint(backend: backend, config: Self.cfg)
+        let transcript = FileManager.default.temporaryDirectory
+            .appendingPathComponent("endpoint-nosid-\(UUID().uuidString).jsonl")
+        try! Data().write(to: transcript)
+        backend.createResult = { _, _, _, _ in
+            let tab = AnthropicTab(id: UUID(), name: "scratch", isManaged: true)
+            backend.paths[tab.id] = transcript.path
+            return tab
+        }
+        backend.statuses = [.busy, .idle]
+        backend.onInject = { n in
+            guard n == 1 else { return }
+            let handle = try! FileHandle(forWritingTo: transcript)
+            handle.seekToEndOfFile()
+            handle.write(Data("{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"echoed\"}}\n".utf8))
+            try! handle.close()
+        }
+        backend.onPoll = { n in
+            guard n == 1 else { return }
+            let line = "{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"ok\"}],\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}}\n"
+            let handle = try! FileHandle(forWritingTo: transcript)
+            handle.seekToEndOfFile(); handle.write(Data(line.utf8)); try! handle.close()
+        }
+        let request = HTTPRequest(
+            method: "POST", path: "/v1/messages",
+            headers: [
+                "admiral_session_id": UUID().uuidString,
+                "admiral_cwd": FileManager.default.temporaryDirectory.path,
+            ],
+            body: Data(requestBody(["q"]).utf8))
+        var collected = Data()
+        await endpoint.handle(request) { collected.append($0) }
+        let text = String(data: collected, encoding: .utf8)!
+        XCTAssertTrue(text.hasPrefix("HTTP/1.1 200"), String(text.prefix(120)))
+        XCTAssertEqual(backend.created.count, 1)
+        XCTAssertEqual(backend.injected.count, 1)
+    }
+
+    /// A Bearer header is ignored, not required: the turn still runs.
     func testBearerTokenIsAccepted() async {
         echoUserOnInject()
         backend.onPoll = { [self] n in
@@ -226,14 +298,6 @@ final class AnthropicEndpointTests: XCTestCase {
         let r = await post(requestBody(["q"]), apiKey: nil,
                            headers: ["authorization": "Bearer \(Self.apiToken)"])
         XCTAssertEqual(r.status, 200)
-    }
-
-    /// Before the Keychain has supplied the token, every request is 503 — never open.
-    func testNoTokenYetIs503() async {
-        tokens.token = ""
-        let r = await post(requestBody(["q"]))
-        XCTAssertEqual(r.status, 503)
-        XCTAssertTrue(backend.injected.isEmpty)
     }
 
     // MARK: origin / host guard
@@ -345,7 +409,7 @@ final class AnthropicEndpointTests: XCTestCase {
         // gets a wide one; the busy→idle edge at poll 6 still ends it at once.
         var cfg = Self.cfg
         cfg.turnTimeout = 5
-        endpoint = AnthropicEndpoint(backend: backend, tokenProvider: tokens, config: cfg)
+        endpoint = AnthropicEndpoint(backend: backend, config: cfg)
         backend.statuses = [.idle, .busy, .busy, .busy, .busy, .idle]
         backend.onPoll = { [self] n in
             if n == 3 { appendTranscript(assistantLine("first", usage: (1, 1))) }
@@ -438,7 +502,7 @@ final class AnthropicEndpointTests: XCTestCase {
     }
 
     func testUnknownSIDCreatesScratchTab() async {
-        backend.createResult = { [self] _, _ in
+        backend.createResult = { [self] _, _, _, _ in
             let tab = AnthropicTab(id: UUID(), name: "temp", isManaged: true)
             backend.tabsBySession[sid] = tab
             backend.paths[tab.id] = transcript.path   // reuse the test transcript
@@ -465,7 +529,7 @@ final class AnthropicEndpointTests: XCTestCase {
     }
 
     func testCreationFailureIs500() async {
-        backend.createResult = { _, _ in nil }
+        backend.createResult = { _, _, _, _ in nil }
         let r = await postSID(requestBody(["q"]), sid: sid)
         XCTAssertEqual(r.status, 500)
         XCTAssertEqual(errorType(r.json), "api_error")

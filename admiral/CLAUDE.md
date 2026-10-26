@@ -81,7 +81,7 @@ Then **always** build/sign via `scripts/sign-app.sh <app>` / `scripts/release.sh
 - Order: `ADMIRAL_SIGN_ID` → `Admiral Local Signing` → fail (ad-hoc only with `ADMIRAL_ALLOW_ADHOC=1`).
   Build from a shell that has read your rc, or the Developer ID is not found.
 - **Fallback with no Developer ID:** `scripts/make-signing-cert.sh` creates the self-signed `Admiral Local Signing`
-  (stable DR, no Team ID → Keychain prompts after each rebuild; the API answers 503 `token unavailable` meanwhile).
+  (stable DR, no Team ID → Keychain prompts after each rebuild; the API does not wait on that prompt).
 - **First Team-ID build on an existing install:** one Keychain prompt per old item — click **Always Allow** once.
   TCC grants are re-asked once (new designated requirement).
 - Full detail: [`docs/signing.md`](docs/signing.md).
@@ -215,7 +215,10 @@ exactly what `commission` injected, then remove it. Use a scratch dir under your
   `SessionStart` (matcher `clear|compact` only: forgets that marker so the reminder goes out
   in full again), and the **Chat view**'s three:
   `UserPromptSubmit`/`Stop`/`Notification` append to the chat ledger, and `PreToolUse`
-  (matcher `AskUserQuestion` only) denies the built-in while the tab shows Chat. **A hook's plain stdout is never
+  (matcher `AskUserQuestion` only) denies the built-in while the tab shows Chat. An API
+  tool tab (`POST /v1/messages` with `tools`, see `docs/client-tools.md`) registers that
+  hook with no matcher and denies every tool that is not `mcp__client__*`; its
+  UserPromptSubmit context is the client catalog instead of the goals reminder. **A hook's plain stdout is never
   shown in the transcript** — it reaches the model and nobody else. Anything the *user* must
   see goes in `systemMessage`; the model's half is `hookSpecificOutput.additionalContext`
   (UserPromptSubmit) or `reason` (Stop). `GoalsReminder` hand-builds both, so the bytes are

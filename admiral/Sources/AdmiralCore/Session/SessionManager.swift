@@ -60,6 +60,14 @@ public final class SessionManager: ObservableObject {
     /// `--mcp-config` so claude reaches THIS instance's bridge natively (nil = no injection;
     /// set only by the app for the zsh/claude recipe).
     private let bridgeMCPCommand: String?
+    /// Path to `admiral-client-mcp`, added as the `client` server on API tool tabs only.
+    private let clientMCPCommand: String?
+    /// Unix socket the client MCP process parks `tools/call` on. Nil in tests that don't
+    /// start the broker socket; the MCP config then omits `ADMIRAL_CLIENT_SOCKET`.
+    private let clientToolSocketPath: String?
+    /// Parks client `tools/call`s for every tab. The HTTP endpoint and the broker socket
+    /// share this instance; it is not the bridge MCP server.
+    public let clientToolBroker = ClientToolBroker()
     /// Persists each session's touched-repo footprint across relaunch (keyed by session id),
     /// so a resumed session restores the repos it had written to instead of starting empty.
     private let touchedReposStore: TouchedReposStore
@@ -99,6 +107,8 @@ public final class SessionManager: ObservableObject {
         supportDir: URL = AdmiralPaths.defaultSupportDir,
         hookHelper: String? = nil,
         bridgeMCPCommand: String? = nil,
+        clientMCPCommand: String? = nil,
+        clientToolSocketPath: String? = nil,
         touchedReposStore: TouchedReposStore = TouchedReposStore(),
         providerResolver: ((String) -> CCSwitchProvider?)? = nil
     ) {
@@ -114,6 +124,8 @@ public final class SessionManager: ObservableObject {
         self.supportDir = supportDir
         self.hookHelper = hookHelper
         self.bridgeMCPCommand = bridgeMCPCommand
+        self.clientMCPCommand = clientMCPCommand
+        self.clientToolSocketPath = clientToolSocketPath
         self.touchedReposStore = touchedReposStore
         self.providerResolver = providerResolver
     }
@@ -225,13 +237,17 @@ public final class SessionManager: ObservableObject {
     /// - `model`/`effort`: the claude model (`--model`, a `ScheduleModel` alias) and effort
     ///   level (`--effort`, a `ScheduleEffort` value) this session runs with. Nil means no
     ///   flag, so claude's own defaults decide. Only a managed claude session can carry them.
+    /// - `clientTools`: an API tool tab. Before spawn, the absolute cwd is marked trusted
+    ///   in `~/.claude.json` so Claude Code does not block on the workspace trust dialog.
+    ///   Nil (every other tab) does not touch that file.
     @discardableResult
     public func commission(
         callsign: String, cwd: String, agentType: AgentType? = nil,
         sessionID: String? = nil, resume: Bool = false,
         teamName: String? = nil, scratch: Bool = false,
         provider: CCSwitchProvider? = nil,
-        model: String? = nil, effort: String? = nil
+        model: String? = nil, effort: String? = nil,
+        clientTools: [ClientToolSpec]? = nil
     ) -> AgentSession {
         // Fall back to the manager's configured recipe (matches `executablePath`). The
         // provider is consulted fresh so launch-options edits reach the next commission.
@@ -372,7 +388,8 @@ public final class SessionManager: ObservableObject {
             // refuse to launch on a missing path, turning a best-effort hook into a dead session.
             let accept = acceptPeerMessages()
             if HookSettings.write(helper: hookHelper, providerEnv: provider?.env,
-                                  acceptPeerMessages: accept, to: settingsURL) {
+                                  acceptPeerMessages: accept, clientTools: clientTools != nil,
+                                  to: settingsURL) {
                 args[args.count - 1] += " --settings \(ShellQuote.single(settingsURL.path))"
                 session.acceptsPeerMessages = accept
                 // Recorded only now: the provider is real once its env is in the file claude
@@ -385,13 +402,41 @@ public final class SessionManager: ObservableObject {
 
         // Register Admiral's own bridge MCP for this session (same as we inject the hook), so
         // it reaches THIS instance's bridge natively — no external bridge dependency.
-        // Non-strict: the user's other MCP servers still load. Only inject if the config file
-        // was actually written, so a failure degrades to "no bridge" rather than a dead launch.
-        if managesSessionID, let bridgeMCPCommand, !args.isEmpty {
+        // Non-strict for a normal tab: the user's other MCP servers still load. An API tool
+        // tab also gets the `client` server and, below, `--strict-mcp-config`. Only inject
+        // if the config file was actually written, so a failure degrades to "no bridge"
+        // rather than a dead launch.
+        let catalogURL = AdmiralPaths.clientToolsFile(base: supportDir, token: session.token)
+        var clientServer: BridgeMCPConfig.ClientServer?
+        if managesSessionID, clientTools != nil, let clientMCPCommand {
+            var mcpEnv = [
+                "ADMIRAL_SESSION": session.token,
+                "ADMIRAL_CLIENT_CATALOG": catalogURL.path,
+            ]
+            if let clientToolSocketPath {
+                mcpEnv["ADMIRAL_CLIENT_SOCKET"] = clientToolSocketPath
+                env["ADMIRAL_CLIENT_SOCKET"] = clientToolSocketPath
+            }
+            env["ADMIRAL_CLIENT_CATALOG"] = catalogURL.path
+            env["MCP_TOOL_TIMEOUT"] = String(ClientToolLimits.mcpTimeoutMilliseconds)
+            clientServer = BridgeMCPConfig.ClientServer(
+                command: clientMCPCommand, timeoutMs: ClientToolLimits.mcpTimeoutMilliseconds, env: mcpEnv)
+        }
+        if managesSessionID, !args.isEmpty, bridgeMCPCommand != nil || clientServer != nil {
             let mcpURL = AdmiralPaths.mcpConfigFile(base: supportDir, token: session.token)
-            if BridgeMCPConfig.write(command: bridgeMCPCommand, to: mcpURL) {
+            if BridgeMCPConfig.write(bridgeCommand: bridgeMCPCommand, client: clientServer, to: mcpURL) {
                 args[args.count - 1] += " --mcp-config \(ShellQuote.single(mcpURL.path))"
             }
+        }
+
+        // API tool tab: the catalog has to be on disk before claude's MCP client calls
+        // tools/list, which is as soon as the process starts. Built-ins are removed
+        // (`--tools ""`), only this mcp-config is loaded, and permission prompts are off
+        // so a parked tool call is not a dialog the HTTP client can't answer.
+        if managesSessionID, let clientTools, !args.isEmpty {
+            ClientToolCatalog.enable(base: supportDir, token: session.token)
+            ClientToolCatalog.write(clientTools, base: supportDir, token: session.token)
+            args[args.count - 1] += " --strict-mcp-config --permission-mode bypassPermissions --tools \"\""
         }
 
         // Load Admiral's own mod (PHI-redacted output copies for the SSE feed) into every managed
@@ -400,6 +445,17 @@ public final class SessionManager: ObservableObject {
         if managesSessionID, let modDir, !args.isEmpty,
            FileManager.default.fileExists(atPath: modDir) {
             args[args.count - 1] += " --plugin-dir \(ShellQuote.single(modDir))"
+        }
+
+        // API tool tab only. Claude Code shows the workspace trust dialog before it
+        // writes a session file or starts MCP, and that dialog hangs /v1/messages
+        // until turnTimeout. The HTTP client's admiral_cwd is an explicit trust
+        // signal for this folder for this session, so the flag is on disk before
+        // spawn. A normal commission (fleet tabs, the New form) does not write it.
+        // A corrupt config is left untouched and the spawn still happens.
+        if clientTools != nil {
+            ClaudeProjectTrust.ensureAccepted(
+                cwd: cwd, claudeConfigURL: ClaudeProjectTrust.configURL(claudeHome: claudeHome))
         }
 
         let id = session.id
@@ -502,6 +558,7 @@ public final class SessionManager: ObservableObject {
             OutputSchemaStore.set(nil, base: supportDir, session: sid)
         }
         handles[id] = nil
+        clientToolBroker.failAll(token: session.token, message: "session closed")
         // Remove this session's on-disk hook state (log + injected settings).
         let sessionDir = supportDir.appendingPathComponent("sessions").appendingPathComponent(session.token)
         try? FileManager.default.removeItem(at: sessionDir)

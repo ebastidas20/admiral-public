@@ -135,9 +135,8 @@ structured output, run group chats and manage schedules.
 | Schedules | `schedule_set` · `schedule_list` · `schedule_run` · `schedule_history` · `schedule_delete` |
 
 ### API server and operator MCP
-Turn on the local API server and Admiral serves on `127.0.0.1:4141`, with every request authenticated by the
-operator token stored in the Keychain (Settings → Bridge & API → Copy token). Send it as
-`Authorization: Bearer <token>`, or from an Anthropic SDK client as its API key (`x-api-key`):
+Turn on the local API server and Admiral serves on `127.0.0.1:4141`. No API token is required.
+Cloudflare Access gates the public hostname:
 
 - `POST /mcp`: the **operator MCP**, so you can drive the fleet from another agent or script (`list_sessions`,
   `session_status`, `read_recent`, `read_screen`, `inject`, `send_keys`, `focus`, `commission_bash`,

@@ -9,7 +9,6 @@ struct BridgeAPIView: View {
     @State private var portText = ""
     @State private var minutesText = ""
     @State private var thresholdText = ""
-    @State private var copied = false
 
     var body: some View {
         ScrollView {
@@ -17,14 +16,12 @@ struct BridgeAPIView: View {
                 SettingsCard("API server",
                              "Loopback HTTP on this port serves **both** the Anthropic-compatible "
                                 + "chat API (`POST /v1/messages`) and operator MCP "
-                                + "(`POST /mcp`). Every route requires the operator token "
-                                + "(kept in the Keychain; use Copy token): MCP and the event "
-                                + "stream as `Authorization: Bearer <token>`; chat clients as "
-                                + "their API key (`x-api-key`, e.g. `ANTHROPIC_API_KEY`) or the "
-                                + "same Bearer header. Browser requests (an `Origin` header or a "
-                                + "non-loopback `Host`) are refused. Binds "
-                                + "`127.0.0.1` only. The switch persists across relaunch. If "
-                                + "the port is busy the server falls back to an ephemeral one.") {
+                                + "(`POST /mcp`), plus the session event stream. No API token is "
+                                + "required. Cloudflare Access gates the public hostname. Browser "
+                                + "requests (an `Origin` header or a non-loopback `Host`) are "
+                                + "refused. Binds `127.0.0.1` only. The switch persists across "
+                                + "relaunch. If the port is busy the server falls back to an "
+                                + "ephemeral one.") {
                     VStack(alignment: .leading, spacing: 10) {
                         Toggle("Serve the API + MCP", isOn: serverBinding)
                             .toggleStyle(.switch)
@@ -37,7 +34,6 @@ struct BridgeAPIView: View {
                             .foregroundStyle(Theme.secondaryText)
                             .textSelection(.enabled)
                             .accessibilityIdentifier("settings-api-server-status")
-                        keychainRow
                     }
                 }
 
@@ -45,8 +41,8 @@ struct BridgeAPIView: View {
                              "Extra `Host` names the API + MCP server accepts besides the built-in "
                                 + "ones. A client in Docker Desktop reaches this server as "
                                 + "`host.docker.internal`, which is otherwise refused as a browser "
-                                + "request. Changes apply at once. The token is still required, and "
-                                + "a request with an `Origin` header is still refused.") {
+                                + "request. Changes apply at once. A request with an `Origin` "
+                                + "header is still refused.") {
                     TrustedHostsList()
                 }
 
@@ -124,33 +120,6 @@ struct BridgeAPIView: View {
             portText = String(model.apiServerPreferredPort)
             minutesText = String(model.scratchTabIdleMinutes)
             thresholdText = String(model.groupRelevanceThreshold)
-        }
-    }
-
-    /// Always rendered: the Keychain status, Recheck, Copy token (clipboard only — the value is
-    /// never displayed) and Rotate. The status line is informational: a legacy token file
-    /// always wins over the Keychain item and is migrated automatically.
-    @ViewBuilder private var keychainRow: some View {
-        let status = model.operatorTokenMirrorStatus
-        Text("Keychain: \(status.label)")
-            .font(.system(size: 11, design: .monospaced))
-            .foregroundStyle(Theme.secondaryText)
-            .textSelection(.enabled)
-            .accessibilityIdentifier("settings-operator-mcp-keychain-mirror")
-        HStack(spacing: 8) {
-            Button("Recheck") { model.recheckOperatorToken() }
-                .disabled(status == .checking)
-                .accessibilityIdentifier("settings-operator-mcp-keychain-recheck")
-            Button(copied ? "Copied" : "Copy token") {
-                if model.copyOperatorToken() {
-                    copied = true
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 2) { copied = false }
-                }
-            }
-            .accessibilityIdentifier("settings-operator-mcp-copy")
-            Button("Rotate") { model.rotateOperatorMCPToken() }
-                .disabled(status == .checking)
-                .accessibilityIdentifier("settings-operator-mcp-rotate")
         }
     }
 

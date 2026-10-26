@@ -71,6 +71,18 @@ public enum AdmiralPaths {
         sessionDir(base: base, token: token).appendingPathComponent("bridge-mcp.json")
     }
 
+    /// Present for an API tool tab (commissioned from `POST /v1/messages` with `tools[]`).
+    /// The hook helper reads it to deny built-ins and to inject the client-tool catalog.
+    public static func clientToolModeFile(base: URL, token: String) -> URL {
+        sessionDir(base: base, token: token).appendingPathComponent("client-tool-mode")
+    }
+
+    /// The client's `tools[]` for that tab. The `client` MCP process serves `tools/list`
+    /// from this file and watches its mtime for `notifications/tools/list_changed`.
+    public static func clientToolsFile(base: URL, token: String) -> URL {
+        sessionDir(base: base, token: token).appendingPathComponent("client-tools.json")
+    }
+
 
     /// The per-session structured-output tripwire — armed by the Anthropic endpoint,
     /// read by the Stop hook (helper process) and the `set_structured_output` bridge

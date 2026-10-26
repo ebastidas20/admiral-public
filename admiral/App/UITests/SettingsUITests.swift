@@ -45,6 +45,8 @@ final class SettingsUITests: XCTestCase {
             _ = rail.waitForExistence(timeout: 3)
         }
         XCTAssertTrue(rail.waitForExistence(timeout: 5), "settings sheet should be open")
+        XCTAssertFalse(app.descendants(matching: .any)["settings-section-General"].firstMatch.exists,
+                       "General is not a Settings section")
 
         func select(_ section: String) {
             let row = app.descendants(matching: .any)["settings-section-\(section)"].firstMatch
@@ -57,6 +59,9 @@ final class SettingsUITests: XCTestCase {
 
         select("Bridge & API")
         XCTAssertTrue(app.staticTexts["API server"].waitForExistence(timeout: 5))
+        XCTAssertFalse(app.descendants(matching: .any)["settings-operator-mcp-copy"].firstMatch.exists,
+                       "Copy token is not a Settings control")
+        XCTAssertFalse(app.buttons["Copy token"].firstMatch.exists)
         XCTAssertTrue(app.descendants(matching: .any)["settings-api-server-toggle"].firstMatch.exists)
         XCTAssertTrue(app.descendants(matching: .any)["settings-api-server-port"].firstMatch.exists)
         XCTAssertTrue(app.staticTexts["Scratch tabs"].exists)

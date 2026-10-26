@@ -11,6 +11,15 @@ public enum ScheduleModel: String, CaseIterable, Sendable {
     /// The models as `set` words them in a refusal, e.g. "sonnet, haiku, opus or fable".
     public static let spelling = allCases.map(\.rawValue).joined(separator: ", ")
         .replacingOccurrences(of: ", \(fable.rawValue)", with: " or \(fable.rawValue)")
+
+    /// An Anthropic Messages `model` id that names one of these aliases.
+    /// `haiku`, `claude-haiku`, and `claude-3-5-haiku-latest` all map to `.haiku`.
+    /// An id that names none of them returns nil — the tab keeps claude's own default.
+    public init?(anthropicModel raw: String) {
+        let tokens = raw.lowercased().split { !$0.isLetter && !$0.isNumber }.map(String.init)
+        guard let match = Self.allCases.first(where: { tokens.contains($0.rawValue) }) else { return nil }
+        self = match
+    }
 }
 
 /// The effort levels `claude --effort` accepts.

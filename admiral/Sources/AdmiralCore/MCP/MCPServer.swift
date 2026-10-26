@@ -3,9 +3,9 @@ import Foundation
 /// Who is calling the MCP server. Set by the TRANSPORT, never read from the request: the
 /// bridge socket is always `.session` (whatever its envelope's token says — a token of
 /// `admiral-operator` there is just a token that names no tab), and only the operator HTTP
-/// endpoint, after checking the operator bearer token, passes `.operator`.
+/// endpoint passes `.operator`.
 public enum MCPCaller: Sendable, Equatable {
-    /// The operator: `POST /mcp` with the operator token, or Admiral itself (probes).
+    /// The operator: `POST /mcp`, or Admiral itself (probes).
     case `operator`
     /// A hosted tab, named by its `ADMIRAL_SESSION` token.
     case session(String)
@@ -438,7 +438,7 @@ public struct MCPServer {
         guard case let .session(token) = caller else { return nil }
         if Self.operatorTools.contains(name) {
             return .failure("\(name) is an operator tool: it is served only on the operator "
-                + "endpoint (POST /mcp with the operator token), never to a session")
+                + "endpoint (POST /mcp), never to a session")
         }
         guard let me = bridge.manager.session(forToken: token) else {
             return .failure("refused: the session token names no Admiral tab, so no tool is "

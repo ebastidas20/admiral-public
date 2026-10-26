@@ -24,7 +24,18 @@ public protocol AnthropicBackend: TabRunBackend {
     func tab(sessionID: String) -> AnthropicTab?
     /// Create a scratch tab for `sessionID` in `cwd`, resuming its transcript if
     /// one exists on disk. Returns nil if the launch produced no managed session.
-    func createScratchTab(sessionID: String, cwd: String) -> AnthropicTab?
+    /// `model` is a `ScheduleModel` alias (`haiku`, …) or nil. `clientTools` commissions
+    /// an API tool tab (strict MCP, no built-ins, `client` server); nil leaves the tab
+    /// interactive.
+    func createScratchTab(sessionID: String, cwd: String, model: String?, clientTools: [ClientToolSpec]?) -> AnthropicTab?
+    /// `ADMIRAL_SESSION` token for this tab, the key the broker and the MCP process share.
+    func sessionToken(tabID: UUID) -> String?
+    /// True when this tab was commissioned as an API tool tab.
+    func clientToolsEnabled(tabID: UUID) -> Bool
+    /// Replace the catalog an API tool tab already serves. No-op unless the tab is one.
+    func installClientTools(tabID: UUID, tools: [ClientToolSpec])
+    /// The process-wide park table. The broker socket and this endpoint share it.
+    var clientToolBroker: ClientToolBroker { get }
     /// Arm the structured-output tripwire for this tab's session (called before inject).
     func armStructuredOutput(tabID: UUID, spec: StructuredOutputSpec)
     /// Release one slot — the endpoint clears its own on every exit path.
@@ -45,15 +56,32 @@ extension SessionManager: AnthropicBackend {
         return AnthropicTab(id: s.id, name: s.displayTitle, isManaged: true)
     }
 
-    public func createScratchTab(sessionID: String, cwd: String) -> AnthropicTab? {
+    public func createScratchTab(sessionID: String, cwd: String, model: String?,
+                                 clientTools: [ClientToolSpec]?) -> AnthropicTab? {
         let name = ScratchTabNamer.name(existing: Set(sessions.map(\.displayTitle)))
         let session = commission(
             callsign: name, cwd: cwd, sessionID: sessionID,
-            resume: hasTranscript(sessionID: sessionID, cwd: cwd), scratch: true)
+            resume: hasTranscript(sessionID: sessionID, cwd: cwd), scratch: true,
+            model: model, clientTools: clientTools)
         guard session.claudeSessionID != nil else { return nil }
         // API scratch tabs are visually uniform: the palette gray + the Claude Code sparkles.
         setAppearance(session.id, colorHex: "#8E8E93", symbol: "sparkles")
         return AnthropicTab(id: session.id, name: session.displayTitle, isManaged: true)
+    }
+
+    public func sessionToken(tabID: UUID) -> String? {
+        sessions.first { $0.id == tabID }?.token
+    }
+
+    public func clientToolsEnabled(tabID: UUID) -> Bool {
+        guard let token = sessionToken(tabID: tabID) else { return false }
+        return ClientToolCatalog.isEnabled(base: supportDir, token: token)
+    }
+
+    public func installClientTools(tabID: UUID, tools: [ClientToolSpec]) {
+        guard let token = sessionToken(tabID: tabID),
+              ClientToolCatalog.isEnabled(base: supportDir, token: token) else { return }
+        ClientToolCatalog.write(tools, base: supportDir, token: token)
     }
 
     public func inject(tabID: UUID, text: String) {
