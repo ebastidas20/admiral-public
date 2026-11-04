@@ -57,11 +57,24 @@ public final class ProcessAcpTransport: AcpTransport, @unchecked Sendable {
             let data = fh.availableData
             if data.isEmpty {
                 fh.readabilityHandler = nil
-                if let rest = reader.flush() { cont.yield(rest) }
-                cont.finish()
+                if reader.markFinished() {
+                    if let rest = reader.flush() { cont.yield(rest) }
+                    cont.finish()
+                }
                 return
             }
             for line in reader.append(data) { cont.yield(line) }
+        }
+        // The agent can die while a grandchild keeps stdout open, so EOF alone is not enough.
+        let readFD = stdoutPipe.fileHandleForReading.fileDescriptor
+        process.terminationHandler = { [stdoutPipe] proc in
+            stdoutPipe.fileHandleForReading.readabilityHandler = nil
+            Self.drain(fd: readFD, into: reader, cont: cont)
+            Self.logExit(proc, to: logURL)
+            if reader.markFinished() {
+                if let rest = reader.flush() { cont.yield(rest) }
+                cont.finish()
+            }
         }
         do {
             try process.run()
@@ -93,21 +106,55 @@ public final class ProcessAcpTransport: AcpTransport, @unchecked Sendable {
         }
     }
 
+    /// Reads whatever is already buffered in the pipe, without waiting for EOF.
+    private static func drain(fd: Int32, into reader: LineBuffer, cont: AsyncStream<String>.Continuation) {
+        var chunk = [UInt8](repeating: 0, count: 65536)
+        while true {
+            var pfd = pollfd(fd: fd, events: Int16(POLLIN), revents: 0)
+            guard poll(&pfd, 1, 0) > 0, pfd.revents & Int16(POLLIN) != 0 else { return }
+            let n = chunk.withUnsafeMutableBytes { Darwin.read(fd, $0.baseAddress, $0.count) }
+            if n < 0, errno == EINTR { continue }
+            guard n > 0 else { return }
+            for line in reader.append(Data(chunk[0..<n])) { cont.yield(line) }
+        }
+    }
+
+    private static func logExit(_ proc: Process, to logURL: URL) {
+        guard let fh = try? FileHandle(forWritingTo: logURL) else { return }
+        defer { try? fh.close() }
+        _ = try? fh.seekToEnd()
+        let reason = proc.terminationReason == .uncaughtSignal ? "signal" : "exit"
+        try? fh.write(contentsOf: Data("acp: agent \(reason) status \(proc.terminationStatus)\n".utf8))
+    }
+
     public func terminate() {
+        // Kill first: a write(2) blocked on a full pipe holds writeLock and only fails once the reader is gone.
+        if process.isRunning { process.terminate() }
         writeLock.withLock {
             if !stdinClosed {
                 stdinClosed = true
                 try? stdinPipe.fileHandleForWriting.close()
             }
         }
-        if process.isRunning { process.terminate() }
     }
 
     /// Splits a byte stream into `\n`-terminated lines (tolerating `\r\n`).
     private final class LineBuffer: @unchecked Sendable {
         private var buffer = Data()
+        private var finished = false
+        private let lock = NSLock()
+
+        /// Returns true exactly once; the caller that gets true must finish the stream.
+        func markFinished() -> Bool {
+            lock.withLock {
+                defer { finished = true }
+                return !finished
+            }
+        }
 
         func append(_ data: Data) -> [String] {
+            lock.lock()
+            defer { lock.unlock() }
             buffer.append(data)
             var out: [String] = []
             while let nl = buffer.firstIndex(of: 0x0A) {
@@ -118,6 +165,8 @@ public final class ProcessAcpTransport: AcpTransport, @unchecked Sendable {
         }
 
         func flush() -> String? {
+            lock.lock()
+            defer { lock.unlock() }
             defer { buffer = Data() }
             return buffer.isEmpty ? nil : Self.string(buffer)
         }

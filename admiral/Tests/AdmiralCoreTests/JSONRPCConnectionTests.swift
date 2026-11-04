@@ -167,4 +167,25 @@ final class JSONRPCConnectionTests: XCTestCase {
             _ = try json(line)
         }
     }
+
+    func testOutOfRangeIdAndErrorCodeDoNotCrashTheConnection() async throws {
+        let logged = Box<String>()
+        let (t, c) = await make(log: { logged.add($0) })
+        t.feed(#"{"jsonrpc":"2.0","id":1e300,"result":0}"#)
+        async let r = c.request("ping", params: .null)
+        _ = await t.waitForSent(1)
+        t.feed(#"{"jsonrpc":"2.0","id":1,"error":{"code":1e20,"message":"big"}}"#)
+        do {
+            _ = try await r
+            XCTFail("expected throw")
+        } catch {
+            XCTAssertEqual(error as? JSONRPCError, JSONRPCError(code: -32603, message: "big"))
+        }
+        XCTAssertTrue(logged.values.contains { $0.contains("unmatched") })
+        async let r2 = c.request("again", params: .null)
+        _ = await t.waitForSent(2)
+        t.feed(#"{"jsonrpc":"2.0","id":2,"result":"alive"}"#)
+        let alive = try await r2
+        XCTAssertEqual(alive, .string("alive"))
+    }
 }

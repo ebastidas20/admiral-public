@@ -56,4 +56,44 @@ final class ProcessAcpTransportTests: XCTestCase {
         let line = await firstLine(t)
         XCTAssertEqual(line, "hello")
     }
+
+    func testLinesFinishOnProcessExitEvenIfGrandchildHoldsStdout() async throws {
+        let log = tempLog()
+        let t = try ProcessAcpTransport(
+            command: AcpCommand(command: "/bin/sh", args: ["-c", "echo last; (sleep 8) & exit 0"]),
+            env: [:],
+            logURL: log)
+        defer { t.terminate() }
+        let start = Date()
+        var got: [String] = []
+        for await l in t.lines { got.append(l) }
+        XCTAssertEqual(got, ["last"])
+        XCTAssertLessThan(Date().timeIntervalSince(start), 6)
+        let text = try String(contentsOf: log, encoding: .utf8)
+        XCTAssertTrue(text.contains("status 0"))
+    }
+
+    func testTerminateUnblocksAStuckSend() async throws {
+        let t = try ProcessAcpTransport(
+            command: AcpCommand(command: "/bin/sh", args: ["-c", "exec sleep 30"]),
+            env: [:],
+            logURL: tempLog())
+        let blob = String(repeating: "x", count: 4_000_000)
+        let sender = Task.detached { () -> Bool in
+            do { try t.send(line: blob); return false } catch { return true }
+        }
+        try await Task.sleep(nanoseconds: 500_000_000)
+        t.terminate()
+        let threw = await withTaskGroup(of: Bool?.self) { group in
+            group.addTask { await sender.value }
+            group.addTask {
+                try? await Task.sleep(nanoseconds: 10_000_000_000)
+                return nil
+            }
+            let r = await group.next() ?? nil
+            group.cancelAll()
+            return r
+        }
+        XCTAssertEqual(threw, true)
+    }
 }

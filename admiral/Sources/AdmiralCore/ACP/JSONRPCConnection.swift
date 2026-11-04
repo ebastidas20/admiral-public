@@ -105,10 +105,11 @@ public actor JSONRPCConnection {
             } else {
                 notificationHandler?(method, params)
             }
-        } else if case let .number(n)? = value["id"], let cont = pending.removeValue(forKey: Int(n)) {
+        } else if case let .number(n)? = value["id"], let id = Int(exactly: n),
+                  let cont = pending.removeValue(forKey: id) {
             if let err = value["error"] {
                 var code = -32603
-                if case let .number(c)? = err["code"] { code = Int(c) }
+                if case let .number(c)? = err["code"], let exact = Int(exactly: c) { code = exact }
                 cont.resume(throwing: JSONRPCError(
                     code: code,
                     message: err["message"]?.stringValue ?? "Unknown error"))
