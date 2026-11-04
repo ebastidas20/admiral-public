@@ -447,7 +447,10 @@ public final class AcpSessionController: SessionDriver {
         guard turn == .settling, phase == .ready else { return }
         guard !steerInFlight else { pendingSettle = .some(followUp); return }
         if let followUp, !queueHeld {
-            send(Outgoing(text: followUp, hooked: false))
+            // Already hooked: a Stop block's continuation is not a user prompt (claude fires no
+            // UserPromptSubmit for it). Through `beforePrompt` it would reset the goal-review and
+            // watchdog budgets the block just spent, and the turn would loop forever.
+            send(Outgoing(text: followUp, hooked: true))
         } else {
             turn = .idle
             advance()

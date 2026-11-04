@@ -7,6 +7,13 @@ public protocol CommandRunner: Sendable {
     /// `nil` = the command could not be launched, or ran past `timeout` (and was terminated).
     /// `timeout: .infinity` waits as long as the command runs.
     func run(_ argv: [String], cwd: String?, timeout: TimeInterval) -> (code: Int32, stdout: String)?
+    /// The bound a caller with no opinion of its own (`Git`) uses for this runner.
+    var defaultTimeout: TimeInterval { get }
+}
+
+extension CommandRunner {
+    /// Unbounded: a local command has always been waited out.
+    public var defaultTimeout: TimeInterval { .infinity }
 }
 
 /// `argv` through `/usr/bin/env` on this Mac — no shell, PATH lookup by `env`, stderr
@@ -44,8 +51,13 @@ public struct LocalCommandRunner: CommandRunner {
 /// `sh -c 'cd <cwd> && exec "$@"' sh argv…` — the cwd single-quoted, the argv untouched.
 public struct ExecCommandRunner: CommandRunner {
     public let exec: AcpCommand
+    /// A hung `docker exec` (a stopped container, a wedged daemon) must not pin a thread forever.
+    public let defaultTimeout: TimeInterval
 
-    public init(exec: AcpCommand) { self.exec = exec }
+    public init(exec: AcpCommand, defaultTimeout: TimeInterval = 5) {
+        self.exec = exec
+        self.defaultTimeout = defaultTimeout
+    }
 
     public func argv(for argv: [String], cwd: String?) -> [String] {
         let prefix = [exec.command] + exec.args

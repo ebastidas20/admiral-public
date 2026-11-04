@@ -554,13 +554,41 @@ final class AcpSessionControllerTests: XCTestCase {
         agent.endPrompt()
         await until("follow-up sent") { agent.prompts().count == 2 }
         XCTAssertEqual(hooks.after, ["did it"])
-        XCTAssertEqual(agent.prompts(), ["[reminder] work", "[reminder] please report done"])
+        // The follow-up is a Stop continuation, not a user prompt: it skips `beforePrompt`.
+        XCTAssertEqual(hooks.before, ["work"])
+        XCTAssertEqual(agent.prompts(), ["[reminder] work", "please report done"])
         XCTAssertEqual(c.queued, ["queued"])
 
         agent.endPrompt()
         await until("queue drained") { agent.prompts().count == 3 }
         XCTAssertEqual(agent.prompts().last, "[reminder] queued")
         XCTAssertEqual(hooks.after, ["did it", ""])
+    }
+
+    /// With the real adapter: one user prompt with a goal open earns exactly one review
+    /// follow-up, then the tab goes idle. A follow-up that ran UserPromptSubmit would reset the
+    /// review budget and loop review → follow-up → review forever.
+    func testOpenGoalEarnsOneReviewFollowUpThenIdle() async {
+        guard case let .success(goals) = SessionGoals.make(from: ["ship it"]) else {
+            return XCTFail("fixture must be valid")
+        }
+        GoalsStore(base: dir).set(goals, forSession: "adm")
+        let review = (try? JSONSerialization.jsonObject(
+            with: Data(GoalsReminder.stopReviewJSON(for: goals).utf8)) as? [String: Any])?["reason"] as? String
+        let hooks = AcpHookAdapter(base: dir, token: "tok", sessionID: "adm", cwd: "/workspace", runner: nil)
+        let agent = ScriptedAgent()
+        let c = await ready(agent, hooks: hooks)
+        XCTAssertTrue(c.submitTyped("work"))
+        await until("prompt sent") { agent.heldPrompts == 1 }
+        agent.endPrompt()
+        await until("review follow-up sent") { agent.prompts().count == 2 }
+        XCTAssertEqual(agent.prompts().last, review)
+        agent.endPrompt()
+        await until("idle") { statuses.last == .idle && agent.heldPrompts == 0 }
+        try? await Task.sleep(nanoseconds: 200_000_000)
+        XCTAssertEqual(agent.prompts().count, 2, "no second review: \(agent.prompts())")
+        XCTAssertEqual(statuses.last, .idle)
+        XCTAssertTrue(agent.prompts()[0].hasSuffix("\n\nwork"), "the user prompt carried the reminder")
     }
 
     // MARK: - Close

@@ -30,6 +30,21 @@ final class CommandRunnerTests: XCTestCase {
         XCTAssertLessThan(Date().timeIntervalSince(start), 2)
     }
 
+    func testExecRunnerDefaultsToTheFiveSecondBoundAndLocalStaysUnbounded() {
+        XCTAssertEqual(ExecCommandRunner(exec: AcpCommand(command: "docker")).defaultTimeout, 5)
+        XCTAssertEqual(LocalCommandRunner().defaultTimeout, .infinity)
+    }
+
+    /// Git through a hung exec gives up at the runner's bound instead of pinning the thread.
+    func testGitThroughHangingExecReturnsNilWithinTheBound() {
+        // `sh -c 'sleep 10' sh git …` — the "exec" prefix hangs whatever git it is handed.
+        let hung = ExecCommandRunner(exec: AcpCommand(command: "sh", args: ["-c", "sleep 10", "sh"]),
+                                     defaultTimeout: 0.5)
+        let start = Date()
+        XCTAssertNil(Git.repoRoot(at: "/workspace", runner: hung))
+        XCTAssertLessThan(Date().timeIntervalSince(start), 2)
+    }
+
     /// The exec runner really launches its prefix with no Mac-side shell: `env` runs as the
     /// "exec" program here, so what reaches the command is exactly the built argv.
     func testExecRunnerRunsThroughThePrefix() {
