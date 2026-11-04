@@ -1,6 +1,7 @@
 import XCTest
 @testable import AdmiralCore
 
+@MainActor
 final class TranscriptMirrorTests: XCTestCase {
     private var dir: URL!
 
@@ -130,6 +131,37 @@ final class TranscriptMirrorTests: XCTestCase {
             XCTAssertEqual(obj?["cwd"] as? String, "/workspace")
             XCTAssertNotNil(obj?["timestamp"])
         }
+    }
+
+    func testEndTurnTwiceWritesOneAssistantLine() {
+        let (m, url) = make()
+        m.apply(.agentMessage("Hello"))
+        m.endTurn()
+        m.endTurn()
+        XCTAssertEqual(lines(url).count, 1)
+    }
+
+    func testDroppingMirrorFlushesPendingText() {
+        let url = TranscriptMirror.url(base: dir, session: "s1")
+        var m: TranscriptMirror? = TranscriptMirror(url: url, sessionID: "s1", cwd: "/")
+        m?.apply(.agentMessage("partial"))
+        m = nil
+        XCTAssertEqual(TurnCapture.capture((try? Data(contentsOf: url)) ?? Data(), fromOffset: 0).text, "partial")
+    }
+
+    func testThoughtAndTextKeepTheirOrder() throws {
+        let (m, url) = make()
+        m.apply(.agentThought("t1"))
+        m.apply(.agentThought("a"))
+        m.apply(.agentMessage("x1"))
+        m.apply(.agentThought("t2"))
+        m.apply(.agentMessage("x2"))
+        m.endTurn()
+        let obj = try JSONSerialization.jsonObject(with: Data(lines(url)[0].utf8)) as? [String: Any]
+        let blocks = (obj?["message"] as? [String: Any])?["content"] as? [[String: Any]] ?? []
+        XCTAssertEqual(blocks.map { $0["type"] as? String }, ["thinking", "text", "thinking", "text"])
+        XCTAssertEqual(blocks[0]["thinking"] as? String, "t1a")
+        XCTAssertEqual(blocks[3]["text"] as? String, "x2")
     }
 
     func testUnwritablePathDoesNotCrash() {

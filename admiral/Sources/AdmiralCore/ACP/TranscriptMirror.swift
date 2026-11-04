@@ -10,13 +10,17 @@ import Foundation
 ///
 /// Message and thought chunks buffer until a boundary (tool call, plan, user line, `endTurn`) and
 /// then land as ONE assistant line, so a chunk after a tool call starts a new line.
+///
+/// Contract: call `endTurn()` on EVERY turn exit (any stop reason, error, cancel, transport close).
+/// It is idempotent (a second call writes nothing). `deinit` flushes pending text as a last resort.
 /// Write errors are swallowed: a mirror that cannot write must never take the session down.
+@MainActor
 public final class TranscriptMirror {
     private let url: URL
     private let sessionID: String
     private let cwd: String
-    private var text = ""
-    private var thought = ""
+    /// Ordered runs of consecutive same-kind chunks, so thinking/text keep the order sent.
+    private var runs: [(isThought: Bool, text: String)] = []
     private var lastUUID: String?
     private var toolNames: [String: String] = [:]
     private var pendingResults: [String: String] = [:]
@@ -41,8 +45,8 @@ public final class TranscriptMirror {
 
     public func apply(_ update: AcpUpdate) {
         switch update {
-        case let .agentMessage(chunk): text += chunk
-        case let .agentThought(chunk): thought += chunk
+        case let .agentMessage(chunk): buffer(chunk, isThought: false)
+        case let .agentThought(chunk): buffer(chunk, isThought: true)
         case let .userMessage(chunk):
             flush()
             writeUser(.string(chunk))
@@ -100,14 +104,25 @@ public final class TranscriptMirror {
         writeUser(.array([result]))
     }
 
+    private func buffer(_ chunk: String, isThought: Bool) {
+        if let last = runs.last, last.isThought == isThought {
+            runs[runs.count - 1].text += chunk
+        } else {
+            runs.append((isThought, chunk))
+        }
+    }
+
     private func flush() {
-        var blocks: [JSONValue] = []
-        if !thought.isEmpty { blocks.append(.object(["type": .string("thinking"), "thinking": .string(thought)])) }
-        if !text.isEmpty { blocks.append(.object(["type": .string("text"), "text": .string(text)])) }
-        thought = ""
-        text = ""
+        let blocks: [JSONValue] = runs.filter { !$0.text.isEmpty }.map {
+            $0.isThought
+                ? .object(["type": .string("thinking"), "thinking": .string($0.text)])
+                : .object(["type": .string("text"), "text": .string($0.text)])
+        }
+        runs = []
         if !blocks.isEmpty { writeAssistant(blocks) }
     }
+
+    isolated deinit { flush() }
 
     private func writeAssistant(_ blocks: [JSONValue]) {
         write(type: "assistant", message: .object(["role": .string("assistant"), "content": .array(blocks)]))
