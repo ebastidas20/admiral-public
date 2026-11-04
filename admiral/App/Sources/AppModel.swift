@@ -1533,7 +1533,7 @@ final class AppModel: ObservableObject {
 
     /// The question card's Submit: the answers go in as the next prompt.
     func answerAsk(_ questions: [AskQuestion], answers: [String], for session: AgentSession) {
-        sessions.sendTyped(session.id, text: AskAnswer.text(questions: questions, answers: answers))
+        sessions.answerAsk(session.id, questions: questions, answers: answers)
     }
 
     func interrupt(_ session: AgentSession) { sessions.interrupt(session.id) }
@@ -1554,9 +1554,9 @@ final class AppModel: ObservableObject {
         link.perform()
     }
 
-    /// A permission prompt answered from the chat: Enter takes claude's pre-selected "Yes".
+    /// A permission prompt answered from the chat (on a PTY tab, Enter takes claude's "Yes").
     func allowPermission(_ session: AgentSession) {
-        if let handle = sessions.handle(for: session.id) { host.sendRaw(handle, text: "\r") }
+        sessions.allowPermission(session.id)
     }
 
     private func tick() {

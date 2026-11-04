@@ -19,7 +19,9 @@ public final class SessionManager: ObservableObject {
     /// Each session's chat (its ledger, folded) — what the Chat view draws.
     @Published public private(set) var chats: [UUID: ChatTranscript] = [:]
 
-    private var handles: [UUID: TerminalHandle] = [:]
+    /// Each live tab's driver — the one place its input goes. Which kind it is (PTY today)
+    /// is decided when the tab is launched, so no input funnel asks again.
+    private var drivers: [UUID: SessionDriver] = [:]
     private var chatRefreshingIDs: Set<UUID> = []
     private var resolvingIDs: Set<UUID> = []
     private var refreshingIDs: Set<UUID> = []
@@ -150,7 +152,20 @@ public final class SessionManager: ObservableObject {
         selectedSession.flatMap { $0.scratch ? $0 : nil }
     }
 
-    public func handle(for id: UUID) -> TerminalHandle? { handles[id] }
+    /// The PTY handle behind a tab, for the callers that embed or probe the terminal itself.
+    public func handle(for id: UUID) -> TerminalHandle? { (drivers[id] as? PTYSessionDriver)?.handle }
+
+    /// A PTY tab's driver. It reads the tab's record and `sendPeerMessage` at delivery time.
+    private func ptyDriver(_ id: UUID, handle: TerminalHandle) -> PTYSessionDriver {
+        PTYSessionDriver(
+            host: host, handle: handle, claudeHome: claudeHome,
+            session: { [weak self] in self?.sessions.first { $0.id == id } },
+            sendPeerMessage: { [weak self] body, file, home in
+                // Gone = not sent: throwing makes the driver type it rather than call it delivered.
+                guard let self else { throw CancellationError() }
+                try self.sendPeerMessage(body, file, home)
+            })
+    }
 
     // MARK: - Lifecycle
 
@@ -469,7 +484,7 @@ public final class SessionManager: ObservableObject {
             }
         )
         session.claudePID = handle.pid
-        handles[id] = handle
+        drivers[id] = ptyDriver(id, handle: handle)
         sessions.append(session)
         syncRedactionFlags()
         // A scratch tab must not yank focus from whatever the user is doing (the New form
@@ -527,7 +542,7 @@ public final class SessionManager: ObservableObject {
 
     /// Register a session created elsewhere (tests / future adoption).
     public func register(_ session: AgentSession, handle: TerminalHandle? = nil) {
-        if let handle { handles[session.id] = handle }
+        if let handle { drivers[session.id] = ptyDriver(session.id, handle: handle) }
         sessions.append(session)
         if selectedID == nil { selectedID = session.id }
     }
@@ -550,14 +565,14 @@ public final class SessionManager: ObservableObject {
     public func delete(_ id: UUID) {
         guard let index = sessions.firstIndex(where: { $0.id == id }) else { return }
         let session = sessions[index]
-        if let handle = handles[id] { host.terminate(handle) }
+        drivers[id]?.terminate()
         if let sid = session.claudeSessionID {
             openSessionsStore.remove(sessionID: sid)
             appearanceStore.remove(forSession: sid)
             touchedReposStore.remove(forSession: sid)
             OutputSchemaStore.set(nil, base: supportDir, session: sid)
         }
-        handles[id] = nil
+        drivers[id] = nil
         clientToolBroker.failAll(token: session.token, message: "session closed")
         // Remove this session's on-disk hook state (log + injected settings).
         let sessionDir = supportDir.appendingPathComponent("sessions").appendingPathComponent(session.token)
@@ -582,12 +597,12 @@ public final class SessionManager: ObservableObject {
     /// reopen `k9s`/etc. on the next launch. Claude tabs still resume from transcript.
     public func terminateAll(bashRestoreEnabled: Bool, bashRestoreAllowlist: Set<String>) {
         persistBashRestoreCommands(enabled: bashRestoreEnabled, allowlist: bashRestoreAllowlist)
-        for handle in handles.values { host.terminate(handle) }
+        for driver in drivers.values { driver.terminate() }
     }
 
     /// Kill every live session's process without refreshing bash restore commands.
     public func terminateAll() {
-        for handle in handles.values { host.terminate(handle) }
+        for driver in drivers.values { driver.terminate() }
     }
 
     /// For each bash tab, record an allowlisted foreground TUI basename (or clear it).
@@ -595,7 +610,7 @@ public final class SessionManager: ObservableObject {
         let snap = ProcessTree.snapshot()
         for s in sessions where s.agentType.id == "bash" {
             guard let sid = s.claudeSessionID else { continue }
-            let pid = handles[s.id]?.pid ?? s.claudePID
+            let pid = drivers[s.id]?.pid ?? s.claudePID
             let cmd: String?
             if enabled, let pid {
                 cmd = ProcessTree.allowlistedRestoreCommand(
@@ -627,8 +642,8 @@ public final class SessionManager: ObservableObject {
         // quit's `terminateAll`. Drop the live session and its in-flight resolution state, but keep
         // EVERY persisted store (appearance, open-sessions, footprint, hook dir) so the relaunch
         // restores the tab unchanged.
-        if let handle = handles[id] { host.terminate(handle) }
-        handles[id] = nil
+        drivers[id]?.terminate()
+        drivers[id] = nil
         conversations[id] = nil
         claudePIDResolved.remove(id)
         backfilledIDs.remove(id)
@@ -803,17 +818,17 @@ public final class SessionManager: ObservableObject {
 
     /// Composer / Siri free-text: type the line and submit it.
     public func send(_ id: UUID, text: String) {
-        guard let handle = handles[id] else { return }
+        guard let driver = drivers[id] else { return }
         update(id) { $0.lastActivityAt = Date() }
-        host.submit(handle, text: text)
+        _ = driver.submitTyped(text)
     }
 
     /// Type text into a session's terminal (bridge hails / goals / API prompts). A text past
     /// one typed burst goes as a paste (`TerminalPrompt.injected`): typed whole, a 1.2 KB
     /// prompt arrived as its last few bytes.
     ///
-    /// Returns false when the session has no terminal handle — nothing was typed. Callers
-    /// have to look: a hail that silently evaporates because a handle went missing reads
+    /// Returns false when the session has no driver — nothing was typed. Callers
+    /// have to look: a hail that silently evaporates because a driver went missing reads
     /// exactly like one that was delivered.
     @discardableResult
     public func inject(_ id: UUID, text: String, source: String = "admiral") -> Bool {
@@ -825,31 +840,29 @@ public final class SessionManager: ObservableObject {
     /// never lands in the input box on top of a half-typed prompt and queues while claude
     /// works; any other tab — or a socket that is not there or refuses — is typed into, so
     /// the message is never lost. Returns false only when neither path reached the session.
+    /// The choice of path is the driver's (`PTYSessionDriver.deliver`); the ledger mark and
+    /// the activity stamp are made here, once, whichever path it takes.
     @discardableResult
     public func deliver(_ id: UUID, text: String, source: String = "admiral") -> Bool {
-        if let session = sessions.first(where: { $0.id == id }), session.acceptsPeerMessages,
-           let sid = session.claudeSessionID,
-           let file = ClaudeSessionFile.all(claudeHome: claudeHome)
-               .first(where: { $0.sessionId == sid && $0.isAddressable }),
-           (try? sendPeerMessage(text, file, claudeHome)) != nil {
-            ChatLedger.markInjected(text, source: source, base: supportDir, session: sid)
-            update(id) { $0.lastActivityAt = Date() }
-            return true
-        }
-        return inject(id, text: text, source: source)
+        guard let driver = drivers[id] else { return false }
+        markInjected(id, text: text, source: source)
+        update(id) { $0.lastActivityAt = Date() }
+        return driver.deliver(text)
     }
 
     /// `inject`, with the prompt's pasted part going in as one paste (a long hail's body).
     @discardableResult
     public func inject(_ id: UUID, prompt: TerminalPrompt, source: String = "admiral") -> Bool {
-        guard let handle = handles[id] else { return false }
-        // Mark it before typing, so the chat shows this prompt as Admiral's, not the user's.
-        if let sid = sessions.first(where: { $0.id == id })?.claudeSessionID {
-            ChatLedger.markInjected(prompt.text, source: source, base: supportDir, session: sid)
-        }
+        guard let driver = drivers[id] else { return false }
+        markInjected(id, text: prompt.text, source: source)
         update(id) { $0.lastActivityAt = Date() }
-        host.submit(handle, prompt: prompt)
-        return true
+        return driver.submit(prompt: prompt)
+    }
+
+    /// Mark it before it goes in, so the chat shows this prompt as Admiral's, not the user's.
+    private func markInjected(_ id: UUID, text: String, source: String) {
+        guard let sid = sessions.first(where: { $0.id == id })?.claudeSessionID else { return }
+        ChatLedger.markInjected(text, source: source, base: supportDir, session: sid)
     }
 
     // MARK: - Chat
@@ -861,9 +874,21 @@ public final class SessionManager: ObservableObject {
     /// newline; only the final CR submits. (`\` + CR, the terminal's Shift+Return, left a
     /// literal backslash in a longer message — probed on 2.1.278.)
     public func sendTyped(_ id: UUID, text: String) {
-        guard let handle = handles[id] else { return }
+        guard let driver = drivers[id] else { return }
         update(id) { $0.lastActivityAt = Date() }
-        host.submit(handle, text: Self.typedText(text))
+        _ = driver.submitTyped(Self.typedText(text))
+    }
+
+    /// The question card's Submit: the answers go in as the next prompt.
+    public func answerAsk(_ id: UUID, questions: [AskQuestion], answers: [String]) {
+        guard let driver = drivers[id] else { return }
+        update(id) { $0.lastActivityAt = Date() }
+        _ = driver.answer(questions: questions, answers: answers)
+    }
+
+    /// A permission prompt answered from the chat: the agent's "Yes".
+    public func allowPermission(_ id: UUID) {
+        _ = drivers[id]?.allowPermission()
     }
 
     /// The bytes `sendTyped` types for `text` (before the submitting CR): CRLF and stray CRs
@@ -876,8 +901,7 @@ public final class SessionManager: ObservableObject {
 
     /// Esc: interrupt whatever claude is doing, as the terminal's own Esc does.
     public func interrupt(_ id: UUID) {
-        guard let handle = handles[id] else { return }
-        host.sendRaw(handle, text: "\u{1b}")
+        drivers[id]?.interrupt()
     }
 
     /// Re-read a session's chat ledger. Off-main, with an in-flight guard, like the transcript.
@@ -899,18 +923,16 @@ public final class SessionManager: ObservableObject {
         }
     }
 
-    /// Visible viewport text for a live terminal, or nil if there is no handle / no screen.
+    /// Visible viewport text for a live terminal, or nil if there is no driver / no screen.
     public func readScreen(_ id: UUID) -> String? {
-        guard let handle = handles[id] else { return nil }
-        return host.captureVisibleText(handle)
+        drivers[id]?.readScreen()
     }
 
     /// Send raw key-chord bytes (no Enter). Returns false if the session has no PTY.
     public func sendKeys(_ id: UUID, text: String) -> Bool {
-        guard let handle = handles[id] else { return false }
+        guard let driver = drivers[id] else { return false }
         update(id) { $0.lastActivityAt = Date() }
-        host.sendRaw(handle, text: text)
-        return true
+        return driver.sendKeys(text)
     }
 
     // MARK: - Resolution / refresh
@@ -948,7 +970,7 @@ public final class SessionManager: ObservableObject {
         let sessionID = session.claudeSessionID
         let spawnedAt = session.spawnedAt
         let isOwnSpawn = spawnedAt != nil
-        let spawnPid = session.claudePID ?? handles[id]?.pid
+        let spawnPid = session.claudePID ?? drivers[id]?.pid
         Task.detached(priority: .utility) { [weak self] in
             let path: String?
             if isOwnSpawn {
@@ -1092,7 +1114,7 @@ public final class SessionManager: ObservableObject {
     /// recipes the spawn pid IS claude, so the walk just returns it.
     public func resolveClaudePID(for id: UUID) {
         guard !claudePIDResolved.contains(id),
-              let spawnPid = handles[id]?.pid else { return }
+              let spawnPid = drivers[id]?.pid else { return }
         Task.detached(priority: .utility) { [weak self] in
             guard let pid = ProcessTree.findClaudePid(spawnPid: spawnPid) else { return }
             await MainActor.run {

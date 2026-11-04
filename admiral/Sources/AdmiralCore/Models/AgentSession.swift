@@ -1,7 +1,7 @@
 import Foundation
 
-/// A single agent session Admiral hosts. Pure data (Sendable); the live terminal
-/// handle is held separately by `SessionManager`, keyed by `id`.
+/// A single agent session Admiral hosts. Pure data (Sendable); the live driver (and its
+/// terminal handle) is held separately by `SessionManager`, keyed by `id`.
 public struct AgentSession: Identifiable, Sendable, Hashable {
     public let id: UUID
     /// Human name / callsign (defaults from title, editable).
@@ -45,6 +45,11 @@ public struct AgentSession: Identifiable, Sendable, Hashable {
     /// launch, like the rest of the `--settings` file: flipping the setting changes new tabs
     /// and relaunches, not this one. Decides how `SessionManager.deliver` reaches the tab.
     public var acceptsPeerMessages: Bool = false
+    /// What runs this tab's agent, fixed at launch. Decides which `SessionDriver` the
+    /// `SessionManager` gives it.
+    public var backend: SessionBackend = .pty
+    /// The agent's own session id on an ACP tab (`session/new`); nil on a PTY tab.
+    public var acpSessionID: String? = nil
     /// Distinct git repos this session has written to, aggregated from its hook log.
     /// Ephemeral (rebuilt from the on-disk log); not part of the initializer.
     public var touchedRepos: [TouchedRepo] = []
