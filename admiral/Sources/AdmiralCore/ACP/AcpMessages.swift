@@ -33,6 +33,24 @@ public enum AcpClient {
         ])
     }
 
+    /// `session/fork` (unstable): the source session's id, plus the new session's cwd and servers.
+    public static func forkParams(sessionID: String, cwd: String, mcpServers: [AcpMCPServer]) -> JSONValue {
+        loadOrResumeParams(sessionID: sessionID, cwd: cwd, mcpServers: mcpServers)
+    }
+
+    /// `session/cancel` and `session/close`: just the session.
+    public static func sessionParams(sessionID: String) -> JSONValue {
+        .object(["sessionId": .string(sessionID)])
+    }
+
+    public static func setModeParams(sessionID: String, modeID: String) -> JSONValue {
+        .object(["sessionId": .string(sessionID), "modeId": .string(modeID)])
+    }
+
+    public static func setConfigOptionParams(sessionID: String, configID: String, value: String) -> JSONValue {
+        .object(["sessionId": .string(sessionID), "configId": .string(configID), "value": .string(value)])
+    }
+
     public static func promptParams(sessionID: String, text: String) -> JSONValue {
         .object([
             "sessionId": .string(sessionID),
