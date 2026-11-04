@@ -6,8 +6,11 @@ import Foundation
 public enum PostToolUseHandler {
     public static let writeTools: Set<String> = ["Write", "Edit", "MultiEdit", "NotebookEdit"]
 
+    /// `runner` is where git runs — this Mac, or an ACP agent's environment, whose paths the
+    /// payload then carries.
     public static func handle(payload: Data, base: URL, token: String,
-                              now: () -> String = PostToolUseHandler.timestamp) {
+                              now: () -> String = PostToolUseHandler.timestamp,
+                              runner: CommandRunner = LocalCommandRunner()) {
         guard let obj = (try? JSONSerialization.jsonObject(with: payload)) as? [String: Any],
               let tool = obj["tool_name"] as? String, writeTools.contains(tool) else { return }
         let input = obj["tool_input"] as? [String: Any] ?? [:]
@@ -16,9 +19,9 @@ public enum PostToolUseHandler {
               !rawPath.isEmpty else { return }
         let absPath = rawPath.hasPrefix("/") ? rawPath : (cwd as NSString).appendingPathComponent(rawPath)
         let fileDir = (absPath as NSString).deletingLastPathComponent
-        let repoRoot = Git.repoRoot(at: fileDir)
-        let branch = repoRoot.flatMap { Git.branch(at: $0) }
-        let sessionRoot = cwd.isEmpty ? nil : Git.repoRoot(at: cwd)
+        let repoRoot = Git.repoRoot(at: fileDir, runner: runner)
+        let branch = repoRoot.flatMap { Git.branch(at: $0, runner: runner) }
+        let sessionRoot = cwd.isEmpty ? nil : Git.repoRoot(at: cwd, runner: runner)
         let inside = repoRoot != nil && repoRoot == sessionRoot
         let event = TouchedRepoEvent(
             ts: now(), tool: tool, filePath: absPath,
