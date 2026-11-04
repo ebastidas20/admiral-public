@@ -142,6 +142,66 @@ private final class RecordingHooks: AcpTurnHooks, @unchecked Sendable {
     func onCompaction() async {}
 }
 
+/// Hooks that stop inside `beforePrompt` / `afterTurn` until the test opens their gate, so a
+/// test can act while the controller is mid-hook. Text passes through unchanged.
+private final class GatedHooks: AcpTurnHooks, @unchecked Sendable {
+    final class Gate: @unchecked Sendable {
+        private let lock = NSLock()
+        private var isOpen: Bool
+        private var waiters: [CheckedContinuation<Void, Never>] = []
+        private(set) var entered = 0
+        init(open: Bool) { isOpen = open }
+        func wait() async {
+            await withCheckedContinuation { c in
+                let resumeNow = lock.withLock { () -> Bool in
+                    entered += 1
+                    if isOpen { return true }
+                    waiters.append(c)
+                    return false
+                }
+                if resumeNow { c.resume() }
+            }
+        }
+        func open() {
+            let w = lock.withLock { () -> [CheckedContinuation<Void, Never>] in
+                isOpen = true
+                defer { waiters = [] }
+                return waiters
+            }
+            w.forEach { $0.resume() }
+        }
+        var waiting: Int { lock.withLock { entered } }
+    }
+
+    let before: Gate
+    let after: Gate
+    private let lock = NSLock()
+    private var _hooked: [String] = []
+    private var followUps: [String]
+
+    init(gateBefore: Bool = false, gateAfter: Bool = false, followUps: [String] = []) {
+        before = Gate(open: !gateBefore)
+        after = Gate(open: !gateAfter)
+        self.followUps = followUps
+    }
+
+    var hooked: [String] { lock.withLock { _hooked } }
+
+    func beforePrompt(_ text: String) async -> String {
+        lock.withLock { _hooked.append(text) }
+        await before.wait()
+        return text
+    }
+
+    func afterTurn(lastAssistantMessage: String) async -> String? {
+        await after.wait()
+        return lock.withLock { followUps.isEmpty ? nil : followUps.removeFirst() }
+    }
+
+    func onToolCall(_ update: AcpUpdate) async {}
+    func onCompaction() async {}
+}
+
 @MainActor
 final class AcpSessionControllerTests: XCTestCase {
     private var dir: URL!
@@ -538,5 +598,94 @@ final class AcpSessionControllerTests: XCTestCase {
         let c = await ready(ScriptedAgent())
         XCTAssertNil(c.readScreen())
         XCTAssertFalse(c.sendKeys("\u{1b}"))
+    }
+
+    // MARK: - Ordering and interrupts (fix round 1)
+
+    func testDeliverAfterCancelSendsOldestQueuedFirst() async {
+        let agent = ScriptedAgent()
+        let c = await ready(agent)
+        XCTAssertTrue(c.deliver("first"))
+        await until("prompt sent") { agent.heldPrompts == 1 }
+        XCTAssertTrue(c.deliver("old"))
+        c.interrupt()
+        agent.endPrompt("cancelled")
+        await until("idle") { statuses.last == .idle }
+        XCTAssertEqual(c.queued, ["old"])
+
+        XCTAssertTrue(c.deliver("new"))
+        await until("oldest sent") { agent.prompts().count == 2 }
+        XCTAssertEqual(agent.prompts(), ["first", "old"])
+        XCTAssertEqual(c.queued, ["new"])
+        agent.endPrompt()
+        await until("newest sent") { agent.prompts().count == 3 }
+        XCTAssertEqual(agent.prompts().last, "new")
+    }
+
+    func testSteeringDoesNotOvertakeQueuedItems() async {
+        let agent = ScriptedAgent(capabilities: steering)
+        let hooks = GatedHooks(gateAfter: true, followUps: ["follow"])
+        let c = await ready(agent, hooks: hooks)
+        XCTAssertTrue(c.deliver("work"))
+        await until("prompt sent") { agent.heldPrompts == 1 }
+        agent.endPrompt()
+        await until("settling") { hooks.after.waiting == 1 }
+        XCTAssertTrue(c.deliver("old"))
+        XCTAssertEqual(c.queued, ["old"], "nothing to steer into while settling")
+        hooks.after.open()
+        await until("follow-up sent") { agent.prompts() == ["work", "follow"] }
+        XCTAssertTrue(c.deliver("new"))
+        await until("both steered") { agent.params(of: "_session/steering").count == 2 }
+        let steered = agent.params(of: "_session/steering")
+            .compactMap { $0["prompt"]?.arrayValue?.first?["text"]?.stringValue }
+        XCTAssertEqual(steered, ["old", "new"])
+        XCTAssertEqual(c.queued, [])
+    }
+
+    func testBouncedSteerStaysAheadOfNewerItems() async {
+        let agent = ScriptedAgent(capabilities: steering)
+        agent.on("_session/steering") { _ in .result(.object(["outcome": .string("promptRequired")])) }
+        let c = await ready(agent)
+        XCTAssertTrue(c.deliver("work"))
+        await until("prompt sent") { agent.heldPrompts == 1 }
+        XCTAssertTrue(c.deliver("a"))
+        await until("bounced") { c.queued == ["a"] }
+        XCTAssertTrue(c.deliver("b"))
+        XCTAssertEqual(c.queued, ["a", "b"])
+        XCTAssertEqual(agent.params(of: "_session/steering").count, 1, "no steering after a bounce this turn")
+        agent.endPrompt()
+        await until("a sent") { agent.prompts() == ["work", "a"] }
+    }
+
+    func testInterruptBeforePromptIsSentPutsItBack() async {
+        let agent = ScriptedAgent()
+        let hooks = GatedHooks(gateBefore: true)
+        let c = await ready(agent, hooks: hooks)
+        XCTAssertTrue(c.deliver("x"))
+        await until("in the hook") { hooks.before.waiting == 1 }
+        c.interrupt()
+        hooks.before.open()
+        await until("idle") { statuses.last == .idle }
+        XCTAssertEqual(agent.prompts(), [], "an interrupted prompt is not sent")
+        XCTAssertEqual(c.queued, ["x"], "and not lost")
+
+        XCTAssertTrue(c.deliver("y"))
+        await until("x sent") { agent.prompts() == ["x"] }
+        XCTAssertEqual(c.queued, ["y"])
+        XCTAssertEqual(hooks.hooked, ["x"], "the put-back prompt is not hooked twice")
+    }
+
+    func testInterruptWhileSettlingDropsFollowUp() async {
+        let agent = ScriptedAgent()
+        let hooks = GatedHooks(gateAfter: true, followUps: ["follow"])
+        let c = await ready(agent, hooks: hooks)
+        XCTAssertTrue(c.deliver("work"))
+        await until("prompt sent") { agent.heldPrompts == 1 }
+        agent.endPrompt()
+        await until("settling") { hooks.after.waiting == 1 }
+        c.interrupt()
+        hooks.after.open()
+        await until("idle") { statuses.last == .idle }
+        XCTAssertEqual(agent.prompts(), ["work"], "the follow-up is dropped after a stop")
     }
 }

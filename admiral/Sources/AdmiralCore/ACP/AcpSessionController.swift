@@ -98,6 +98,20 @@ public final class AcpSessionController: SessionDriver {
     private var heldPermissions: [(options: [JSONValue], reply: CheckedContinuation<JSONValue, Error>)] = []
     private var heldElicitations: [(form: AcpElicitationForm, reply: CheckedContinuation<JSONValue, Error>)] = []
     private var lastStatus: SessionStatus?
+    /// True once this turn's `session/prompt` is on the wire: steering before that would land
+    /// ahead of the prompt it is meant to follow.
+    private var promptSent = false
+    /// One steer at a time, so steers reach the agent in arrival order.
+    private var steerInFlight = false
+    /// The agent bounced a steer this turn (it is idle or refused): stop steering until the next turn.
+    private var steerBounced = false
+    /// Set by an interrupt (or a `cancelled` stop): the queue is held, nothing new goes out on
+    /// its own — no follow-up, no drain, and a prompt still in its hook is put back. The next
+    /// input clears it and starts draining from the oldest item.
+    private var queueHeld = false
+    /// A turn that ended while a steer was in flight settles once the steer's answer is in,
+    /// so a bounced steer goes back ahead of anything newer.
+    private var pendingSettle: String??
 
     private let inbox: AsyncStream<Inbound>
     private let inboxIn: AsyncStream<Inbound>.Continuation
@@ -219,12 +233,8 @@ public final class AcpSessionController: SessionDriver {
         guard phase == .connecting else { return }
         setPhase(.ready)
         events.sessionStarted(sessionID, caps, options)
-        if let next = queue.first {
-            queue.removeFirst()
-            send(next)
-        } else {
-            publishStatus()
-        }
+        advance()
+        publishStatus()
     }
 
     // MARK: - SessionDriver
@@ -235,22 +245,37 @@ public final class AcpSessionController: SessionDriver {
 
     /// The one decision for every input funnel. Queued counts as accepted; false means the
     /// text went nowhere (failed or ended tab).
+    ///
+    /// Every input joins the back of the queue and `advance` moves the queue, so nothing ever
+    /// overtakes an older item — whether it goes out as a prompt or a steer.
     private func accept(_ text: String) -> Bool {
-        switch (phase, turn) {
-        case (.failed, _), (.ended, _):
-            return false
-        case (.ready, .idle):
-            send(Outgoing(text: text, hooked: false))
-        case (.ready, .prompting) where capabilities?.steering == true:
-            steer(text)
-        default:
-            queue.append(Outgoing(text: text, hooked: false))
+        switch phase {
+        case .failed, .ended: return false
+        case .connecting, .ready: break
         }
+        queue.append(Outgoing(text: text, hooked: false))
+        queueHeld = false
+        advance()
         return true
+    }
+
+    /// Sends the queue head when the agent can take it: as a prompt when idle, as a steer
+    /// mid-prompt (one at a time) when steering is advertised. Otherwise it waits for `settle`.
+    private func advance() {
+        guard phase == .ready, !queueHeld, !queue.isEmpty else { return }
+        switch turn {
+        case .idle:
+            send(queue.removeFirst())
+        case .prompting where promptSent && !steerInFlight && !steerBounced && capabilities?.steering == true:
+            steer(queue.removeFirst())
+        case .prompting, .settling:
+            break
+        }
     }
 
     /// `session/cancel`; the queue stays, and open requests are answered `cancelled`.
     public func interrupt() {
+        queueHeld = true
         releaseHeldRequests()
         guard let sid = acpSessionID, phase == .ready else { return }
         let connection = connection
@@ -302,13 +327,24 @@ public final class AcpSessionController: SessionDriver {
     private func send(_ item: Outgoing) {
         turn = .prompting
         turnReply = ""
+        promptSent = false
+        steerBounced = false
         publishStatus()
         let (connection, hooks, inboxIn) = (connection, hooks, inboxIn)
         Task { [weak self] in
             var text = item.text
             if !item.hooked, let hooks { text = await hooks.beforePrompt(text) }
             guard let self, self.phase == .ready, let sid = self.acpSessionID else { return }
+            guard !self.queueHeld else {
+                // Interrupted before it went out: not sent, and not lost — back at the head.
+                self.queue.insert(Outgoing(text: text, hooked: true), at: 0)
+                self.turn = .idle
+                self.publishStatus()
+                return
+            }
             self.mirror.userPrompt(text)
+            self.promptSent = true
+            self.advance()
             let result: Result<JSONValue, Error>
             do {
                 result = .success(try await connection.request(
@@ -322,12 +358,17 @@ public final class AcpSessionController: SessionDriver {
 
     /// Mid-turn delivery on `_session/steering`. Mirrored only once the agent took it; a
     /// `promptRequired` answer (or an error) queues it as an already-hooked prompt.
-    private func steer(_ raw: String) {
+    private func steer(_ item: Outgoing) {
         let (connection, hooks, inboxIn) = (connection, hooks, inboxIn)
         guard let sid = acpSessionID else { return }
-        Task {
-            var text = raw
-            if let hooks { text = await hooks.beforePrompt(text) }
+        steerInFlight = true
+        Task { [weak self] in
+            var text = item.text
+            if !item.hooked, let hooks { text = await hooks.beforePrompt(text) }
+            if self?.queueHeld == true {
+                self?.steerFinished(text, .success(.string("promptRequired")))
+                return
+            }
             let result: Result<JSONValue, Error>
             do {
                 result = .success(try await connection.request(
@@ -389,43 +430,55 @@ public final class AcpSessionController: SessionDriver {
         let reply = turnReply
         turnReply = ""
         turn = .settling
-        guard case let .success(value) = result else { return settle(followUp: nil, drain: true) }
+        guard case let .success(value) = result else { return settle(followUp: nil) }
         let reason = value["stopReason"]?.stringValue.flatMap(AcpStopReason.init(rawValue:)) ?? .endTurn
         events.turnEnded(reason)
-        guard reason == .endTurn, let hooks else { return settle(followUp: nil, drain: reason != .cancelled) }
+        if reason == .cancelled { queueHeld = true }
+        guard reason == .endTurn, let hooks else { return settle(followUp: nil) }
         Task { [weak self] in
             let followUp = await hooks.afterTurn(lastAssistantMessage: reply)
-            self?.settle(followUp: followUp, drain: true)
+            self?.settle(followUp: followUp)
         }
     }
 
-    /// After a turn: the hook's follow-up first, then the queue (unless interrupted), else idle.
-    private func settle(followUp: String?, drain: Bool) {
+    /// After a turn: the hook's follow-up first, then the queue, else idle. A held queue (an
+    /// interrupt during the turn or while settling) drops the follow-up and sends nothing.
+    private func settle(followUp: String?) {
         guard turn == .settling, phase == .ready else { return }
-        if let followUp {
+        guard !steerInFlight else { pendingSettle = .some(followUp); return }
+        if let followUp, !queueHeld {
             send(Outgoing(text: followUp, hooked: false))
-        } else if drain, !queue.isEmpty {
-            send(queue.removeFirst())
         } else {
             turn = .idle
+            advance()
             publishStatus()
         }
     }
 
     private func steerFinished(_ text: String, _ result: Result<JSONValue, Error>) {
+        steerInFlight = false
         guard phase == .ready else { return }
         if case let .success(value) = result, !Self.promptRequired(value) {
             mirror.userPrompt(text)
-            return
+        } else {
+            // Bounced (or failed, or interrupted before it went out): back at the head, ahead of newer items.
+            queue.insert(Outgoing(text: text, hooked: true), at: 0)
+            steerBounced = true
         }
-        let item = Outgoing(text: text, hooked: true)
-        if turn == .idle { send(item) } else { queue.append(item) }
+        if let followUp = pendingSettle {
+            pendingSettle = nil
+            settle(followUp: followUp)
+        } else {
+            advance()
+        }
     }
 
     private func closed() {
         mirror.endTurn()
         releaseHeldRequests()
         turn = .idle
+        steerInFlight = false
+        pendingSettle = nil
         turnReply = ""
         setPhase(.ended)
         publishStatus()
