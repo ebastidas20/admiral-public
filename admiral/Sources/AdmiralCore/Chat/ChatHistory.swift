@@ -295,4 +295,18 @@ public enum ChatHistory {
         }
         return breaks
     }
+
+    /// The ids of the tool items that directly follow another tool item — each is drawn tight
+    /// against the one above, so a run of calls reads as one group. A day divider breaks a run.
+    public static func toolRunFollowers(_ items: [ChatItem], dayBreaks: Set<Int> = []) -> Set<Int> {
+        var followers: Set<Int> = []
+        var previousIsTool = false
+        for item in items {
+            let isTool: Bool
+            if case .tool = item { isTool = true } else { isTool = false }
+            if isTool, previousIsTool, !dayBreaks.contains(item.id) { followers.insert(item.id) }
+            previousIsTool = isTool
+        }
+        return followers
+    }
 }

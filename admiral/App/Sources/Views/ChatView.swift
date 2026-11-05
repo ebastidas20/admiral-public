@@ -4,8 +4,9 @@ import UniformTypeIdentifiers
 import AdmiralCore
 
 /// The Chat rendering of a claude session: what you asked, what the agent said when it
-/// stopped, and the moments it needs you. Tool calls and thinking never appear; while the
-/// agent works there is one "Working…" row, whose tooltip names its current action.
+/// stopped, and the moments it needs you. Thinking never appears, nor do a PTY tab's tool
+/// calls (an ACP tab shows each as a `ToolCard`); while the agent works there is one
+/// "Working…" row, whose tooltip names its current action.
 ///
 /// It only renders the ledger (`SessionManager.chats`) and types into the same PTY the
 /// Terminal view shows — it keeps no conversation state of its own, which is what keeps the
@@ -34,6 +35,21 @@ struct ChatView: View {
     private var chat: ChatTranscript { model.sessions.chats[session.id] ?? .empty }
     private var isWorking: Bool { session.status == .busy && !chat.isWaiting }
 
+    /// The gap between consecutive tool cards (the list's own spacing is 18).
+    private static let toolRunGap: CGFloat = 4
+
+    /// The newest running tool call's streamed output, last 6 lines — nil when none is streaming.
+    private var liveOutput: String? {
+        guard !session.acpLiveOutput.isEmpty else { return nil }
+        for item in chat.items.reversed() {
+            guard case let .tool(_, tool, _) = item, tool.status == .running,
+                  let output = session.acpLiveOutput[tool.id] else { continue }
+            let tail = ChatTool.tail(output, lines: 6)
+            return tail.isEmpty ? nil : tail
+        }
+        return nil
+    }
+
     /// History first, then the live window — without an item both happen to hold.
     private var items: [ChatItem] {
         let live = Set(chat.items.map(\.id))
@@ -49,11 +65,17 @@ struct ChatView: View {
                     historyHeader
                     if items.isEmpty && historyExhausted { emptyState }
                     let dayBreaks = ChatHistory.dayBreaks(items)
+                    let toolFollowers = ChatHistory.toolRunFollowers(items, dayBreaks: dayBreaks)
                     ForEach(items) { item in
                         if dayBreaks.contains(item.id) { DayDivider(ts: item.ts) }
                         ChatItemView(item: item, session: session).equatable()
+                            // A run of tool calls reads as one group: each after the first
+                            // takes back most of the stack's spacing.
+                            .padding(.top, toolFollowers.contains(item.id) ? Self.toolRunGap - 18 : 0)
                     }
-                    if isWorking { WorkingRow(session: session, since: chat.lastPromptTS) }
+                    if isWorking {
+                        WorkingRow(session: session, since: chat.lastPromptTS, liveOutput: liveOutput)
+                    }
                 }
                 .frame(maxWidth: 760, alignment: .leading)
                 .frame(maxWidth: .infinity)
@@ -229,8 +251,8 @@ private struct ChatItemView: View, Equatable {
         case let .notice(_, text, ts):
             NoticeLine(text: text, ts: ts)
                 .contextMenu { CopyButton(text: text) }
-        case .tool:
-            EmptyView()  // The card comes with the ACP tool views.
+        case let .tool(_, tool, _):
+            ToolCard(tool: tool)
         }
     }
 }
@@ -592,19 +614,24 @@ private struct WorkingRow: View {
     @EnvironmentObject var model: AppModel
     let session: AgentSession
     let since: String?
+    /// An ACP tab's running command's latest output lines, shown under the capsule.
+    var liveOutput: String? = nil
 
     var body: some View {
-        HStack(spacing: 10) {
-            SessionAvatarDot(session: session)
-            TimelineView(.periodic(from: .now, by: 1)) { context in
-                WorkingCapsule(elapsed: elapsed(at: context.date)) {
-                    Text("Working…").font(.system(size: 13)).foregroundStyle(Theme.secondaryText)
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 10) {
+                SessionAvatarDot(session: session)
+                TimelineView(.periodic(from: .now, by: 1)) { context in
+                    WorkingCapsule(elapsed: elapsed(at: context.date)) {
+                        Text("Working…").font(.system(size: 13)).foregroundStyle(Theme.secondaryText)
+                    }
                 }
+                .help(currentAction)
+                Spacer(minLength: 0)
             }
-            .help(currentAction)
-            Spacer(minLength: 0)
+            .accessibilityIdentifier("chat-working")
+            if let liveOutput { ToolLiveTail(text: liveOutput) }
         }
-        .accessibilityIdentifier("chat-working")
     }
 
     /// The last tool call in the transcript — the hover detail, never a message.

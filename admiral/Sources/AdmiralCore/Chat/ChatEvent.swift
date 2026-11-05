@@ -85,6 +85,14 @@ public struct ChatTool: Hashable, Sendable {
         self.status = status
         self.detail = detail
     }
+
+    /// The last `count` lines of streaming output (a final newline ends a line, it doesn't
+    /// start an empty one) — what the Working row shows of a running command.
+    public static func tail(_ text: String, lines count: Int) -> String {
+        var lines = text.split(separator: "\n", omittingEmptySubsequences: false)
+        if text.hasSuffix("\n") { lines.removeLast() }
+        return lines.suffix(count).joined(separator: "\n")
+    }
 }
 
 /// One question of an `AskUserQuestion` call — the built-in tool's input shape, as claude

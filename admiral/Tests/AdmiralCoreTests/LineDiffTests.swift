@@ -55,4 +55,28 @@ final class LineDiffTests: XCTestCase {
         XCTAssertEqual(kinds.first, .context)
         XCTAssertEqual(kinds.last, .context)
     }
+
+    /// The card's gutter: context lines carry both numbers, a removal only the old, an
+    /// addition only the new, and each hunk restarts from its own starts.
+    func testNumberedRowsCarryEachSidesLineNumbers() {
+        let hunks = [
+            LineDiff.Hunk(oldStart: 7, newStart: 7, lines: [
+                .init(kind: .context, text: "a"), .init(kind: .removed, text: "b"),
+                .init(kind: .added, text: "B"), .init(kind: .added, text: "B2"), .init(kind: .context, text: "c"),
+            ]),
+            LineDiff.Hunk(oldStart: 30, newStart: 31, lines: [.init(kind: .removed, text: "z")]),
+        ]
+        let rows = LineDiff.numbered(hunks)
+        XCTAssertEqual(rows.map(\.old), [7, 8, nil, nil, 9, 30])
+        XCTAssertEqual(rows.map(\.new), [7, nil, 8, 9, 10, nil])
+        XCTAssertEqual(rows.map(\.hunk), [0, 0, 0, 0, 0, 1])
+        XCTAssertEqual(rows.map(\.line.text), ["a", "b", "B", "B2", "c", "z"])
+    }
+
+    func testTailKeepsTheLastLines() {
+        XCTAssertEqual(ChatTool.tail("1\n2\n3\n4\n", lines: 2), "3\n4")
+        XCTAssertEqual(ChatTool.tail("1\n2\n3", lines: 2), "2\n3")
+        XCTAssertEqual(ChatTool.tail("only", lines: 6), "only")
+        XCTAssertEqual(ChatTool.tail("", lines: 6), "")
+    }
 }

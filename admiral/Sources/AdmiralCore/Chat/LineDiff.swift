@@ -32,6 +32,45 @@ public enum LineDiff {
         }
     }
 
+    /// One drawn row of a diff: a line with the numbers it has in each text (`old` is nil for
+    /// an added line, `new` for a removed one), and which hunk it belongs to.
+    public struct NumberedLine: Hashable, Sendable {
+        public var hunk: Int
+        public var old: Int?
+        public var new: Int?
+        public var line: Line
+
+        public init(hunk: Int, old: Int?, new: Int?, line: Line) {
+            self.hunk = hunk
+            self.old = old
+            self.new = new
+            self.line = line
+        }
+    }
+
+    /// The hunks flattened to rows, each carrying its gutter numbers.
+    public static func numbered(_ hunks: [Hunk]) -> [NumberedLine] {
+        var rows: [NumberedLine] = []
+        for (index, hunk) in hunks.enumerated() {
+            var old = hunk.oldStart, new = hunk.newStart
+            for line in hunk.lines {
+                switch line.kind {
+                case .context:
+                    rows.append(NumberedLine(hunk: index, old: old, new: new, line: line))
+                    old += 1
+                    new += 1
+                case .removed:
+                    rows.append(NumberedLine(hunk: index, old: old, new: nil, line: line))
+                    old += 1
+                case .added:
+                    rows.append(NumberedLine(hunk: index, old: nil, new: new, line: line))
+                    new += 1
+                }
+            }
+        }
+        return rows
+    }
+
     /// Trims the common prefix/suffix, LCS on the rest; if the middle exceeds `limit` lines on either side, one hunk
     /// of all removed then all added lines (bounded work). `context` lines around each change.
     public static func hunks(old: String, new: String, context: Int = 3, limit: Int = 1500) -> [Hunk] {

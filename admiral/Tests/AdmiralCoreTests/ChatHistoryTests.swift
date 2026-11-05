@@ -283,4 +283,15 @@ final class ChatHistoryTests: XCTestCase {
         XCTAssertNotNil(ChatHistory.date("2026-09-21T10:05:00Z"), "ledger")
         XCTAssertNotNil(ChatHistory.date("2026-09-21T10:05:00.123Z"), "transcript")
     }
+
+    /// A run of tool calls is drawn as one tight group: every call after the first in a run
+    /// is a follower; anything else, or a day divider, ends the run.
+    func testToolRunFollowers() {
+        func tool(_ id: Int) -> ChatItem {
+            .tool(id: id, tool: ChatTool(id: "t\(id)", name: "Bash", title: "ls"), ts: ts(id))
+        }
+        let items: [ChatItem] = [tool(1), tool(2), tool(3), .notice(id: 4, text: "n", ts: ts(4)), tool(5), tool(6), tool(7)]
+        XCTAssertEqual(ChatHistory.toolRunFollowers(items), [2, 3, 6, 7])
+        XCTAssertEqual(ChatHistory.toolRunFollowers(items, dayBreaks: [6]), [2, 3, 7])
+    }
 }

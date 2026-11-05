@@ -44,6 +44,13 @@ enum Theme {
     static let inProgressBlue = adaptive(light: 0x2F6BFF, dark: 0x5B8CFF)
     static let pendingGray = adaptive(light: 0xBFBFC7, dark: 0x5A5A62)
 
+    /// A tool card's diff rows: faint fills behind added / removed lines, quiet enough that
+    /// the text on them keeps its normal color.
+    static let diffAdded = adaptive(light: 0xE6F6EA, dark: 0x16301E)
+    static let diffRemoved = adaptive(light: 0xFCE9E9, dark: 0x3A1D1F)
+    /// A failed tool call's mark.
+    static let failureRed = adaptive(light: 0xD93B3B, dark: 0xF26B6B)
+
     static let userAvatar = adaptive(light: 0x2F6BFF, dark: 0x5B8CFF)
     static let busyAmber = adaptive(light: 0xE8912D, dark: 0xF2A93B)
     /// "Unseen completed work" dot — the unread-blue convention, distinct from the amber
