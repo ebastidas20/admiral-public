@@ -43,16 +43,16 @@ extension AppModel {
 
             // Settings → Agents.
             let valid = AcpAgentConfig(
-                name: "Claude Code (PPT)",
+                name: "Claude Code (container)",
                 launch: AcpCommand(command: "docker", args: [
-                    "exec", "-i", "-w", "/workspace", "-e", "HOME=/home/node", "ppt-claude-1",
+                    "exec", "-i", "-w", "/path/in/container", "-e", "HOME=/home/node", "my-container",
                     "npx", "-y", "@agentclientprotocol/claude-agent-acp@0.100.0"]),
-                cwd: "/workspace")
+                cwd: "/path/in/container")
             let legacy = AcpAgentConfig(
                 name: "JetBrains import",
                 launch: AcpCommand(command: "docker", args: [
-                    "exec", "-i", "sm-claude-1", "claude-agent-acp", "--dangerously-skip-permissions"]),
-                env: ["DOCKER_HOST": "unix:///var/run/docker.sock"], cwd: "/workspace")
+                    "exec", "-i", "other-container", "claude-agent-acp", "--dangerously-skip-permissions"]),
+                env: ["DOCKER_HOST": "unix:///var/run/docker.sock"], cwd: "/path/in/container")
             self.acpAgentStore.save([])
             let collapsed = self.sidebarCollapsed
             for dark in [true, false] {
@@ -75,7 +75,7 @@ extension AppModel {
             // The checks behind what was drawn, from the same Core the view reads.
             var dup = legacy
             dup.id = UUID()
-            dup.name = "claude code (ppt)"
+            dup.name = "claude code (container)"
             check("a duplicate name is refused (any case)",
                   dup.validationErrors(among: [valid, legacy]).contains { $0.contains("already exists") },
                   dup.validationErrors(among: [valid, legacy]).joined(separator: "; "))
@@ -83,7 +83,7 @@ extension AppModel {
                   legacy.passesIgnoredSkipPermissionsFlag && !valid.passesIgnoredSkipPermissionsFlag, "legacy only")
             check("exec is derived from the launch",
                   valid.effectiveExec == AcpCommand(command: "docker", args: [
-                      "exec", "-w", "/workspace", "-e", "HOME=/home/node", "ppt-claude-1"]),
+                      "exec", "-w", "/path/in/container", "-e", "HOME=/home/node", "my-container"]),
                   valid.effectiveExec.map { ([$0.command] + $0.args).joined(separator: " ") } ?? "nil")
 
             // ACP tabs, registered without a process. Their agent is not in the store, so no
@@ -98,23 +98,24 @@ extension AppModel {
                 AcpLog.append("[claude-agent-acp] session s1 ready", to: logURL)
             }
             // R12: the tabs' agent, being renamed while they are open — refused, and said so.
-            let pptBox = AcpAgentConfig(
-                name: "PPT box", launch: AcpCommand(command: "docker", args: ["exec", "-i", "ppt-claude-1", "agent"]),
-                cwd: "/workspace")
-            var renamed = pptBox
-            renamed.name = "PPT box (renamed)"
+            let containerBox = AcpAgentConfig(
+                name: "Container box",
+                launch: AcpCommand(command: "docker", args: ["exec", "-i", "my-container", "agent"]),
+                cwd: "/path/in/container")
+            var renamed = containerBox
+            renamed.name = "Container box (renamed)"
             let openNames = self.sessions.sessions.compactMap { s -> String? in
                 if case let .acp(name) = s.backend { return name }
                 return nil
             }
             check("renaming an agent with open tabs is refused",
-                  renamed.validationErrors(among: [pptBox], openTabAgents: openNames)
+                  renamed.validationErrors(among: [containerBox], openTabAgents: openNames)
                       == [AcpAgentConfig.renameWithOpenTabs], openNames.joined(separator: ", "))
             check("deleting an agent with open tabs is refused",
-                  pptBox.deletionError(openTabAgents: openNames) == AcpAgentConfig.deleteWithOpenTabs,
+                  containerBox.deletionError(openTabAgents: openNames) == AcpAgentConfig.deleteWithOpenTabs,
                   openNames.joined(separator: ", "))
             for dark in [true, false] {
-                self.acpAgentStore.save([pptBox])
+                self.acpAgentStore.save([containerBox])
                 await draw("agents-rename-blocked", settings(renamed), NSSize(width: 640, height: 1180), dark: dark)
             }
             for dark in [true, false] {
@@ -165,17 +166,18 @@ extension AppModel {
             bridgeRunning: false, git: git, gh: git == true ? false : nil, ghAuthed: git == true ? false : nil)
     }
 
-    /// Two ACP tabs on "PPT box": `ready` mid-turn on a permission, with a reply in its chat
+    /// Two ACP tabs on "Container box": `ready` mid-turn on a permission, with a reply in its chat
     /// and one message queued; `failed`, whose container was stopped.
     func seedACPTabsForUIProbe() -> (ready: AgentSession, failed: AgentSession) {
         let base = sessions.supportDir
         func tab(_ name: String, color: String, status: SessionStatus) -> AgentSession {
             let sid = UUID().uuidString.lowercased()
             var s = AgentSession(
-                callsign: name, agentType: .acp(agentName: "PPT box"), cwd: "/workspace", claudeSessionID: sid,
+                callsign: name, agentType: .acp(agentName: "Container box"), cwd: "/path/in/container",
+                claudeSessionID: sid,
                 transcriptPath: TranscriptMirror.url(base: base, session: sid).path, status: status,
                 avatarColorHex: color, avatarSymbol: "shippingbox")
-            s.backend = .acp(agentName: "PPT box")
+            s.backend = .acp(agentName: "Container box")
             s.acpSessionID = "acp-\(name)"
             return s
         }
@@ -184,7 +186,7 @@ extension AppModel {
         ready.acpQueued = ["Also update the changelog when you're done."]
         let sid = ready.claudeSessionID ?? ""
         let mirror = TranscriptMirror(
-            url: TranscriptMirror.url(base: base, session: sid), sessionID: sid, cwd: "/workspace")
+            url: TranscriptMirror.url(base: base, session: sid), sessionID: sid, cwd: "/path/in/container")
         mirror.userPrompt("The login form rejects valid emails with a plus sign. Fix it and run the tests.")
         mirror.apply(.agentMessage("The validator's regex doesn't allow `+` in the local part. "
                                    + "I've widened it and added a test case; running the suite now."))
@@ -195,7 +197,7 @@ extension AppModel {
 
         var failed = tab("nightly-db", color: "#E8912D", status: .shell)
         failed.connectError = "the agent exited before it started: Error response from daemon: "
-            + "container ppt-claude-1 is not running"
+            + "container my-container is not running"
         for session in [ready, failed] { sessions.register(session, handle: nil) }
         sessions.refreshChat(ready.id)
         return (ready, failed)

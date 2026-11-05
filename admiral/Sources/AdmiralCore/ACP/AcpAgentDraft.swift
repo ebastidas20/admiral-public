@@ -29,9 +29,10 @@ public struct AcpAgentDraft: Equatable, Sendable {
         exec = config.exec.map { ([$0.command] + $0.args).joined(separator: "\n") } ?? ""
     }
 
-    /// A new agent's starting point: the config's defaults, `/workspace` as its folder.
+    /// A new agent's starting point: the config's defaults, every field empty — the form's
+    /// placeholders show the shape, and no one's container path is pre-filled as a value.
     public static func new() -> AcpAgentDraft {
-        AcpAgentDraft(AcpAgentConfig(name: "", launch: AcpCommand(command: ""), cwd: "/workspace"))
+        AcpAgentDraft(AcpAgentConfig(name: "", launch: AcpCommand(command: ""), cwd: ""))
     }
 
     public var config: AcpAgentConfig {

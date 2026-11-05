@@ -141,7 +141,7 @@ final class AcpAgentConfigTests: XCTestCase {
     func testDraftParsesLinesAndPairsAndEmptyExecMeansDerived() {
         var draft = AcpAgentDraft.new()
         XCTAssertEqual(draft.defaultMode, "bypassPermissions")
-        XCTAssertEqual(draft.cwd, "/workspace")
+        XCTAssertEqual(draft.cwd, "", "no container path pre-filled")
         draft.name = " PPT "
         draft.command = "docker"
         draft.args = "exec\n  -i\n\nbox\nnpx -y pkg@1.2.3\n"

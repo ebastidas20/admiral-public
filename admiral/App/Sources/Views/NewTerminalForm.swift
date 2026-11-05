@@ -62,7 +62,7 @@ struct NewTerminalForm: View {
             }
             labeled(agent == nil ? "Folder" : "Folder, as the agent sees it", required: true) {
                 HStack(spacing: 8) {
-                    TextField(agent == nil ? "~/" : "/workspace", text: $folder).textFieldStyle(.plain)
+                    TextField(agent == nil ? "~/" : "/path/in/container", text: $folder).textFieldStyle(.plain)
                     if agent == nil { Button("Choose…") { picking = true } }
                 }
             }

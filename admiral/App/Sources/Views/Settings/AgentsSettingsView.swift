@@ -107,16 +107,22 @@ struct AgentsSettingsView: View {
 
     // MARK: - Form
 
+    /// The form that works: `npx` fetches the adapter in the container (a bare
+    /// `claude-agent-acp` is usually not installed there). Generic names, nobody's setup.
+    static let argumentsPlaceholder = ["exec", "-i", "-w", "/path/in/container", "my-container",
+                                       "npx", "-y", "@agentclientprotocol/claude-agent-acp@<version>"]
+        .joined(separator: "\n")
+
     private func form(_ current: AcpAgentDraft) -> some View {
         let config = current.config
         let errors = config.validationErrors(among: agents, openTabAgents: openTabAgents)
         return SettingsCard(draftIsNew ? "New agent" : "Edit \u{201C}\(config.name)\u{201D}",
                             "Launched directly — no shell — with one literal argument per line.") {
             VStack(alignment: .leading, spacing: 12) {
-                field("Name", \.name, placeholder: "Claude Code (PPT)", id: "agent-name")
+                field("Name", \.name, placeholder: "Claude Code (container)", id: "agent-name")
                 field("Command", \.command, placeholder: "docker", id: "agent-command", mono: true)
-                multiline("Arguments", \.args, placeholder: "exec\n-i\nppt-claude-1\nclaude-agent-acp",
-                          id: "agent-args", height: 120)
+                multiline("Arguments", \.args, placeholder: Self.argumentsPlaceholder,
+                          id: "agent-args", height: 150)
                 if config.passesIgnoredSkipPermissionsFlag {
                     note("exclamationmark.triangle.fill",
                          "claude-agent-acp ignores --dangerously-skip-permissions. "
@@ -126,7 +132,7 @@ struct AgentsSettingsView: View {
                 multiline("Environment", \.env, placeholder: "KEY=value", id: "agent-env", height: 52)
                 caption("Applies to the command on this Mac, not inside a container. "
                         + "Use `docker exec -e` for the agent's environment.")
-                field("Folder", \.cwd, placeholder: "/workspace", id: "agent-cwd", mono: true)
+                field("Folder", \.cwd, placeholder: "/path/in/container", id: "agent-cwd", mono: true)
                 caption("Absolute, as the agent sees it (inside the container).")
                 field("Mode", \.defaultMode, placeholder: "none", id: "agent-mode", mono: true)
                 multiline("Config options", \.configOptions, placeholder: "model=opus", id: "agent-options",
