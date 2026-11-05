@@ -67,7 +67,7 @@ public final class AcpSessionController: SessionDriver {
     }
 
     /// What the tab shows as waiting to go out, oldest first.
-    public var queued: [String] { queue.map(\.text) }
+    public var queued: [String] { queue.map(\.raw) }
     public private(set) var phase: Phase = .connecting
     public private(set) var acpSessionID: String?
     public private(set) var capabilities: AcpCapabilities?
@@ -82,13 +82,28 @@ public final class AcpSessionController: SessionDriver {
     private let events: Events
 
     private enum Turn { case idle, prompting, settling }
-    /// A queued prompt; `hooked` = already through `beforePrompt` (a steer the agent bounced).
-    private struct Outgoing { var text: String; var hooked: Bool }
+    /// A queued prompt. `raw` is what the user (or Admiral) wrote — what the mirror shows, as a
+    /// claude transcript never shows a hook's `additionalContext` as part of the prompt; `text`
+    /// is what goes on the wire, and `hooked` = it already went through `beforePrompt` (a steer
+    /// the agent bounced, or a prompt put back by an interrupt).
+    private struct Outgoing {
+        var raw: String
+        var text: String
+        var hooked: Bool
+        init(text: String) { (raw, self.text, hooked) = (text, text, false) }
+        init(raw: String, hookedText: String) { (self.raw, text, hooked) = (raw, hookedText, true) }
+
+        /// Through `beforePrompt` once; an already-hooked item passes as it is.
+        func hooked(by hooks: AcpTurnHooks?) async -> Outgoing {
+            guard !hooked, let hooks else { return self }
+            return Outgoing(raw: raw, hookedText: await hooks.beforePrompt(text))
+        }
+    }
     private enum Inbound: Sendable {
         case notification(String, JSONValue)
         case request(String, JSONValue, CheckedContinuation<JSONValue, Error>)
         case promptFinished(Result<JSONValue, Error>)
-        case steerFinished(text: String, Result<JSONValue, Error>)
+        case steerFinished(Outgoing, Result<JSONValue, Error>)
         /// `session/load` answered: every replayed update is already ahead of this in the inbox.
         case replayDone
         case closed
@@ -169,6 +184,8 @@ public final class AcpSessionController: SessionDriver {
 
         do {
             try await handshake(start)
+        } catch let error as JSONRPCError where error == .closed {
+            fail(Self.exitedBeforeStart)
         } catch {
             fail(Self.message(error))
         }
@@ -263,7 +280,7 @@ public final class AcpSessionController: SessionDriver {
         case .failed, .ended: return false
         case .connecting, .ready: break
         }
-        queue.append(Outgoing(text: text, hooked: false))
+        queue.append(Outgoing(text: text))
         queueHeld = false
         advance()
         return true
@@ -342,17 +359,17 @@ public final class AcpSessionController: SessionDriver {
         publishStatus()
         let (connection, hooks, inboxIn) = (connection, hooks, inboxIn)
         Task { [weak self] in
-            var text = item.text
-            if !item.hooked, let hooks { text = await hooks.beforePrompt(text) }
+            let item = await item.hooked(by: hooks)
+            let text = item.text
             guard let self, self.phase == .ready, let sid = self.acpSessionID else { return }
             guard !self.queueHeld else {
                 // Interrupted before it went out: not sent, and not lost — back at the head.
-                self.queue.insert(Outgoing(text: text, hooked: true), at: 0)
+                self.queue.insert(item, at: 0)
                 self.turn = .idle
                 self.publishStatus()
                 return
             }
-            self.mirror.userPrompt(text)
+            self.mirror.userPrompt(item.raw)
             self.promptSent = true
             self.advance()
             let result: Result<JSONValue, Error>
@@ -373,20 +390,19 @@ public final class AcpSessionController: SessionDriver {
         guard let sid = acpSessionID else { return }
         steerInFlight = true
         Task { [weak self] in
-            var text = item.text
-            if !item.hooked, let hooks { text = await hooks.beforePrompt(text) }
+            let item = await item.hooked(by: hooks)
             if self?.queueHeld == true {
-                self?.steerFinished(text, .success(.string("promptRequired")))
+                self?.steerFinished(item, .success(.string("promptRequired")))
                 return
             }
             let result: Result<JSONValue, Error>
             do {
                 result = .success(try await connection.request(
-                    "_session/steering", params: AcpClient.steeringParams(sessionID: sid, text: text)))
+                    "_session/steering", params: AcpClient.steeringParams(sessionID: sid, text: item.text)))
             } catch {
                 result = .failure(error)
             }
-            inboxIn.yield(.steerFinished(text: text, result))
+            inboxIn.yield(.steerFinished(item, result))
         }
     }
 
@@ -397,7 +413,7 @@ public final class AcpSessionController: SessionDriver {
         case let .notification(method, params): notification(method, params)
         case let .request(method, params, reply): request(method, params, reply)
         case let .promptFinished(result): promptFinished(result)
-        case let .steerFinished(text, result): steerFinished(text, result)
+        case let .steerFinished(item, result): steerFinished(item, result)
         case .replayDone:
             replaying = false
             // A replay written into a fresh mirror lands as its own lines, not ahead of the next prompt.
@@ -479,7 +495,7 @@ public final class AcpSessionController: SessionDriver {
             // Already hooked: a Stop block's continuation is not a user prompt (claude fires no
             // UserPromptSubmit for it). Through `beforePrompt` it would reset the goal-review and
             // watchdog budgets the block just spent, and the turn would loop forever.
-            send(Outgoing(text: followUp, hooked: true))
+            send(Outgoing(raw: followUp, hookedText: followUp))
         } else {
             turn = .idle
             advance()
@@ -487,14 +503,14 @@ public final class AcpSessionController: SessionDriver {
         }
     }
 
-    private func steerFinished(_ text: String, _ result: Result<JSONValue, Error>) {
+    private func steerFinished(_ item: Outgoing, _ result: Result<JSONValue, Error>) {
         steerInFlight = false
         guard phase == .ready else { return }
         if case let .success(value) = result, !Self.promptRequired(value) {
-            mirror.userPrompt(text)
+            mirror.userPrompt(item.raw)
         } else {
             // Bounced (or failed, or interrupted before it went out): back at the head, ahead of newer items.
-            queue.insert(Outgoing(text: text, hooked: true), at: 0)
+            queue.insert(item, at: 0)
             steerBounced = true
         }
         if let followUp = pendingSettle {
@@ -505,7 +521,14 @@ public final class AcpSessionController: SessionDriver {
         }
     }
 
+    /// The handshake's reason when the transport closed under it. Both orders of the close event
+    /// and the failed request land on this same reason, so the tab never reads "ended" for an
+    /// agent that never started (a stopped container, a missing binary).
+    static let exitedBeforeStart = "the agent exited before the session started"
+
     private func closed() {
+        // Before the session started this is a failed launch, not an ended session.
+        fail(Self.exitedBeforeStart)
         mirror.endTurn()
         releaseHeldRequests()
         turn = .idle

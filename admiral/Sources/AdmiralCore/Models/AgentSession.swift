@@ -50,6 +50,10 @@ public struct AgentSession: Identifiable, Sendable, Hashable {
     public var backend: SessionBackend = .pty
     /// The agent's own session id on an ACP tab (`session/new`); nil on a PTY tab.
     public var acpSessionID: String? = nil
+    /// Why an ACP tab's agent is not running — a failed launch or handshake (a stopped
+    /// container, a refused mode), or the agent exiting later — with the agent's last stderr
+    /// line when it left one. Nil while it runs; a reload starts a fresh session, so it clears.
+    public var connectError: String? = nil
     /// Distinct git repos this session has written to, aggregated from its hook log.
     /// Ephemeral (rebuilt from the on-disk log); not part of the initializer.
     public var touchedRepos: [TouchedRepo] = []

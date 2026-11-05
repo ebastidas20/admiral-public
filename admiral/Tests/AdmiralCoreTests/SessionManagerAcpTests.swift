@@ -259,6 +259,67 @@ final class SessionManagerAcpTests: XCTestCase {
         XCTAssertEqual(session(s.id)?.status, .idle)
     }
 
+    func testTransportEndingMidPromptEndsTheTabRunAsAFailure() async throws {
+        let agent = ScriptedAgent()
+        let s = await readyTab(agent)
+        let path = try XCTUnwrap(s.transcriptPath)
+        let run = TabRun(backend: manager, config: TabRun.Config(busySeenTimeout: 30, turnTimeout: 30,
+                                                                 pollInterval: 0.01))
+        XCTAssertTrue(manager.inject(s.id, text: "go"))
+        await until("prompt") { agent.heldPrompts == 1 }
+        Task {
+            try? await Task.sleep(nanoseconds: 100_000_000)
+            agent.fake.finish()   // the container stopped mid-turn
+        }
+        let started = Date()
+        let turn = await run.awaitTurn(tabID: s.id, path: path, fromOffset: 0)
+        XCTAssertTrue(turn.agentExited)
+        XCTAssertFalse(turn.timedOut)
+        XCTAssertLessThan(Date().timeIntervalSince(started), 5, "returned on exit, not at turnTimeout")
+        XCTAssertEqual(session(s.id)?.status, .shell)
+        XCTAssertEqual(session(s.id)?.connectError, "the agent exited")
+    }
+
+    func testAgentDyingBeforeInitializeShowsAReasonAndReloadRecovers() async throws {
+        let s = await readyTab(ScriptedAgent(capabilities: resume))
+        let sid = try XCTUnwrap(s.claudeSessionID)
+        await until("record") { manager.restorableSessions().first?.acpSessionID == "s1" }
+
+        // The container is stopped: docker prints why on stderr and exits before `initialize` answers.
+        let dead = ScriptedAgent(capabilities: resume)
+        let log = SessionManager.acpLogURL(base: base, session: sid)
+        dead.on("initialize") { [dead] _ in
+            AcpLog.append("Error response from daemon: container c is not running", to: log)
+            dead.fake.finish()
+            return .hold
+        }
+        scripted.append(dead)
+        let failed = try XCTUnwrap(manager.reload(s.id))
+        await until("dead tab") { session(failed.id)?.status == .shell }
+        await until("reason") { session(failed.id)?.connectError != nil }
+        XCTAssertEqual(session(failed.id)?.connectError,
+                       AcpSessionController.exitedBeforeStart
+                           + ": Error response from daemon: container c is not running")
+        XCTAssertEqual(manager.restorableSessions().first?.acpSessionID, "s1", "the tab stays restorable")
+        XCTAssertEqual(manager.restorableSessions().first?.sessionID, sid)
+
+        scripted.append(ScriptedAgent(capabilities: resume))
+        let back = try XCTUnwrap(manager.reload(failed.id))
+        await until("recovered") { session(back.id)?.status == .idle }
+        XCTAssertNil(session(back.id)?.connectError)
+        XCTAssertEqual(back.claudeSessionID, sid)
+        XCTAssertEqual(launched.last?.params(of: "session/resume").first?["sessionId"]?.stringValue, "s1")
+    }
+
+    func testRefusedModeIsTheRecordedReason() async {
+        let agent = ScriptedAgent()
+        agent.on("session/set_mode") { _ in .error(-32603, "root needs IS_SANDBOX=1") }
+        scripted.append(agent)
+        let s = manager.commissionACP(agent: ppt, callsign: "x")
+        await until("reason") { session(s.id)?.connectError != nil }
+        XCTAssertEqual(session(s.id)?.connectError, "agent refused mode bypassPermissions: root needs IS_SANDBOX=1")
+    }
+
     // MARK: - Restore / reload
 
     func testRestoreKeepsACPRecordWhoseCwdIsNotOnTheMac() async {

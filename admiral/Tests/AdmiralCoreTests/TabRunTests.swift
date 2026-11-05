@@ -54,6 +54,30 @@ final class TabRunTests: XCTestCase {
         XCTAssertEqual(backend.polls, 2)
     }
 
+    /// The agent's process went away mid-turn: no idle will ever come, so the run ends at once.
+    func testAShellAfterBusyEndsTheTurnAsAgentExited() async {
+        let backend = ScriptedTabRunBackend(statuses: [.busy, .shell], resolveSlotAfterPolls: 100)
+        let turn = await TabRun(backend: backend, config: config).awaitTurn(tabID: UUID(), path: path, fromOffset: 0)
+        XCTAssertTrue(turn.agentExited)
+        XCTAssertFalse(turn.timedOut)
+        XCTAssertEqual(backend.polls, 2)
+    }
+
+    /// A `.shell` read before the turn was ever seen busy does not end it early: it holds for
+    /// `busySeenTimeout` first, and a turn that does show up busy then runs to its idle.
+    func testAShellBeforeBusyDoesNotEndTheTurnEarly() async {
+        let backend = ScriptedTabRunBackend(statuses: [.shell, .busy, .busy, .idle], resolveSlotAfterPolls: 100)
+        let turn = await TabRun(backend: backend, config: config).awaitTurn(tabID: UUID(), path: path, fromOffset: 0)
+        XCTAssertFalse(turn.agentExited)
+        XCTAssertEqual(backend.polls, 4)
+
+        let dead = ScriptedTabRunBackend(statuses: [.shell], resolveSlotAfterPolls: 100)
+        let started = Date()
+        let gone = await TabRun(backend: dead, config: config).awaitTurn(tabID: UUID(), path: path, fromOffset: 0)
+        XCTAssertTrue(gone.agentExited)
+        XCTAssertGreaterThanOrEqual(Date().timeIntervalSince(started), config.busySeenTimeout)
+    }
+
     func testAPromptIsRetypedUntilItLands() async {
         let backend = ScriptedTabRunBackend(statuses: [.idle], resolveSlotAfterPolls: 100)
         backend.landOnAttempt = 2

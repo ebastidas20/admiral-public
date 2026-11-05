@@ -70,6 +70,8 @@ extension SessionManager {
 
         var config = agent
         config.cwd = cwd
+        // This launch's stretch of the log (it accumulates across reloads), for the failure reason.
+        let logStart = AcpLog.size(logURL)
         var controller: AcpSessionController?
         do {
             let transport = try acpTransportFactory(config, logURL)
@@ -83,7 +85,7 @@ extension SessionManager {
                 config: config, connection: connection,
                 mirror: TranscriptMirror(url: mirrorURL, sessionID: sessionID, cwd: cwd),
                 mcpServer: sessionBridge?(session.token), hooks: hooks,
-                events: acpEvents(id, controller: box, logURL: logURL),
+                events: acpEvents(id, controller: box, logURL: logURL, logStart: logStart),
                 // `session/load` replays the whole history. The mirror already holds it (same
                 // local id, same file), so the replay is dropped — unless the file is gone, in
                 // which case the replay is what rebuilds the Chat history.
@@ -93,6 +95,7 @@ extension SessionManager {
         } catch {
             AcpLog.append("acp: could not launch \(agent.name): \(error)", to: logURL)
             session.status = .shell
+            session.connectError = "could not launch \(agent.name): \(error)"
         }
 
         install(session, driver: controller)
@@ -103,12 +106,12 @@ extension SessionManager {
     /// The controller's events, into this tab. Weak both ways: the manager owns the controller
     /// (through `drivers`), and the controller owns these closures.
     private func acpEvents(
-        _ id: UUID, controller: WeakController, logURL: URL
+        _ id: UUID, controller: WeakController, logURL: URL, logStart: UInt64
     ) -> AcpSessionController.Events {
         AcpSessionController.Events(
             status: { [weak self] in self?.applyStatus($0, to: id) },
             phase: { [weak self] phase in
-                self?.acpPhaseChanged(id, phase, controller: controller.value, logURL: logURL)
+                self?.acpPhaseChanged(id, phase, controller: controller.value, logURL: logURL, logStart: logStart)
             },
             sessionStarted: { [weak self] acpSessionID, _, _ in self?.acpSessionStarted(id, acpSessionID) },
             update: { [weak self] _ in self?.update(id) { $0.lastActivityAt = Date() } })
@@ -117,31 +120,43 @@ extension SessionManager {
     /// The agent named its session: remember it on the tab, and — unless scratch — write the
     /// restore record, keeping the tab list's order (the upsert appends).
     private func acpSessionStarted(_ id: UUID, _ acpSessionID: String) {
-        update(id) { $0.acpSessionID = acpSessionID }
+        update(id) {
+            $0.acpSessionID = acpSessionID
+            $0.connectError = nil
+        }
         guard let s = sessions.first(where: { $0.id == id }), !s.scratch else { return }
         persistRecord(of: s)
         openSessionsStore.reorder(sessions.compactMap(\.claudeSessionID))
     }
 
     /// A failed handshake ends the agent's process and leaves the tab dead; an ended connection
-    /// is already dead. Either way, input still queued would vanish without a word, so each
-    /// item is written to the tab's ACP log.
+    /// is already dead. Either way the tab records why (`connectError`, with the agent's last
+    /// stderr line from this launch), and input still queued — which would otherwise vanish
+    /// without a word — is written to the tab's ACP log. A failure is reported once: the
+    /// `.ended` that follows a `.failed` adds nothing.
     private func acpPhaseChanged(
-        _ id: UUID, _ phase: AcpSessionController.Phase, controller: AcpSessionController?, logURL: URL
+        _ id: UUID, _ phase: AcpSessionController.Phase, controller: AcpSessionController?,
+        logURL: URL, logStart: UInt64
     ) {
         let state: String
+        let reason: String
         switch phase {
         case .connecting, .ready:
             return
         case let .failed(message):
             AcpLog.append("acp: session failed: \(message)", to: logURL)
             state = "failed"
+            reason = message
             controller?.terminate()
             applyStatus(.shell, to: id)
         case .ended:
+            guard sessions.first(where: { $0.id == id })?.connectError == nil else { return }
             AcpLog.append("acp: agent connection closed", to: logURL)
             state = "ended"
+            reason = "the agent exited"
         }
+        let stderr = AcpLog.lastAgentLine(logURL, after: logStart)
+        update(id) { $0.connectError = stderr.map { "\(reason): \($0)" } ?? reason }
         for text in controller?.queued ?? [] {
             AcpLog.append("acp: not delivered (session \(state)): \(text)", to: logURL)
         }

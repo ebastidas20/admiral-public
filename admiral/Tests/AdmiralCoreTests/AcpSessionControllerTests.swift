@@ -500,6 +500,72 @@ final class AcpSessionControllerTests: XCTestCase {
         XCTAssertTrue(transcript.contains("partial"), "the mirror flushed the cut-off turn")
     }
 
+    // MARK: - Mirror shows the raw prompt (fix round, R9)
+
+    private func mirroredUserTexts() -> [String] {
+        let url = TranscriptMirror.url(base: dir, session: "adm")
+        let raw = (try? String(contentsOf: url, encoding: .utf8)) ?? ""
+        return raw.split(separator: "\n").compactMap { line -> String? in
+            let v = (try? JSONDecoder().decode(JSONValue.self, from: Data(line.utf8))) ?? .null
+            guard v["type"]?.stringValue == "user" else { return nil }
+            return v["message"]?["content"]?.stringValue
+        }
+    }
+
+    func testMirrorShowsTheRawPromptAndTheWireCarriesTheHookContext() async {
+        let agent = ScriptedAgent()
+        let hooks = RecordingHooks()
+        let c = await ready(agent, hooks: hooks)
+        XCTAssertTrue(c.deliver("hi"))
+        await until("prompt sent") { agent.heldPrompts == 1 }
+        XCTAssertEqual(agent.prompts(), ["[reminder] hi"])
+        XCTAssertEqual(mirroredUserTexts(), ["hi"])
+    }
+
+    func testABouncedSteerIsMirroredRawOnceAndHookedOnce() async {
+        let agent = ScriptedAgent(capabilities: steering)
+        agent.on("_session/steering") { _ in .result(.object(["outcome": .string("promptRequired")])) }
+        let hooks = RecordingHooks()
+        let c = await ready(agent, hooks: hooks)
+        XCTAssertTrue(c.deliver("first"))
+        await until("prompt sent") { agent.heldPrompts == 1 }
+        XCTAssertTrue(c.deliver("second"))
+        await until("bounced") { c.queued == ["second"] }
+        agent.endPrompt()
+        await until("queued prompt sent") { agent.prompts().count == 2 }
+        XCTAssertEqual(agent.prompts(), ["[reminder] first", "[reminder] second"])
+        XCTAssertEqual(hooks.before, ["first", "second"], "the bounced steer is not hooked twice")
+        XCTAssertEqual(mirroredUserTexts(), ["first", "second"])
+    }
+
+    func testAPromptPutBackByAnInterruptIsMirroredRawWhenItGoes() async {
+        let agent = ScriptedAgent()
+        let gated = GatedHooks(gateBefore: true)
+        let c = await ready(agent, hooks: gated)
+        XCTAssertTrue(c.deliver("held"))
+        await until("in hook") { gated.before.waiting == 1 }
+        c.interrupt()
+        gated.before.open()
+        await until("put back") { c.queued == ["held"] }
+        XCTAssertTrue(c.deliver("next"))
+        await until("sent") { agent.heldPrompts == 1 }
+        XCTAssertEqual(mirroredUserTexts(), ["held"])
+        XCTAssertEqual(c.queued, ["next"])
+    }
+
+    func testTransportClosingBeforeInitializeAnswersFailsTheLaunch() async {
+        let agent = ScriptedAgent()
+        agent.on("initialize") { [agent] _ in
+            agent.fake.finish()
+            return .hold
+        }
+        let c = make(agent)
+        await c.start(.new)
+        await until("failed") { if case .failed = c.phase { true } else { phases.last == .ended } }
+        guard case let .failed(message)? = phases.first else { return XCTFail("not failed first: \(phases)") }
+        XCTAssertEqual(message, AcpSessionController.exitedBeforeStart)
+    }
+
     func testTerminateClosesSessionWhenAdvertised() async {
         let agent = ScriptedAgent(capabilities: .object(["sessionCapabilities": .object(["close": .object([:])])]))
         let c = await ready(agent)
