@@ -109,7 +109,7 @@ struct AdmiralCommands: Commands {
             }
             .keyboardShortcut("r", modifiers: [.command, .shift])
             Divider()
-            Button("Delete Selected…") { model.requestDeleteSelected() }
+            Button("Delete Selected…") { model.deleteKeyCommand() }
                 .keyboardShortcut(.delete, modifiers: .command)
         }
         CommandGroup(before: .windowArrangement) {
