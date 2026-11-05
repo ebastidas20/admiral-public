@@ -1136,8 +1136,12 @@ struct ComposerHint: View {
     let isWorking: Bool
 
     var body: some View {
+        // One line, first to give way: squeezed by a row of option chips, a wrapping hint
+        // stood one character wide and stretched the whole composer.
         Text(isWorking ? "↵ queue · ⇧↵ newline · esc interrupt" : "↵ send · ⇧↵ newline")
             .font(.system(size: 11)).foregroundStyle(Theme.secondaryText)
+            .lineLimit(1).truncationMode(.tail)
+            .layoutPriority(-1)
     }
 }
 

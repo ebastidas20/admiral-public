@@ -183,7 +183,7 @@ extension AppModel {
         }
     }
 
-    /// The agent's catalog as Settings and the composer get it: a mode and a model option.
+    /// The agent's catalog as Settings gets it: a mode and a model option.
     static let probeCatalog: [AcpConfigOption] = [
         AcpConfigOption(id: "mode", name: "Mode", description: "How the agent asks before acting",
                         category: "mode", currentValue: "default", values: [
@@ -195,6 +195,26 @@ extension AppModel {
             AcpOptionValue(value: "default", name: "Default (recommended)"),
             AcpOptionValue(value: "large", name: "Large model", group: "Other models"),
             AcpOptionValue(value: "small", name: "Small model", group: "Other models"),
+        ]),
+    ]
+
+    /// The tab's options: the catalog, then as many more as a real agent sends (effort, two
+    /// on/off toggles, a long-valued picker), so the composer's bottom row is drawn as crowded
+    /// as it gets.
+    static let probeTabOptions: [AcpConfigOption] = probeCatalog + [
+        AcpConfigOption(id: "effort", name: "Effort", category: "thought_level", currentValue: "medium", values: [
+            AcpOptionValue(value: "low", name: "Low"), AcpOptionValue(value: "medium", name: "Medium"),
+            AcpOptionValue(value: "high", name: "High"),
+        ]),
+        AcpConfigOption(id: "fast", name: "Fast", category: "model_config", currentValue: "off", values: [
+            AcpOptionValue(value: "on", name: "On"), AcpOptionValue(value: "off", name: "Off"),
+        ]),
+        AcpConfigOption(id: "verbose", name: "Verbose", category: "model_config", currentValue: "off", values: [
+            AcpOptionValue(value: "on", name: "On"), AcpOptionValue(value: "off", name: "Off"),
+        ]),
+        AcpConfigOption(id: "agent", name: "Agent", currentValue: "team:reviewer", values: [
+            AcpOptionValue(value: "default", name: "Default"),
+            AcpOptionValue(value: "team:reviewer", name: "team:reviewer"),
         ]),
     ]
 
@@ -272,7 +292,7 @@ extension AppModel {
         tab.backend = .acp(agentName: "Probe agent")
         tab.acpSessionID = "acp-tidy-api"
         tab.acpCapabilities = Self.probeRecord(fork: true, list: true, git: true)
-        tab.acpConfigOptions = catalog
+        tab.acpConfigOptions = Self.probeTabOptions
         tab.acpCommands = [
             AcpCommandInfo(name: "review", description: "Review a pull request", hint: "<pr-number>"),
             AcpCommandInfo(name: "compact", description: "Summarize the conversation to free context"),
@@ -330,12 +350,12 @@ extension AppModel {
               shape == ["Bash:failed:output", "Edit:completed:diff", "Bash:running:none"],
               shape.joined(separator: ", "))
 
-        func composer(_ text: String, files: [String]? = nil) -> AnyView {
+        func composer(_ text: String, files: [String]? = nil, width: CGFloat = 820) -> AnyView {
             AnyView(VStack(spacing: 0) {
                 Spacer(minLength: 0)
                 ChatComposer(session: live, isWorking: false, initialText: text, probeFiles: files)
             }
-            .frame(width: 820, height: 340).background(Theme.surface))
+            .frame(width: width, height: 340).background(Theme.surface))
         }
         let files = ["src/api/users.ts", "src/api/users.test.ts", "src/api/orders.ts", "src/server.ts",
                      "README.md"]
@@ -345,6 +365,7 @@ extension AppModel {
             await draw("composer-chips", composer(""), NSSize(width: 820, height: 340), dark) { host in
                 chips = Self.accessibilityIdentifiers(host)
             }
+            await draw("composer-chips-narrow", composer("", width: 560), NSSize(width: 560, height: 340), dark) { _ in }
             await draw("composer-slash", composer("/"), NSSize(width: 820, height: 340), dark) { _ in }
             await draw("composer-slash-hint", composer("/review "), NSSize(width: 820, height: 340), dark) { _ in }
             await draw("composer-files", composer("see @src", files: files),

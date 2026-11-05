@@ -4,16 +4,23 @@ import AdmiralCore
 /// An ACP tab's config options in the composer's bottom bar: one menu chip per option (mode,
 /// model, effort, …, in `AcpConfigOption.ordered` order), its label the current value. Picking
 /// sets it on the agent; a refusal is handed to `onError` (nil = cleared, on every pick).
-/// No options = no chips; a dead tab's chips are disabled.
+/// No options = no chips; a dead tab's chips are disabled. A row wider than the composer
+/// scrolls sideways instead of pushing the composer past the window's edge.
 struct AcpOptionChips: View {
     @EnvironmentObject var model: AppModel
     let session: AgentSession
     let onError: (String?) -> Void
 
     var body: some View {
-        let options = AcpConfigOption.ordered(session.acpConfigOptions)
+        ViewThatFits(in: .horizontal) {
+            chips
+            ScrollView(.horizontal, showsIndicators: false) { chips }
+        }
+    }
+
+    private var chips: some View {
         HStack(spacing: 4) {
-            ForEach(options) { option in
+            ForEach(AcpConfigOption.ordered(session.acpConfigOptions)) { option in
                 AcpOptionChip(option: option) { value in pick(option, value) }
                     .disabled(session.connectError != nil)
             }
