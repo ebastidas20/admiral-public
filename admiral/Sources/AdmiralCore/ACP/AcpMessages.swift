@@ -38,6 +38,13 @@ public enum AcpClient {
         loadOrResumeParams(sessionID: sessionID, cwd: cwd, mcpServers: mcpServers)
     }
 
+    /// `session/list` for one folder, from `cursor` (a previous page's `nextCursor`) when given.
+    public static func listSessionsParams(cwd: String, cursor: String? = nil) -> JSONValue {
+        var o: [String: JSONValue] = ["cwd": .string(cwd)]
+        if let cursor { o["cursor"] = .string(cursor) }
+        return .object(o)
+    }
+
     /// `session/cancel` and `session/close`: just the session.
     public static func sessionParams(sessionID: String) -> JSONValue {
         .object(["sessionId": .string(sessionID)])

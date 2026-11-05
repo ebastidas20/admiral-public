@@ -768,6 +768,9 @@ final class AppModel: ObservableObject {
         // Set before restore, which launches the saved tabs.
         manager.modDir = realRecipe ? AppModel.installMod(supportDir: manager.supportDir) : nil
         manager.redactReplies = { AppModel.storedRedactReplies }
+        // Re-read per call: restore, reload and fork find an agent edited in Settings since launch.
+        let acpAgentStore = AcpAgentStore(defaults: storeDefaults)
+        manager.acpAgents = { acpAgentStore.load() }
         // Goals live in the support dir, not defaults: the hook helper reads them too.
         let goals = GoalsStore(base: manager.supportDir)
         self.goalsStore = goals
@@ -1252,14 +1255,23 @@ final class AppModel: ObservableObject {
             // again here, or it comes back on Anthropic without saying so.
             refreshCCSwitchProviders()
             for record in sessions.restorableSessions() {
-                var isDir: ObjCBool = false
-                guard FileManager.default.fileExists(atPath: record.cwd, isDirectory: &isDir), isDir.boolValue
-                else { continue }
+                // Core decides (and tests) what each record becomes: an ACP tab on its agent —
+                // decided before the folder check, since its cwd is the agent's, not this Mac's —
+                // a PTY tab, or nothing.
+                let canResume: Bool
+                switch sessions.restorePlan(for: record) {
+                case let .skip(reason):
+                    NSLog("Admiral restore: skipping %@: %@", record.callsign, reason)
+                    continue
+                case let .acp(agent, acpSessionID):
+                    sessions.restoreACP(record, agent: agent, acpSessionID: acpSessionID)
+                    continue
+                case let .pty(resume):
+                    canResume = resume
+                }
                 // Bash tabs reopen as zsh; Claude tabs --resume when a transcript exists
                 // (empty Claude sessions recreate at the SAME id so they reopen cleanly).
                 let recipe: AgentType = record.isBash ? bashAgentType : agentType
-                let canResume = !record.isBash
-                    && sessions.hasTranscript(sessionID: record.sessionID, cwd: record.cwd)
                 let session = sessions.commission(
                     callsign: record.callsign, cwd: record.cwd, agentType: recipe,
                     sessionID: record.sessionID, resume: canResume, teamName: record.teamName,

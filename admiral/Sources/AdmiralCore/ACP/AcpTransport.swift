@@ -25,15 +25,11 @@ public final class ProcessAcpTransport: AcpTransport, @unchecked Sendable {
     private var stdinClosed = false
 
     public init(command: AcpCommand, env: [String: String], logURL: URL) throws {
-        let fm = FileManager.default
-        try? fm.createDirectory(at: logURL.deletingLastPathComponent(), withIntermediateDirectories: true)
-        if !fm.fileExists(atPath: logURL.path) {
-            guard fm.createFile(atPath: logURL.path, contents: nil) else {
-                throw AcpTransportError(description: "cannot create log file \(logURL.path)")
-            }
-        }
-        stderrHandle = try FileHandle(forWritingTo: logURL)
-        try stderrHandle.seekToEnd()
+        // O_APPEND: Admiral appends its own lines to the same file (`AcpLog`), and a plain
+        // offset would let the agent's next stderr write land on top of them.
+        let logFD = AcpLog.openAppending(logURL)
+        guard logFD >= 0 else { throw AcpTransportError(description: "cannot create log file \(logURL.path)") }
+        stderrHandle = FileHandle(fileDescriptor: logFD, closeOnDealloc: true)
 
         var continuation: AsyncStream<String>.Continuation!
         lines = AsyncStream { continuation = $0 }
@@ -120,11 +116,8 @@ public final class ProcessAcpTransport: AcpTransport, @unchecked Sendable {
     }
 
     private static func logExit(_ proc: Process, to logURL: URL) {
-        guard let fh = try? FileHandle(forWritingTo: logURL) else { return }
-        defer { try? fh.close() }
-        _ = try? fh.seekToEnd()
         let reason = proc.terminationReason == .uncaughtSignal ? "signal" : "exit"
-        try? fh.write(contentsOf: Data("acp: agent \(reason) status \(proc.terminationStatus)\n".utf8))
+        AcpLog.append("acp: agent \(reason) status \(proc.terminationStatus)", to: logURL)
     }
 
     public func terminate() {

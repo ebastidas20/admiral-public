@@ -16,11 +16,18 @@ public struct OpenSessionRecord: Codable, Equatable, Sendable {
     /// Allowlisted TUI basename to re-run on bash restore (`k9s`). Never carries args.
     /// Absent/nil ⇒ blank zsh. Cleared when nothing allowlisted was running at quit.
     public var restoreCommand: String?
+    /// The ACP agent (`AcpAgentConfig.name`) an ACP tab ran on; nil for a PTY tab. Absent in
+    /// older records, which still decode.
+    public var acpAgentName: String?
+    /// That agent's own session id (`session/new`), what a restore resumes or loads. `sessionID`
+    /// stays the local id every piece of Admiral state is keyed by.
+    public var acpSessionID: String?
 
     public init(
         cwd: String, sessionID: String, callsign: String, teamName: String? = nil,
         providerID: String? = nil, agentTypeID: String? = nil,
-        restoreCommand: String? = nil
+        restoreCommand: String? = nil,
+        acpAgentName: String? = nil, acpSessionID: String? = nil
     ) {
         self.cwd = cwd
         self.sessionID = sessionID
@@ -29,6 +36,8 @@ public struct OpenSessionRecord: Codable, Equatable, Sendable {
         self.providerID = providerID
         self.agentTypeID = agentTypeID
         self.restoreCommand = restoreCommand
+        self.acpAgentName = acpAgentName
+        self.acpSessionID = acpSessionID
     }
 
     /// True when this record should reopen as a plain shell, not Claude Code.

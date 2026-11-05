@@ -113,3 +113,11 @@ final class PTYSessionDriver: SessionDriver {
 
     func terminate() { host.terminate(handle) }
 }
+
+extension SessionBackend {
+    /// Whether the tab's live state is read from claude's own files — `sessions/<pid>.json` for
+    /// status, the `projects/` transcript, the process tree for the pid. The one place that
+    /// answers it: an ACP tab's controller pushes its status and its transcript is the mirror,
+    /// fixed at launch, so `refreshStatuses` / `resolveTranscript` / `resolveClaudePID` skip it.
+    public var readsClaudeFiles: Bool { self == .pty }
+}

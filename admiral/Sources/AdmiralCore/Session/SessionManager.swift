@@ -21,7 +21,7 @@ public final class SessionManager: ObservableObject {
 
     /// Each live tab's driver — the one place its input goes. Which kind it is (PTY today)
     /// is decided when the tab is launched, so no input funnel asks again.
-    private var drivers: [UUID: SessionDriver] = [:]
+    var drivers: [UUID: SessionDriver] = [:]
     private var chatRefreshingIDs: Set<UUID> = []
     private var resolvingIDs: Set<UUID> = []
     private var refreshingIDs: Set<UUID> = []
@@ -50,8 +50,8 @@ public final class SessionManager: ObservableObject {
     /// Same provider pattern as `defaultAgentTypeProvider`: re-read at every sweep so a
     /// Settings → Bridge & API edit applies live. nil = `IdleReapPolicy.idleThreshold`.
     private let idleReapThresholdProvider: (() -> TimeInterval)?
-    private let appearanceStore: SessionAppearanceStore
-    private let openSessionsStore: OpenSessionsStore
+    let appearanceStore: SessionAppearanceStore
+    let openSessionsStore: OpenSessionsStore
     /// Base dir for per-session Admiral state (hook log + injected settings). Injected so
     /// tests use a temp dir. Public so the tripwire store and hook helper agree on the base.
     public let supportDir: URL
@@ -72,7 +72,7 @@ public final class SessionManager: ObservableObject {
     public let clientToolBroker = ClientToolBroker()
     /// Persists each session's touched-repo footprint across relaunch (keyed by session id),
     /// so a resumed session restores the repos it had written to instead of starting empty.
-    private let touchedReposStore: TouchedReposStore
+    let touchedReposStore: TouchedReposStore
     /// Looks a CC Switch provider up by id, so the relaunch paths (reload, fork, restore) can
     /// recover the env a session was launched with — only its id is worth keeping on the
     /// session. Re-read per call, like `defaultAgentTypeProvider`, so a token rotated in CC
@@ -95,6 +95,17 @@ public final class SessionManager: ObservableObject {
     public var sendPeerMessage: (_ body: String, _ file: ClaudeSessionFile, _ claudeHome: URL) throws -> Void = {
         try ClaudeMessagingSocket.send($0, to: $1, from: "Admiral", claudeHome: $2)
     }
+    /// Starts an ACP agent: its config (cwd already the tab's) and the tab's log file, which
+    /// gets the agent's stderr. Swappable so tests hand out a scripted agent.
+    public var acpTransportFactory: (AcpAgentConfig, URL) throws -> AcpTransport = {
+        try ProcessAcpTransport(command: $0.launch, env: $0.env, logURL: $1)
+    }
+    /// The configured ACP agents (Settings → Agents), re-read per call so restore, reload and
+    /// fork find an agent edited since launch. None unless the app wires it.
+    public var acpAgents: () -> [AcpAgentConfig] = { [] }
+    /// The session bridge an ACP tab's agent reaches Admiral's tools on, for a tab's token.
+    /// Nil (or a nil answer) = no MCP server: the listener is not running.
+    public var sessionBridge: ((_ token: String) -> AcpMCPServer?)? = nil
 
     public init(
         host: TerminalHost,
@@ -296,12 +307,7 @@ public final class SessionManager: ObservableObject {
         // an empty callsign. Fall back to the working-dir folder, then a generic label.
         // Every path through here (New form, MCP, API scratch, restore, fork) gets the same
         // station-name rules as a rename, so no tab name ever holds a space.
-        let resolvedCallsign: String = {
-            let clean = StationName.sanitize(callsign)
-            if !clean.isEmpty { return clean }
-            let folder = StationName.sanitize((cwd as NSString).lastPathComponent)
-            return (folder.isEmpty || folder == "/") ? "session" : folder
-        }()
+        let resolvedCallsign = Self.resolvedCallsign(callsign, cwd: cwd)
         var session = AgentSession(
             callsign: resolvedCallsign, agentType: agentType, cwd: cwd,
             teamName: (label?.isEmpty ?? true) ? nil : label,
@@ -492,11 +498,7 @@ public final class SessionManager: ObservableObject {
         if !scratch { selectedID = id }
         // Remember it so a relaunch can reopen it (claude --resume, or a fresh bash zsh).
         // Scratch tabs stay out of the store until promote().
-        if !scratch {
-            openSessionsStore.upsert(OpenSessionRecord(
-                cwd: cwd, sessionID: sessionID, callsign: resolvedCallsign, teamName: session.teamName,
-                providerID: session.providerID, agentTypeID: agentType.id))
-        }
+        if !scratch { persistRecord(of: session) }
         resolveTranscript(for: id)
         // git branch off-main (don't block commission).
         Task.detached(priority: .utility) { [weak self] in
@@ -506,13 +508,30 @@ public final class SessionManager: ObservableObject {
         return session
     }
 
+    /// A tab's name from what the caller passed: sanitized, else the working-dir folder, else a
+    /// generic label — so no tab is nameless and none holds a space.
+    static func resolvedCallsign(_ callsign: String, cwd: String) -> String {
+        let clean = StationName.sanitize(callsign)
+        if !clean.isEmpty { return clean }
+        let folder = StationName.sanitize((cwd as NSString).lastPathComponent)
+        return (folder.isEmpty || folder == "/") ? "session" : folder
+    }
+
     /// Fork a session: clone its transcript under a fresh id and resume it as a new,
     /// independent session in the same cwd, placed right after the source and selected. The
     /// original keeps running, untouched. No-op if the source has no transcript yet (nothing
     /// to fork). The clone runs off-main (the transcript can be large); the spawn is on-main.
     public func fork(_ id: UUID) {
-        guard let source = sessions.first(where: { $0.id == id }),
-              let sourceSID = source.claudeSessionID,
+        guard let source = sessions.first(where: { $0.id == id }) else { return }
+        switch source.backend {
+        case .pty: forkPTY(source)
+        case let .acp(agentName): forkACP(source, agentName: agentName)
+        }
+    }
+
+    private func forkPTY(_ source: AgentSession) {
+        let id = source.id
+        guard let sourceSID = source.claudeSessionID,
               hasTranscript(sessionID: sourceSID, cwd: source.cwd) else { return }
         let newID = UUID().uuidString.lowercased()
         let cwd = source.cwd, home = claudeHome, callsign = source.callsign
@@ -528,16 +547,30 @@ public final class SessionManager: ObservableObject {
                 let fork = self.commission(
                     callsign: callsign, cwd: cwd, sessionID: newID, resume: true,
                     provider: sourceProvider)
-                self.rename(fork.id, to: "\(title) (fork)")
-                self.setAppearance(fork.id, colorHex: color, symbol: symbol)
-                // Place the fork right after its source (commission appends it at the end).
-                if let srcIdx = self.sessions.firstIndex(where: { $0.id == id }),
-                   srcIdx + 1 < self.sessions.count, self.sessions[srcIdx + 1].id != fork.id {
-                    self.move(fork.id, before: self.sessions[srcIdx + 1].id)
-                }
-                self.selectedID = fork.id
+                self.settleFork(fork.id, of: id, title: title, color: color, symbol: symbol)
             }
         }
+    }
+
+    /// A fork's name, look and slot: "<title> (fork)", the source's avatar, right after the
+    /// source (commission appends it at the end), and selected.
+    func settleFork(_ forkID: UUID, of sourceID: UUID, title: String, color: String?, symbol: String?) {
+        rename(forkID, to: "\(title) (fork)")
+        setAppearance(forkID, colorHex: color, symbol: symbol)
+        if let srcIdx = sessions.firstIndex(where: { $0.id == sourceID }),
+           srcIdx + 1 < sessions.count, sessions[srcIdx + 1].id != forkID {
+            move(forkID, before: sessions[srcIdx + 1].id)
+        }
+        selectedID = forkID
+    }
+
+    /// Adds a newly launched tab with its driver (nil = a tab that never started), and selects
+    /// it unless it is scratch — which must not yank focus from whatever the user is doing.
+    func install(_ session: AgentSession, driver: SessionDriver?) {
+        if let driver { drivers[session.id] = driver }
+        sessions.append(session)
+        syncRedactionFlags()
+        if !session.scratch { selectedID = session.id }
     }
 
     /// Register a session created elsewhere (tests / future adoption).
@@ -633,6 +666,28 @@ public final class SessionManager: ObservableObject {
         guard let index = sessions.firstIndex(where: { $0.id == id }),
               let sid = sessions[index].claudeSessionID else { return nil }
         let old = sessions[index]
+        // How it comes back is decided before anything is torn down: an ACP tab whose agent is
+        // no longer configured cannot relaunch, so it is left running rather than killed.
+        let relaunch: () -> AgentSession
+        switch old.backend {
+        case .pty:
+            relaunch = { [unowned self] in
+                // Resuming if a transcript exists (else recreate fresh at that id — the same
+                // rule launch-time restore uses). commission restores the saved
+                // appearance/team/footprint and re-injects the hook settings + bridge MCP + --name.
+                commission(
+                    callsign: old.callsign, cwd: old.cwd, agentType: old.agentType,
+                    sessionID: sid, resume: hasTranscript(sessionID: sid, cwd: old.cwd),
+                    teamName: old.teamName, scratch: old.scratch, provider: provider(for: old))
+            }
+        case let .acp(agentName):
+            guard let agent = acpAgent(named: agentName) else { return nil }
+            let start: AcpSessionController.Start = old.acpSessionID.map { .restore(acpSessionID: $0) } ?? .new
+            relaunch = { [unowned self] in
+                commissionACP(agent: agent, callsign: old.callsign, cwd: old.cwd, start: start,
+                              scratch: old.scratch, sessionID: sid, teamName: old.teamName)
+            }
+        }
         let priorSelection = selectedID
         // The tab that followed this one — used to restore position after commission appends the
         // relaunched session at the end (nil when it was already last, so no move is needed).
@@ -649,14 +704,8 @@ public final class SessionManager: ObservableObject {
         backfilledIDs.remove(id)
         sessions.remove(at: index)
 
-        // Relaunch at the same claude session id, resuming if a transcript exists (else recreate
-        // fresh at that id — the same rule launch-time restore uses). commission restores the
-        // saved appearance/team/footprint and re-injects the hook settings + bridge MCP + --name.
-        let canResume = hasTranscript(sessionID: sid, cwd: old.cwd)
-        let fresh = commission(
-            callsign: old.callsign, cwd: old.cwd, agentType: old.agentType,
-            sessionID: sid, resume: canResume, teamName: old.teamName, scratch: old.scratch,
-            provider: provider(for: old))
+        // Relaunch at the same local session id.
+        let fresh = relaunch()
 
         // Put it back where it was (commission appended it last), then restore the prior selection
         // — reloading a background tab must not steal focus from the tab you're on.
@@ -671,11 +720,9 @@ public final class SessionManager: ObservableObject {
     /// avatar carries over until the user edits it. No-op for non-scratch sessions.
     public func promote(_ id: UUID) {
         guard let s = sessions.first(where: { $0.id == id }), s.scratch,
-              let sid = s.claudeSessionID else { return }
+              s.claudeSessionID != nil else { return }
         update(id) { $0.scratch = false }
-        openSessionsStore.upsert(OpenSessionRecord(
-            cwd: s.cwd, sessionID: sid, callsign: s.callsign, teamName: s.teamName,
-            providerID: s.providerID, agentTypeID: s.agentType.id))
+        if let promoted = sessions.first(where: { $0.id == id }) { persistRecord(of: promoted) }
         persistAppearance(id)
     }
 
@@ -799,11 +846,24 @@ public final class SessionManager: ObservableObject {
         let t = team?.trimmingCharacters(in: .whitespaces)
         update(id) { $0.teamName = (t?.isEmpty ?? true) ? nil : t }
         // Persist the new team into the restore record so it survives relaunch.
-        if let s = sessions.first(where: { $0.id == id }), let sid = s.claudeSessionID, !s.scratch {
-            openSessionsStore.upsert(OpenSessionRecord(
-                cwd: s.cwd, sessionID: sid, callsign: s.callsign, teamName: s.teamName,
-                providerID: s.providerID, agentTypeID: s.agentType.id))
+        if let s = sessions.first(where: { $0.id == id }), !s.scratch { persistRecord(of: s) }
+    }
+
+    /// Writes a tab's restore record — the one place a record is built from a session, so a
+    /// rename, team change or promote never drops what an ACP tab needs to come back. An ACP
+    /// tab is written only once its agent named the session (`acpSessionID`): before that there
+    /// is nothing to resume.
+    func persistRecord(of s: AgentSession) {
+        guard let sid = s.claudeSessionID else { return }
+        var record = OpenSessionRecord(
+            cwd: s.cwd, sessionID: sid, callsign: s.callsign, teamName: s.teamName,
+            providerID: s.providerID, agentTypeID: s.agentType.id)
+        if case let .acp(agentName) = s.backend {
+            guard let acpSessionID = s.acpSessionID else { return }
+            record.acpAgentName = agentName
+            record.acpSessionID = acpSessionID
         }
+        openSessionsStore.upsert(record)
     }
 
     private func persistAppearance(_ id: UUID) {
@@ -816,11 +876,13 @@ public final class SessionManager: ObservableObject {
         )
     }
 
-    /// Composer / Siri free-text: type the line and submit it.
-    public func send(_ id: UUID, text: String) {
-        guard let driver = drivers[id] else { return }
+    /// Composer / Siri free-text: type the line and submit it. False when nothing took it
+    /// (no driver, or an ACP tab whose agent is gone); a PTY tab always takes it.
+    @discardableResult
+    public func send(_ id: UUID, text: String) -> Bool {
+        guard let driver = drivers[id] else { return false }
         update(id) { $0.lastActivityAt = Date() }
-        _ = driver.submitTyped(text)
+        return driver.submitTyped(text)
     }
 
     /// Type text into a session's terminal (bridge hails / goals / API prompts). A text past
@@ -845,24 +907,31 @@ public final class SessionManager: ObservableObject {
     @discardableResult
     public func deliver(_ id: UUID, text: String, source: String = "admiral") -> Bool {
         guard let driver = drivers[id] else { return false }
-        markInjected(id, text: text, source: source)
-        update(id) { $0.lastActivityAt = Date() }
-        return driver.deliver(text)
+        return marked(id, text: text, source: source) { driver.deliver(text) }
     }
 
     /// `inject`, with the prompt's pasted part going in as one paste (a long hail's body).
     @discardableResult
     public func inject(_ id: UUID, prompt: TerminalPrompt, source: String = "admiral") -> Bool {
         guard let driver = drivers[id] else { return false }
-        markInjected(id, text: prompt.text, source: source)
-        update(id) { $0.lastActivityAt = Date() }
-        return driver.submit(prompt: prompt)
+        return marked(id, text: prompt.text, source: source) { driver.submit(prompt: prompt) }
     }
 
-    /// Mark it before it goes in, so the chat shows this prompt as Admiral's, not the user's.
-    private func markInjected(_ id: UUID, text: String, source: String) {
-        guard let sid = sessions.first(where: { $0.id == id })?.claudeSessionID else { return }
-        ChatLedger.markInjected(text, source: source, base: supportDir, session: sid)
+    /// Runs `submit` with the ledger marked, so the chat shows the prompt as Admiral's, not the
+    /// user's. The mark goes down BEFORE the driver call — the prompt hook that consumes it can
+    /// run as soon as the text is in — and is taken back when the driver refused the text, so
+    /// a stale marker never claims a later identical prompt the user typed. Only a driver that
+    /// can fail (ACP: a failed or ended tab) ever refuses; the PTY path is unchanged.
+    private func marked(_ id: UUID, text: String, source: String, _ submit: () -> Bool) -> Bool {
+        let sid = sessions.first(where: { $0.id == id })?.claudeSessionID
+        if let sid { ChatLedger.markInjected(text, source: source, base: supportDir, session: sid) }
+        let accepted = submit()
+        if accepted {
+            update(id) { $0.lastActivityAt = Date() }
+        } else if let sid {
+            _ = ChatLedger.consumeInjected(prompt: text, base: supportDir, session: sid)
+        }
+        return accepted
     }
 
     // MARK: - Chat
@@ -873,22 +942,27 @@ public final class SessionManager: ObservableObject {
     /// as untrusted. Each newline goes out as LF (Ctrl+J), which claude's prompt takes as a
     /// newline; only the final CR submits. (`\` + CR, the terminal's Shift+Return, left a
     /// literal backslash in a longer message — probed on 2.1.278.)
-    public func sendTyped(_ id: UUID, text: String) {
-        guard let driver = drivers[id] else { return }
+    @discardableResult
+    public func sendTyped(_ id: UUID, text: String) -> Bool {
+        guard let driver = drivers[id] else { return false }
         update(id) { $0.lastActivityAt = Date() }
-        _ = driver.submitTyped(Self.typedText(text))
+        return driver.submitTyped(Self.typedText(text))
     }
 
-    /// The question card's Submit: the answers go in as the next prompt.
-    public func answerAsk(_ id: UUID, questions: [AskQuestion], answers: [String]) {
-        guard let driver = drivers[id] else { return }
+    /// The question card's Submit: the answers go in as the next prompt. False when the
+    /// driver took nothing (an ACP tab with no open question).
+    @discardableResult
+    public func answerAsk(_ id: UUID, questions: [AskQuestion], answers: [String]) -> Bool {
+        guard let driver = drivers[id] else { return false }
         update(id) { $0.lastActivityAt = Date() }
-        _ = driver.answer(questions: questions, answers: answers)
+        return driver.answer(questions: questions, answers: answers)
     }
 
-    /// A permission prompt answered from the chat: the agent's "Yes".
-    public func allowPermission(_ id: UUID) {
-        _ = drivers[id]?.allowPermission()
+    /// A permission prompt answered from the chat: the agent's "Yes". False when there was
+    /// none to answer.
+    @discardableResult
+    public func allowPermission(_ id: UUID) -> Bool {
+        drivers[id]?.allowPermission() ?? false
     }
 
     /// The bytes `sendTyped` types for `text` (before the submitting CR): CRLF and stray CRs
@@ -949,6 +1023,7 @@ public final class SessionManager: ObservableObject {
     /// pid → `sessions/<pid>.json` → newest-in-cwd. Idempotent, called every tick.
     public func resolveTranscript(for id: UUID) {
         guard let session = sessions.first(where: { $0.id == id }),
+              session.backend.readsClaudeFiles,
               !resolvingIDs.contains(id),
               !session.cwd.isEmpty else { return }
         // Keep (re)resolving until we've locked the right file. For an own-spawn with a
@@ -1114,6 +1189,7 @@ public final class SessionManager: ObservableObject {
     /// recipes the spawn pid IS claude, so the walk just returns it.
     public func resolveClaudePID(for id: UUID) {
         guard !claudePIDResolved.contains(id),
+              sessions.first(where: { $0.id == id })?.backend.readsClaudeFiles == true,
               let spawnPid = drivers[id]?.pid else { return }
         Task.detached(priority: .utility) { [weak self] in
             guard let pid = ProcessTree.findClaudePid(spawnPid: spawnPid) else { return }
@@ -1138,7 +1214,7 @@ public final class SessionManager: ObservableObject {
             if let cur = bySession[sid], (cur.updatedAt ?? 0) >= (f.updatedAt ?? 0) { continue }
             bySession[sid] = f
         }
-        for session in sessions {
+        for session in sessions where session.backend.readsClaudeFiles {
             let status: String?
             if let sid = session.claudeSessionID, let file = bySession[sid] {
                 status = file.status
@@ -1163,17 +1239,21 @@ public final class SessionManager: ObservableObject {
                 status = nil
             }
             guard let status else { continue }
-            update(session.id) { s in
-                let new = SessionStatus(raw: status)
-                // A busy → idle transition is claude finishing a turn. If it lands on a tab
-                // you're not currently on, flag it so the sidebar nags you to come look. The
-                // prior-`.busy` requirement keeps restored sessions (which come up
-                // `unknown → idle`) from false-flagging.
-                if s.status == .busy, new == .idle, session.id != selectedID {
-                    s.hasUnseenWork = true
-                }
-                s.status = new
+            applyStatus(SessionStatus(raw: status), to: session.id)
+        }
+    }
+
+    /// A tab's new live status, from its session file (PTY) or its controller (ACP).
+    func applyStatus(_ new: SessionStatus, to id: UUID) {
+        update(id) { s in
+            // A busy → idle transition is the agent finishing a turn. If it lands on a tab
+            // you're not currently on, flag it so the sidebar nags you to come look. The
+            // prior-`.busy` requirement keeps restored sessions (which come up
+            // `unknown → idle`) from false-flagging.
+            if s.status == .busy, new == .idle, id != selectedID {
+                s.hasUnseenWork = true
             }
+            s.status = new
         }
     }
 
@@ -1252,7 +1332,7 @@ public final class SessionManager: ObservableObject {
         update(id) { $0.status = status }
     }
 
-    private func update(_ id: UUID, _ mutate: (inout AgentSession) -> Void) {
+    func update(_ id: UUID, _ mutate: (inout AgentSession) -> Void) {
         guard let index = sessions.firstIndex(where: { $0.id == id }) else { return }
         var session = sessions[index]
         mutate(&session)

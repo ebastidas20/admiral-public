@@ -89,6 +89,8 @@ public final class AcpSessionController: SessionDriver {
         case request(String, JSONValue, CheckedContinuation<JSONValue, Error>)
         case promptFinished(Result<JSONValue, Error>)
         case steerFinished(text: String, Result<JSONValue, Error>)
+        /// `session/load` answered: every replayed update is already ahead of this in the inbox.
+        case replayDone
         case closed
     }
 
@@ -112,6 +114,10 @@ public final class AcpSessionController: SessionDriver {
     /// A turn that ended while a steer was in flight settles once the steer's answer is in,
     /// so a bounced steer goes back ahead of anything newer.
     private var pendingSettle: String??
+    /// See `init(replayIntoMirror:)`.
+    private let replayIntoMirror: Bool
+    /// Between sending `session/load` and its `.replayDone`: the updates are history.
+    private var replaying = false
 
     private let inbox: AsyncStream<Inbound>
     private let inboxIn: AsyncStream<Inbound>.Continuation
@@ -123,8 +129,10 @@ public final class AcpSessionController: SessionDriver {
         mirror: TranscriptMirror,
         mcpServer: AcpMCPServer?,
         hooks: AcpTurnHooks?,
-        events: Events
+        events: Events,
+        replayIntoMirror: Bool = true
     ) {
+        self.replayIntoMirror = replayIntoMirror
         self.config = config
         self.connection = connection
         self.mirror = mirror
@@ -194,8 +202,10 @@ public final class AcpSessionController: SessionDriver {
             }
             // Set first: `session/load` replays history as updates for this id before it returns.
             acpSessionID = id
+            replaying = method == "session/load"
             result = try await connection.request(method, params: AcpClient.loadOrResumeParams(
                 sessionID: id, cwd: config.cwd, mcpServers: mcpServers))
+            if replaying { inboxIn.yield(.replayDone) }
             sessionID = id
         case let .fork(source):
             guard caps.fork else { throw HandshakeFailure(message: "agent cannot fork sessions") }
@@ -388,6 +398,10 @@ public final class AcpSessionController: SessionDriver {
         case let .request(method, params, reply): request(method, params, reply)
         case let .promptFinished(result): promptFinished(result)
         case let .steerFinished(text, result): steerFinished(text, result)
+        case .replayDone:
+            replaying = false
+            // A replay written into a fresh mirror lands as its own lines, not ahead of the next prompt.
+            if replayIntoMirror { mirror.endTurn() }
         case .closed: closed()
         }
     }
@@ -396,6 +410,13 @@ public final class AcpSessionController: SessionDriver {
         guard method == "session/update", let decoded = AcpUpdate.decode(params),
               decoded.sessionID == acpSessionID else { return }
         let update = decoded.update
+        // A `session/load` replay is history: the tab's mirror already holds it (same local id,
+        // same file) unless it was lost, and its tool calls / compactions are not new events.
+        if replaying {
+            if replayIntoMirror { mirror.apply(update) }
+            events.update(update)
+            return
+        }
         mirror.apply(update)
         if case let .agentMessage(text) = update, turn == .prompting { turnReply += text }
         events.update(update)
@@ -430,7 +451,15 @@ public final class AcpSessionController: SessionDriver {
         let reply = turnReply
         turnReply = ""
         turn = .settling
-        guard case let .success(value) = result else { return settle(followUp: nil) }
+        guard case let .success(value) = result else {
+            // No `turnEnded`: the tab just goes idle. The error is written as the turn's reply so
+            // the Chat shows it, and so a TabRun that missed the busy blip still sees output and ends.
+            if case let .failure(error) = result {
+                mirror.apply(.agentMessage("ACP error: \(Self.message(error))"))
+                mirror.endTurn()
+            }
+            return settle(followUp: nil)
+        }
         let reason = value["stopReason"]?.stringValue.flatMap(AcpStopReason.init(rawValue:)) ?? .endTurn
         events.turnEnded(reason)
         if reason == .cancelled { queueHeld = true }
