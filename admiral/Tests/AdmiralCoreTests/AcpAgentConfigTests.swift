@@ -115,6 +115,21 @@ final class AcpAgentConfigTests: XCTestCase {
         XCTAssertNil(AcpLog.lastAgentLine(log, after: end), "nothing after the offset")
     }
 
+    /// A launch whose log holds only Admiral's traced traffic has no agent reason — even when
+    /// the tail read starts in the middle of a traced line. Its end is not the agent's words: in
+    /// the Task 12 run it put a fragment of `_auth/status_update` (the account's email) on the tab.
+    func testLastAgentLineIgnoresAFragmentOfAdmiralsOwnLine() throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("acp-log-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let log = dir.appendingPathComponent("t.log")
+        for i in 0..<10 {
+            AcpLog.append("acp: <- {\"n\":\(i),\"pad\":\"" + String(repeating: "y", count: 1_000 + i) + "\"}", to: log)
+        }
+        AcpLog.append("acp: agent connection closed", to: log)
+        XCTAssertGreaterThan(AcpLog.size(log), AcpLog.tailBytes)
+        XCTAssertNil(AcpLog.lastAgentLine(log, after: 0))
+    }
+
     func testDraftRoundTripsAConfig() {
         let config = AcpAgentConfig(
             name: "PPT", launch: AcpCommand(command: "docker", args: ["exec", "-i", "-e", "A=b c", "box", "agent"]),

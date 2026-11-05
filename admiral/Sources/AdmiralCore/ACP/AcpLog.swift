@@ -42,11 +42,38 @@ public enum AcpLog {
             .map { $0.trimmingCharacters(in: .whitespaces) }
         func agentLine(_ l: String) -> Bool { !l.isEmpty && !l.hasPrefix("acp:") }
         // A read that starts mid-file starts mid-line: that first fragment is only the end of
-        // a line, used only when no whole line follows it (one stderr line longer than the tail).
+        // a line, used only when no whole line follows it (one stderr line longer than the tail)
+        // — and only when that line is the agent's: its start, before the read, decides.
         let whole = start > offset ? lines.dropFirst() : lines[...]
-        guard let line = whole.last(where: agentLine) ?? lines.first.flatMap({ agentLine($0) ? $0 : nil })
+        let fragment = start > offset ? lines.first.flatMap { agentLine($0) ? $0 : nil } : nil
+        guard let line = whole.last(where: agentLine)
+            ?? fragment.flatMap({ lineIsAdmirals(handle, containing: start, after: offset) ? nil : $0 })
         else { return nil }
         return line.count > maxLineLength ? String(line.prefix(maxLineLength - 1)) + "\u{2026}" : line
+    }
+
+    /// Whether the line holding byte `position` starts with Admiral's `acp:` prefix, found by
+    /// scanning back for its newline (not before `offset`, the launch's first byte). Admiral's
+    /// traced lines are capped (`JSONRPCConnection.traceLimit`), so a line whose start is further
+    /// back than `lookBack` is the agent's.
+    private static func lineIsAdmirals(
+        _ handle: FileHandle, containing position: UInt64, after offset: UInt64
+    ) -> Bool {
+        let lookBack: UInt64 = 16 * 1024
+        let from = max(offset, position > lookBack ? position - lookBack : 0)
+        // Up to `position`, plus the prefix's length past it: a line may start just before it.
+        guard (try? handle.seek(toOffset: from)) != nil,
+              let data = try? handle.read(upToCount: Int(position - from) + 4) else { return false }
+        let before = data.prefix(Int(position - from))
+        let lineStart: Data.Index
+        if let newline = before.lastIndex(of: UInt8(ascii: "\n")) {
+            lineStart = data.index(after: newline)
+        } else if from == offset {
+            lineStart = data.startIndex
+        } else {
+            return false
+        }
+        return data[lineStart...].starts(with: Data("acp:".utf8))
     }
 
     /// The log's last `maxBytes`, from the first whole line in them — what the ACP log view
