@@ -20,7 +20,9 @@ AdmiralCore (SwiftPM target, ZERO external deps — no UI, no SwiftTerm — `swi
                  (the Stop tripwire — one block per turn, highest-priority armed slot wins)
   Goals/         SessionGoals (+ validation), GoalsStore, GoalsMachine/GoalsService
                  (the idle → probe → nag loop that closes a session's goals)
-  Support/       GitHubEnvironment (token + gh path for a Finder-launched app)
+  ACP/           AcpSessionController (the ACP SessionDriver), JSONRPCConnection, AcpTransport,
+                 TranscriptMirror, AcpHookAdapter, AcpAgentConfig/Store, SessionMCPEndpoint
+  Support/       GitHubEnvironment (token + gh path for a Finder-launched app), CommandRunner
   Terminal/      TerminalHost protocol (the PTY seam)
 
 App (SwiftUI + AppKit + SwiftTerm)
@@ -74,6 +76,36 @@ erroring "session not found").
 **Process discovery**: `ProcessTree.snapshot()` (a `ps` parse — drains the pipe *before*
 `waitUntilExit`, or it deadlocks on >64 KB output) and a descendant-only `findClaudePid`.
 
+## ACP tabs
+
+A tab on an ACP agent (Settings → Agents) has no PTY: `SessionManager` holds a
+`SessionDriver` per tab in `drivers`, and an ACP tab's is an `AcpSessionController` over
+`JSONRPCConnection` (newline-delimited JSON-RPC on the agent's stdio, e.g. `docker exec -i`).
+Every input funnel — composer, inject, deliver — joins the controller's queue: sent as a
+prompt when idle, as a steer mid-turn when the agent advertises it. Accepted means it will go
+out, so `TabRun` sends once and never retypes.
+
+```
+agent ◀─stdio─▶ JSONRPCConnection ─▶ AcpSessionController ─▶ TranscriptMirror  <base>/acp/<sid>.jsonl
+                                       │                   ─▶ ChatLedger (permission / question cards)
+                                       └─ AcpHookAdapter ──▶ HookDispatcher (same arms as admiral-hook)
+```
+
+- **Mirror transcript.** The agent's own history is out of reach, so the controller writes
+  claude-shaped lines; Chat, `TabRun` and restore read it as a transcript. `session/load`'s
+  replay is dropped when the mirror already exists.
+- **Hooks in-process.** No `--settings` file, so `AcpHookAdapter` dispatches
+  `UserPromptSubmit` / `Stop` / `PostToolUse` / `SessionStart` at the ACP moments. A Stop
+  block's reason is sent as the next prompt, bypassing `UserPromptSubmit`, and recorded in
+  the ledger as Admiral's.
+- **Where git runs.** `CommandRunner`: the Mac (`LocalCommandRunner`) for PTY tabs, the
+  agent's environment (`ExecCommandRunner`, 5 s bound; gh 30 s) for ACP tabs. Both pipes are
+  drained while the command runs.
+- **Session bridge (:4142).** `POST /mcp/session` on loopback serves the session tools to an
+  agent that cannot reach the bridge socket. Token-gated (`Bearer <tab token>`, live ACP tabs
+  only, caller always `.session`), `Origin` refused, no port fallback; up only while an agent
+  is configured. :4141 (the API server) is unchanged.
+
 ## Hooks (what Admiral still needs delivered)
 
 **Admiral does not govern.** Rule-based governance lives in `hookd` (a separate repo), a Python
@@ -114,6 +146,8 @@ Warp `#181818`). Appearance (auto/light/dark) and sidebar collapse state are per
 |---|---|
 | Per-session appearance (name/color/icon) | `UserDefaults: admiral.sessionAppearances.v2` |
 | Open sessions (for restore, ordered) | `UserDefaults: admiral.openSessions.v1` |
+| ACP agents | `UserDefaults: admiral.acpAgents.v1` |
+| ACP mirror transcript + traffic log | `<support>/acp/<sid>.{jsonl,log}` |
 | Theme mode / sidebar collapsed | `UserDefaults: admiral.themeMode / admiral.sidebarCollapsed` |
 | Injected hooks + MCP config, touched-repo log | `<support>/sessions/<token>/{settings.json, bridge-mcp.json, touched.jsonl}` |
 | `once_per_session` rules already fired | `<support>/hooks/fired/<payload session_id>.jsonl` |

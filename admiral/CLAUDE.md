@@ -36,6 +36,9 @@ git config core.hooksPath admiral/.githooks
 # Core (do this constantly while changing AdmiralCore)
 swift test
 
+# Opt-in ACP end-to-end tests against a real agent in a container (never part of plain `swift test`)
+ADMIRAL_ACP_E2E=1 swift test --filter AcpEndToEndTests
+
 # App: regenerate the project after adding files or changing project.yml / deps
 cd App && xcodegen generate
 
@@ -116,6 +119,8 @@ open -n -W --env ADMIRAL_SUPPORT_DIR=<tmp> --env ADMIRAL_PROFILE=<unique> App/bu
   --args -probeGroupsUI <dir>     # group chat UI (sidebar, window, paused, @ picker, members, New Group, group Footprint vs a tab's, flag off) to PNGs, dark+light
 open -n -W --env ADMIRAL_SUPPORT_DIR=<tmp> --env ADMIRAL_PROFILE=<unique> App/build/Build/Products/Debug/Admiral.app \
   --args -probeSheets <dir>       # Schedules + Settings close from their Close button and from Esc on a real window, then PNGs
+open -n -W --env ADMIRAL_SUPPORT_DIR=<tmp> --env ADMIRAL_PROFILE=<unique> App/build/Build/Products/Debug/Admiral.app \
+  --args -probeAgentsUI <dir>     # Settings → Agents (rename/delete blocked, API warning) + ACP tabs from a fixture to PNGs, dark+light, no agent
 ```
 
 `-probeTitlebar` guards a **silent** regression: the header looks right, its buttons work, and
@@ -167,7 +172,11 @@ exactly what `commission` injected, then remove it. Use a scratch dir under your
 
 ## Architecture in one screen
 
-- **`SessionManager`** (Core, `@MainActor`) — owns terminals. `commission` spawns
+- **`SessionManager`** (Core, `@MainActor`) — owns the tabs, each through one
+  `SessionDriver` in `drivers` (it was `handles`, PTY only): `PTYSessionDriver` turns every
+  input funnel into bytes on a `TerminalHandle`, `AcpSessionController` into ACP JSON-RPC. The
+  backend is decided once, at launch, by which driver a tab gets — never re-asked at a call
+  site (`AgentSession.backend`). `commission` spawns
   `claude` inside an interactive login zsh with a deterministic `--session-id`, strips
   Claude-Code env markers (so the child persists its own transcript), sets
   `TERM_PROGRAM=Admiral`, and restores per-**session** appearance (keyed by session id).
@@ -226,6 +235,10 @@ exactly what `commission` injected, then remove it. Use a scratch dir under your
   without it). The bundled `admiral-hook`
   helper **always exits 0** — a Stop block is conveyed purely by the stdout JSON, so a wrong key
   silently stops it working. Another event here means a new Admiral feature — never a rule.
+  An **ACP tab** takes no `--settings` file, so nothing runs `admiral-hook`: `AcpHookAdapter`
+  calls the same `HookDispatcher` arms in-process at the ACP moments (prompt out →
+  `UserPromptSubmit`, `end_turn` → `Stop`, a completed edit → `PostToolUse`, compaction →
+  `SessionStart`).
 - **Native notifications** — Claude Code never emits OSC 9/777 under `TERM_PROGRAM=Admiral`
   (its `auto` channel finds no method; `preferredNotifChannel` is a global `~/.claude.json`
   key with no env/flag override, so Admiral does not touch it). Instead the hooks notify:
@@ -301,6 +314,25 @@ exactly what `commission` injected, then remove it. Use a scratch dir under your
   once, late; a run still going makes the next skip. Only the instance holding
   `schedules/.lock` (`SchedulerLock`) runs them. Driven by the `schedule_*` bridge tools and the
   Schedules sheet.
+- **ACP agents** — Settings → Agents (`AcpAgentStore`, `admiral.acpAgents.v1`) lists agents
+  reached over the Agent Client Protocol, e.g. `claude-agent-acp` in a container through
+  `docker exec -i`. `commissionACP` opens a **Chat-only** tab on one: `AcpSessionController`
+  runs the handshake, the turn, the client-side queue/steering, and holds the agent's
+  permission and elicitation requests as Chat cards (never auto-approved). An accepted input
+  is certain to go out (`acceptanceIsDelivery`), so `TabRun` never retypes into an ACP tab.
+  Agents write no transcript Admiral can read, so `TranscriptMirror` writes a claude-shaped
+  **mirror** at `<base>/acp/<sid>.jsonl` (traffic log beside it, `<sid>.log`, bearer masked);
+  Chat, TabRun and the Anthropic endpoint read that like any transcript. git/gh run where the
+  files are, through the agent's exec command (`ExecCommandRunner`, bounded). A tab is found by
+  its agent's **name**, so rename and delete are refused while a tab is open on it.
+- **Session bridge listener (:4142)** — an agent in a container cannot reach the bridge
+  relay's Unix socket, so `POST /mcp/session` on 127.0.0.1:4142 (`SessionMCPEndpoint`, agents
+  told `mcpCallbackURL`, default `http://host.docker.internal:4142`) serves the session tools.
+  It runs only while an agent is configured (`SessionBridgePolicy`), never falls back to
+  another port, and is **token-gated**: `Bearer <tab token>`, valid only while it names a live
+  ACP tab, always `.session(token)` (no operator tools). A request carrying `Origin` is refused
+  before the token is read. No Host allowlist (the container's Host is
+  `host.docker.internal`) — the token is the gate. The API server on :4141 is untouched.
 - **Transcript** — `TranscriptLocator` resolves the `.jsonl` (ported from the bridge's
   `ResolvePath`/`EncodeProjectDir`); `TranscriptParser`/`TranscriptStore` parse it.
 - **Terminal** — `TerminalHost` protocol (Core) + `SwiftTermHost` (App, real PTY).
