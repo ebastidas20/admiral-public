@@ -22,7 +22,7 @@ public struct SessionMCPEndpoint {
         self.tokenIsLive = tokenIsLive
     }
 
-    public func handle(_ request: HTTPRequest) -> Data {
+    public func handle(_ request: HTTPRequest) async -> Data {
         if let origin = request.headers["origin"], !origin.isEmpty {
             return Self.jsonError(status: 403, code: -32003, message: "browser-originated request refused")
         }
@@ -37,7 +37,7 @@ public struct SessionMCPEndpoint {
             return Self.jsonError(status: 405, code: -32600,
                                   message: "use POST \(Self.path) with a JSON-RPC body")
         }
-        let response = mcp.handle(requestData: request.body, caller: .session(token))
+        let response = await mcp.handleAsync(requestData: request.body, caller: .session(token))
         // A notification (no id) gets no JSON-RPC answer.
         return HTTPWire.response(status: response.isEmpty ? 202 : 200, body: response)
     }

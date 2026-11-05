@@ -38,7 +38,10 @@ final class LoopbackHTTPListener {
 
     /// Bind 127.0.0.1:preferredPort — falling back to an ephemeral port when
     /// `fallbackToEphemeral` — and return the bound port, or nil when nothing could be bound.
-    func start(preferredPort: UInt16, fallbackToEphemeral: Bool = true) -> UInt16? {
+    /// `waitForPreferredPort` gives a port still held by our own just-stopped listener up to
+    /// ~1 s to free (blocking the caller); pass false when a held port means someone else.
+    func start(preferredPort: UInt16, fallbackToEphemeral: Bool = true,
+               waitForPreferredPort: Bool = true) -> UInt16? {
         guard listenFD < 0 else { return port }  // already listening — idempotent
         let fd = socket(AF_INET, SOCK_STREAM, 0)
         guard fd >= 0 else { return nil }
@@ -64,7 +67,7 @@ final class LoopbackHTTPListener {
         // ephemeral port (this race is how the server once ended up on a random port).
         var boundPreferred = bindTo(preferredPort)
         var tries = 0
-        while !boundPreferred, preferredPort != 0, errno == EADDRINUSE, tries < 20 {
+        while waitForPreferredPort, !boundPreferred, preferredPort != 0, errno == EADDRINUSE, tries < 20 {
             usleep(50_000); tries += 1
             boundPreferred = bindTo(preferredPort)
         }

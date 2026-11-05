@@ -582,17 +582,35 @@ final class MCPServerTests: XCTestCase {
     // MARK: - ACP callers
 
     /// Answers `test -d` like an agent environment holding only `dirs`, and records every call.
+    /// `launches: false` = every call fails to launch or times out (nil), like a stopped container.
     private final class DirRunner: CommandRunner, @unchecked Sendable {
         private let lock = NSLock()
         private var _calls: [[String]] = []
+        private var _onMain: [Bool] = []
         var calls: [[String]] { lock.withLock { _calls } }
+        /// Whether each call ran on the main thread.
+        var onMain: [Bool] { lock.withLock { _onMain } }
         let dirs: Set<String>
-        init(dirs: Set<String>) { self.dirs = dirs }
+        let launches: Bool
+        init(dirs: Set<String>, launches: Bool = true) { self.dirs = dirs; self.launches = launches }
         func run(_ argv: [String], cwd: String?, timeout: TimeInterval) -> (code: Int32, stdout: String)? {
-            lock.withLock { _calls.append(argv) }
+            lock.withLock { _calls.append(argv); _onMain.append(Thread.isMainThread) }
+            guard launches else { return nil }
             if argv.count == 3, argv[0] == "test", argv[1] == "-d" { return (dirs.contains(argv[2]) ? 0 : 1, "") }
             return (1, "")
         }
+    }
+
+    /// A `tools/call` the way the session bridge makes it (`handleAsync`).
+    private func callAsync(_ server: MCPServer, _ name: String, _ args: [String: Any],
+                           _ caller: MCPCaller) async throws -> (isError: Bool, text: String) {
+        let request: [String: Any] = ["jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                                      "params": ["name": name, "arguments": args]]
+        let data = try JSONSerialization.data(withJSONObject: request)
+        let reply = await server.handleAsync(requestData: data, caller: caller)
+        let result = try XCTUnwrap(parse(reply)["result"] as? [String: Any])
+        return (result["isError"] as? Bool ?? false,
+                (result["content"] as? [[String: Any]])?.first?["text"] as? String ?? "")
     }
 
     /// A manager with one PTY tab (token "A") and one ACP tab on agent "PPT" (token "P"), whose
@@ -621,10 +639,11 @@ final class MCPServerTests: XCTestCase {
     /// An ACP tab asking for a new tab gets one on its OWN agent, in the agent's environment —
     /// never a claude on the Mac. The cwd is checked there (`test -d`), not with the Mac's
     /// FileManager: `/workspace/sub` does not exist on this Mac.
-    func testCommissionFromACPCallerOpensTabOnSameAgent() throws {
+    func testCommissionFromACPCallerOpensTabOnSameAgent() async throws {
         let runner = DirRunner(dirs: ["/workspace", "/workspace/sub"])
         let (server, manager, host) = makeACPServer(runner: runner)
-        let reply = try call(server, "commission", ["callsign": "helper", "cwd": "/workspace/sub"], .session("P"))
+        let reply = try await callAsync(server, "commission", ["callsign": "helper", "cwd": "/workspace/sub"],
+                                        .session("P"))
         XCTAssertFalse(reply.isError, reply.text)
         let made = try XCTUnwrap(manager.sessions.first { $0.callsign == "helper" })
         XCTAssertEqual(made.backend, .acp(agentName: "PPT"))
@@ -632,29 +651,81 @@ final class MCPServerTests: XCTestCase {
         XCTAssertEqual(made.cwd, "/workspace/sub")
         XCTAssertTrue(host.spawned.isEmpty, "nothing was spawned on the Mac: \(host.spawned)")
         XCTAssertTrue(runner.calls.contains(["test", "-d", "/workspace/sub"]), "\(runner.calls)")
+        XCTAssertEqual(runner.onMain, [false], "the cwd check ran off the main thread")
         manager.terminateAll()
     }
 
-    func testCommissionFromACPCallerChecksCwdInTheAgentsEnvironment() throws {
+    /// A check that could not run (exec failed to launch or timed out) says so, and opens nothing.
+    func testCommissionFromACPCallerReportsACheckThatCouldNotRun() async throws {
+        let (server, manager, host) = makeACPServer(runner: DirRunner(dirs: [], launches: false))
+        let reply = try await callAsync(server, "commission", ["callsign": "x", "cwd": "/workspace"], .session("P"))
+        XCTAssertTrue(reply.isError)
+        XCTAssertEqual(reply.text, "could not check cwd /workspace in PPT's environment: its exec command "
+            + "failed to launch or timed out, so no tab was opened")
+        XCTAssertNil(manager.sessions.first { $0.callsign == "x" })
+        XCTAssertTrue(host.spawned.isEmpty)
+    }
+
+    /// The agent's cwd is a path in ITS environment; a relative one has no meaning there.
+    func testCommissionFromACPCallerRequiresAnAbsoluteCwd() async throws {
+        let runner = DirRunner(dirs: ["workspace"])
+        let (server, manager, _) = makeACPServer(runner: runner)
+        let reply = try await callAsync(server, "commission", ["callsign": "r", "cwd": "workspace"], .session("P"))
+        XCTAssertTrue(reply.isError)
+        XCTAssertEqual(reply.text, "cwd must be an absolute path in PPT's environment (got \"workspace\")")
+        XCTAssertNil(manager.sessions.first { $0.callsign == "r" })
+        XCTAssertTrue(runner.calls.isEmpty, "refused before any exec")
+    }
+
+    /// The synchronous path (the Unix bridge socket, which runs on the main actor) never runs
+    /// an ACP caller's exec: it refuses and points at the session bridge.
+    func testSynchronousCommissionFromACPCallerIsRefused() throws {
+        let runner = DirRunner(dirs: ["/workspace"])
+        let (server, manager, host) = makeACPServer(runner: runner)
+        let reply = try call(server, "commission", ["callsign": "s", "cwd": "/workspace"], .session("P"))
+        XCTAssertTrue(reply.isError)
+        XCTAssertEqual(reply.text, "commission from an ACP agent's tab is served only on the session bridge "
+            + "(POST /mcp/session)")
+        XCTAssertTrue(runner.calls.isEmpty)
+        XCTAssertNil(manager.sessions.first { $0.callsign == "s" })
+        XCTAssertTrue(host.spawned.isEmpty)
+    }
+
+    /// Any other caller gets the same answer from `handleAsync` as from `handle`.
+    func testAsyncCommissionFromPTYCallerOpensAMacTab() async throws {
         let (server, manager, host) = makeACPServer()
-        let missing = try call(server, "commission", ["callsign": "x", "cwd": "/workspace/nope"], .session("P"))
+        let cwd = FileManager.default.temporaryDirectory.path
+        let reply = try await callAsync(server, "commission", ["callsign": "mac2", "cwd": cwd], .session("A"))
+        XCTAssertFalse(reply.isError, reply.text)
+        XCTAssertEqual(manager.sessions.first { $0.callsign == "mac2" }?.backend, .pty)
+        XCTAssertEqual(host.spawned.count, 1)
+        let ghost = try await callAsync(server, "commission", ["callsign": "g", "cwd": cwd], .session("Z"))
+        XCTAssertTrue(ghost.isError, "a token that names no tab is still refused")
+    }
+
+    func testCommissionFromACPCallerChecksCwdInTheAgentsEnvironment() async throws {
+        let (server, manager, host) = makeACPServer()
+        let missing = try await callAsync(server, "commission", ["callsign": "x", "cwd": "/workspace/nope"],
+                                          .session("P"))
         XCTAssertTrue(missing.isError)
         XCTAssertEqual(missing.text, "cwd /workspace/nope is not a directory in PPT's environment")
         // A Mac folder means nothing there either.
         let mac = FileManager.default.temporaryDirectory.path
-        XCTAssertTrue(try call(server, "commission", ["callsign": "y", "cwd": mac], .session("P")).isError)
+        let onMac = try await callAsync(server, "commission", ["callsign": "y", "cwd": mac], .session("P"))
+        XCTAssertTrue(onMac.isError)
         XCTAssertNil(manager.sessions.first { ["x", "y"].contains($0.callsign) })
         // Omitted = the agent's own cwd.
-        XCTAssertFalse(try call(server, "commission", ["callsign": "z"], .session("P")).isError)
+        let omitted = try await callAsync(server, "commission", ["callsign": "z"], .session("P"))
+        XCTAssertFalse(omitted.isError, omitted.text)
         XCTAssertEqual(manager.sessions.first { $0.callsign == "z" }?.cwd, "/workspace")
         XCTAssertTrue(host.spawned.isEmpty)
         manager.terminateAll()
     }
 
     /// No exec = nowhere to check: the tab opens in the agent's configured cwd, unchecked.
-    func testCommissionFromACPCallerWithoutExecUsesTheAgentsCwd() throws {
+    func testCommissionFromACPCallerWithoutExecUsesTheAgentsCwd() async throws {
         let (server, manager, host) = makeACPServer(runner: nil)
-        let reply = try call(server, "commission", ["callsign": "w", "cwd": "/elsewhere"], .session("P"))
+        let reply = try await callAsync(server, "commission", ["callsign": "w", "cwd": "/elsewhere"], .session("P"))
         XCTAssertFalse(reply.isError, reply.text)
         let made = try XCTUnwrap(manager.sessions.first { $0.callsign == "w" })
         XCTAssertEqual(made.backend, .acp(agentName: "PPT"))
@@ -665,9 +736,9 @@ final class MCPServerTests: XCTestCase {
     }
 
     /// A CC Switch provider is a Mac claude's endpoint; an ACP agent has its own model.
-    func testCommissionFromACPCallerRefusesAProvider() throws {
+    func testCommissionFromACPCallerRefusesAProvider() async throws {
         let (server, manager, host) = makeACPServer()
-        let reply = try call(server, "commission", ["callsign": "p", "provider": "Kimi"], .session("P"))
+        let reply = try await callAsync(server, "commission", ["callsign": "p", "provider": "Kimi"], .session("P"))
         XCTAssertTrue(reply.isError)
         XCTAssertEqual(reply.text, "provider applies only to claude tabs on the Mac, not to an ACP agent's tab")
         XCTAssertNil(manager.sessions.first { $0.callsign == "p" })

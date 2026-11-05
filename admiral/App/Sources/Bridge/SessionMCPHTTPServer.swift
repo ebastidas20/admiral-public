@@ -19,13 +19,14 @@ final class SessionMCPHTTPServer {
 
     init(endpoint: SessionMCPEndpoint) {
         listener = LoopbackHTTPListener(label: "admiral.session-bridge.http", connectionLimit: 32) { request, write in
-            _ = write(endpoint.handle(request))
+            _ = write(await endpoint.handle(request))
         }
     }
 
-    /// Bind 127.0.0.1:`port`; nil when it is taken (no fallback — see the type's note).
+    /// Bind 127.0.0.1:`port`; nil at once when it is taken (no fallback — see the type's note —
+    /// and no wait: `stop()` already waits for its own close, so a held port is someone else's).
     func start(port: UInt16 = SessionMCPHTTPServer.defaultPort) -> UInt16? {
-        listener.start(preferredPort: port, fallbackToEphemeral: false)
+        listener.start(preferredPort: port, fallbackToEphemeral: false, waitForPreferredPort: false)
     }
 
     func stop() { listener.stop() }

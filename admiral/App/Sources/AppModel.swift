@@ -37,6 +37,7 @@ final class AppModel: ObservableObject {
     /// reach `bridgeSocket`, calls the session tools. Up while any ACP agent is configured.
     private var sessionBridgeServer: SessionMCPHTTPServer?
     private var acpAgentsObserver: NSObjectProtocol?
+    private var sessionBridgePolicy = SessionBridgePolicy()
     /// Parks `tools/call` from API tool tabs. Same broker `SessionManager` hands the
     /// Anthropic endpoint; the `client` MCP process is the only other side of this socket.
     private var clientToolSocket: ClientToolSocketServer?
@@ -1517,22 +1518,35 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// Start or stop the listener as `SessionBridgePolicy` says. Never blocks: the bind does
+    /// not wait for a held port, and after a failure the policy holds retries until the agent
+    /// list changes or its interval passes (a timer then asks again) — not on every defaults write.
     private func syncSessionBridge() {
-        let wanted = !sessions.acpAgents().isEmpty
-        if wanted, sessionBridgeServer == nil {
+        let agents = sessions.acpAgents()
+        switch sessionBridgePolicy.action(agents: agents, running: sessionBridgeServer != nil) {
+        case .none:
+            return
+        case .stop:
+            sessionBridgeServer?.stop()
+            sessionBridgeServer = nil
+            sessionBridgePolicy.reset()
+        case .start:
             let endpoint = SessionMCPEndpoint(mcp: mcp, tokenIsLive: { [weak manager = sessions] in
                 manager?.acpTokenIsLive($0) ?? false
             })
             let server = SessionMCPHTTPServer(endpoint: endpoint)
             guard server.start() != nil else {
-                // Retried on the next defaults change; until then ACP tabs launch without it.
-                NSLog("Admiral: session bridge could not bind 127.0.0.1:%d", Int(SessionMCPHTTPServer.defaultPort))
+                sessionBridgePolicy.startFailed(agents: agents)
+                NSLog("Admiral: session bridge could not bind 127.0.0.1:%d; "
+                      + "retrying in %d s or when the agents change",
+                      Int(SessionMCPHTTPServer.defaultPort), Int(SessionBridgePolicy.retryInterval))
+                DispatchQueue.main.asyncAfter(deadline: .now() + SessionBridgePolicy.retryInterval) { [weak self] in
+                    self?.syncSessionBridge()
+                }
                 return
             }
+            sessionBridgePolicy.reset()
             sessionBridgeServer = server
-        } else if !wanted, let server = sessionBridgeServer {
-            server.stop()
-            sessionBridgeServer = nil
         }
     }
 
