@@ -120,7 +120,8 @@ open -n -W --env ADMIRAL_SUPPORT_DIR=<tmp> --env ADMIRAL_PROFILE=<unique> App/bu
 open -n -W --env ADMIRAL_SUPPORT_DIR=<tmp> --env ADMIRAL_PROFILE=<unique> App/build/Build/Products/Debug/Admiral.app \
   --args -probeSheets <dir>       # Schedules + Settings close from their Close button and from Esc on a real window, then PNGs
 open -n -W --env ADMIRAL_SUPPORT_DIR=<tmp> --env ADMIRAL_PROFILE=<unique> App/build/Build/Products/Debug/Admiral.app \
-  --args -probeAgentsUI <dir>     # Settings → Agents (rename/delete blocked, API warning) + ACP tabs from a fixture to PNGs, dark+light, no agent
+  --args -probeAgentsUI <dir>     # Settings → Agents (This Mac/Elsewhere, starting options, rename/delete blocked, API warning),
+                                  # ACP tabs, composer (chips, / menu, hint, @ list), tool cards + live output; fixtures to PNGs, dark+light, no agent
 ```
 
 `-probeTitlebar` guards a **silent** regression: the header looks right, its buttons work, and
@@ -315,23 +316,44 @@ exactly what `commission` injected, then remove it. Use a scratch dir under your
   `schedules/.lock` (`SchedulerLock`) runs them. Driven by the `schedule_*` bridge tools and the
   Schedules sheet.
 - **ACP agents** — Settings → Agents (`AcpAgentStore`, `admiral.acpAgents.v1`) lists agents
-  reached over the Agent Client Protocol, e.g. `claude-agent-acp` in a container through
-  `docker exec -i`. `commissionACP` opens a **Chat-only** tab on one: `AcpSessionController`
+  reached over the Agent Client Protocol: a launch command (`npx -y <agent-package>@<version>`,
+  or one that enters another environment first) and **where it runs** (`AcpWorkspace`, "Runs
+  on"). **This Mac**: `cwd` is a Mac path, git/gh run directly (`LocalCommandRunner`, PATH
+  resolved per run), bridge URL fixed at `http://127.0.0.1:4142`. **Elsewhere** (a container,
+  a VM, an SSH host): an explicit **Exec** prefix runs one command next to the agent
+  (`ExecCommandRunner`, bounded; none = git/branch/touched repos/PR watch off) and a **Bridge
+  URL** says how that place reaches the Mac. Nothing in the form assumes docker; a legacy agent
+  is migrated on decode. **Starting options** are the agent's own config options
+  (`defaultConfigOptions`), picked in Settings from `AcpOptionCatalogStore` (what the agent last
+  advertised, saved at each session start) — there is no default *mode* field. They apply only
+  to a **new** session (never a load/resume); an option or value the agent does not offer is
+  skipped and logged. `commissionACP` opens a **Chat-only** tab on one: `AcpSessionController`
   runs the handshake, the turn, the client-side queue/steering, and holds the agent's
   permission and elicitation requests as Chat cards (never auto-approved). An accepted input
   is certain to go out (`acceptanceIsDelivery`), so `TabRun` never retypes into an ACP tab.
   Agents write no transcript Admiral can read, so `TranscriptMirror` writes a claude-shaped
   **mirror** at `<base>/acp/<sid>.jsonl` (traffic log beside it, `<sid>.log`, bearer masked);
-  Chat, TabRun and the Anthropic endpoint read that like any transcript. git/gh run where the
-  files are, through the agent's exec command (`ExecCommandRunner`, bounded). A tab is found by
-  its agent's **name**, so rename and delete are refused while a tab is open on it.
-- **Session bridge listener (:4142)** — an agent in a container cannot reach the bridge
-  relay's Unix socket, so `POST /mcp/session` on 127.0.0.1:4142 (`SessionMCPEndpoint`, agents
-  told `mcpCallbackURL`, default `http://host.docker.internal:4142`) serves the session tools.
+  Chat, TabRun and the Anthropic endpoint read that like any transcript. A tool result there
+  carries a claude-shaped `toolUseResult` (an edit's `filePath/oldString/newString/type`, a
+  command's `stdout`). The composer pieces are **ACP tabs only**: option chips
+  (`acpConfigOptions` — mode, model, … — set on the agent, a refusal shown above the text), the
+  `/` menu (`acpCommands`, `SlashCommandPicker`; a command's `input.hint` after it), and the `@`
+  menu (`FileMentionPicker` over `SessionManager.acpFiles` — `git ls-files -z` through the tab's
+  runner, cached 30 s), whose picks go out as `resource_link` blocks beside the typed text. So
+  are **tool cards** (`ChatItem.tool`): a row per call that opens on its output (last lines,
+  bounded) or its diff (`LineDiff`); a PTY tab's Chat never shows them. A running command's
+  output streams into `AgentSession.acpLiveOutput` (last 8 KB, published once per window) and
+  its tail shows under Working…. A tab is found by its agent's **name**, so rename and delete
+  are refused while a tab is open on it.
+- **Session bridge listener (:4142)** — an ACP agent cannot use the bridge relay's Unix socket
+  (it may not even share the filesystem), so `POST /mcp/session` on 127.0.0.1:4142
+  (`SessionMCPEndpoint`) serves the session tools. Agents are told `mcpCallbackURL`: always
+  `http://127.0.0.1:4142` for This Mac; for Elsewhere, the Bridge URL (e.g.
+  `http://host.docker.internal:4142` from Docker, or a reverse tunnel for an SSH host).
   It runs only while an agent is configured (`SessionBridgePolicy`), never falls back to
   another port, and is **token-gated**: `Bearer <tab token>`, valid only while it names a live
   ACP tab, always `.session(token)` (no operator tools). A request carrying `Origin` is refused
-  before the token is read. No Host allowlist (the container's Host is
+  before the token is read. No Host allowlist (a container's Host is
   `host.docker.internal`) — the token is the gate. The API server on :4141 is untouched.
 - **Transcript** — `TranscriptLocator` resolves the `.jsonl` (ported from the bridge's
   `ResolvePath`/`EncodeProjectDir`); `TranscriptParser`/`TranscriptStore` parse it.
