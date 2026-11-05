@@ -40,14 +40,35 @@ extension CommandRunner {
 /// drained WHILE the process runs: a command that writes more than a pipe buffer (a `gh pr list`
 /// with checks) would otherwise block on write, never exit, and run into the timeout.
 public struct LocalCommandRunner: CommandRunner {
-    /// The child's whole environment; nil = inherit Admiral's, as every local caller does.
-    public let environment: [String: String]?
+    /// The child's whole environment, decided per run; nil = inherit Admiral's, as every local
+    /// caller does.
+    public var environment: [String: String]? { environmentProvider() }
     /// Unbounded by default; an ACP agent on this Mac gets a bound like an exec's.
     public let defaultTimeout: TimeInterval
+    private let environmentProvider: @Sendable () -> [String: String]?
 
     public init(environment: [String: String]? = nil, defaultTimeout: TimeInterval = .infinity) {
-        self.environment = environment
+        self.init(defaultTimeout: defaultTimeout, environmentProvider: { environment })
+    }
+
+    /// `environmentProvider` is asked at every run, so an environment that changes after the
+    /// runner was made (a login-shell `PATH` that resolves later) is picked up.
+    public init(defaultTimeout: TimeInterval = .infinity,
+                environmentProvider: @escaping @Sendable () -> [String: String]?) {
         self.defaultTimeout = defaultTimeout
+        self.environmentProvider = environmentProvider
+    }
+
+    /// The runner for an ACP agent on this Mac: the agent's launch environment
+    /// (`LaunchEnvironment`, its own `env` over Admiral's, `PATH` decided per run), bounded at 5 s.
+    public static func acpAgent(
+        env: [String: String],
+        baseEnvironment: [String: String] = ProcessInfo.processInfo.environment,
+        loginPath: @escaping @Sendable () -> String? = { LoginShellPath.shared.current() }
+    ) -> LocalCommandRunner {
+        LocalCommandRunner(defaultTimeout: 5) {
+            LaunchEnvironment.make(base: baseEnvironment, overrides: env, loginPath: loginPath)
+        }
     }
 
     public func run(_ argv: [String], cwd: String?, timeout: TimeInterval) -> (code: Int32, stdout: String)? {
@@ -58,7 +79,7 @@ public struct LocalCommandRunner: CommandRunner {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
         process.arguments = argv
-        if let environment { process.environment = environment }
+        if let environment = environmentProvider() { process.environment = environment }
         if let cwd { process.currentDirectoryURL = URL(fileURLWithPath: cwd) }
         let out = Pipe(), err = Pipe()
         process.standardOutput = out

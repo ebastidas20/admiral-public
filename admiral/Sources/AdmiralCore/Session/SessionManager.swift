@@ -110,12 +110,7 @@ public final class SessionManager: ObservableObject {
     public var acpRunnerFactory: (AcpAgentConfig) -> CommandRunner? = { agent in
         switch agent.workspace {
         case .thisMac:
-            LocalCommandRunner(
-                environment: LaunchEnvironment.make(
-                    base: ProcessInfo.processInfo.environment,
-                    overrides: agent.env,
-                    loginPath: { LoginShellPath.shared.current() }),
-                defaultTimeout: 5)
+            LocalCommandRunner.acpAgent(env: agent.env)
         case let .elsewhere(exec):
             exec.map { ExecCommandRunner(exec: $0, configuredPath: agent.env["PATH"]) }
         }

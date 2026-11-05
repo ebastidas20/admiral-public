@@ -39,9 +39,15 @@ struct NewTerminalForm: View {
     private var provider: CCSwitchProvider? { model.ccSwitchProvider(id: providerID) }
 
     private var expandedFolder: String { (folder as NSString).expandingTildeInPath }
+    /// The folder is a path on this Mac: a claude/bash tab, or an ACP agent that runs here.
+    private var folderIsOnMac: Bool { agent.map { $0.workspace == .thisMac } ?? true }
+    /// The folder as an ACP tab gets it: `~` expanded only when the agent runs on this Mac.
+    private var agentFolder: String {
+        (folderIsOnMac ? expandedFolder : folder).trimmingCharacters(in: .whitespaces)
+    }
     private var folderValid: Bool {
-        // The agent's folder is on its side (a container's `/workspace`), not on this Mac.
-        if agent != nil { return folder.trimmingCharacters(in: .whitespaces).hasPrefix("/") }
+        // An agent's folder may be on its side (elsewhere), so only its shape is checked.
+        if agent != nil { return agentFolder.hasPrefix("/") }
         var isDir: ObjCBool = false
         return FileManager.default.fileExists(atPath: expandedFolder, isDirectory: &isDir) && isDir.boolValue
     }
@@ -60,10 +66,10 @@ struct NewTerminalForm: View {
                     .textFieldStyle(.plain).focused($nameFocused)
                     .onSubmit { if canCreate { create() } }
             }
-            labeled(agent == nil ? "Folder" : "Folder, as the agent sees it", required: true) {
+            labeled(folderIsOnMac ? "Folder" : "Folder, as the agent sees it", required: true) {
                 HStack(spacing: 8) {
-                    TextField(agent == nil ? "~/" : "/path/in/container", text: $folder).textFieldStyle(.plain)
-                    if agent == nil { Button("Choose…") { picking = true } }
+                    TextField(agent == nil ? "~/" : "/path/to/project", text: $folder).textFieldStyle(.plain)
+                    if folderIsOnMac { Button("Choose…") { picking = true } }
                 }
             }
             if !folder.isEmpty && !folderValid {
@@ -239,8 +245,7 @@ struct NewTerminalForm: View {
 
     private func create() {
         if let agent {
-            model.newACPSession(agent: agent, name: agentName, cwd: folder.trimmingCharacters(in: .whitespaces),
-                                scratch: scratch)
+            model.newACPSession(agent: agent, name: agentName, cwd: agentFolder, scratch: scratch)
             dismiss()
             return
         }

@@ -82,4 +82,22 @@ final class CommandRunnerTests: XCTestCase {
                                                           cwd: nil, timeout: 5)
         XCTAssertEqual(out, CommandOutput(code: 1, stdout: "", stderr: "API rate limit exceeded\n"))
     }
+
+    /// The This Mac ACP runner decides `PATH` per run: a login shell that had not answered when
+    /// the runner was made (nil) is picked up once it has ("/opt/x").
+    func testAcpAgentRunnerResolvesTheLoginPathPerRun() {
+        final class Answers: @unchecked Sendable {
+            private let lock = NSLock()
+            private var calls = 0
+            func next() -> String? { lock.withLock { calls += 1; return calls == 1 ? nil : "/opt/x" } }
+        }
+        let answers = Answers()
+        let runner = LocalCommandRunner.acpAgent(
+            env: [:], baseEnvironment: ["PATH": "/usr/bin:/bin"], loginPath: { answers.next() })
+        XCTAssertEqual(runner.defaultTimeout, 5)
+        let first = runner.run(["/usr/bin/printenv", "PATH"], cwd: nil, timeout: 5)
+        XCTAssertEqual(first?.stdout, "/usr/bin:/bin:/opt/homebrew/bin:/usr/local/bin\n", "fallback before the shell answered")
+        let second = runner.run(["/usr/bin/printenv", "PATH"], cwd: nil, timeout: 5)
+        XCTAssertEqual(second?.stdout, "/opt/x\n", "the login PATH once it resolved")
+    }
 }

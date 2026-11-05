@@ -32,7 +32,7 @@ struct SettingsWindow: View {
             switch self {
             case .appearance: return ("circle.lefthalf.filled", "How Admiral looks.")
             case .sessions: return ("terminal", "How new tabs launch, and what bash tabs reopen.")
-            case .agents: return ("shippingbox", "ACP agents — in a container or elsewhere — that tabs can run on.")
+            case .agents: return ("shippingbox", "ACP agents tabs can run on — on this Mac or elsewhere.")
             case .watchdog: return ("eye", "Goal nudges, the watchdog, and the rules it follows.")
             case .tickets: return ("ticket", "Ticket keys found in a session's chat, and their status.")
             case .bridge: return ("network", "The local API server, scratch tabs, and the bridge socket.")

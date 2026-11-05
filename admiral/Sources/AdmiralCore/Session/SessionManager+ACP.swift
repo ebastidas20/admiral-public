@@ -2,8 +2,8 @@ import Foundation
 
 /// What launch-time restore does with one saved record. Decided here, in Core, so the app's
 /// restore loop only acts on it — and so the order of the checks is under test: an ACP record
-/// is decided before the Mac folder check, because its cwd is a path as the AGENT sees it
-/// (`/workspace` in a container) and is normally absent on this Mac.
+/// is decided before the Mac folder check, because its cwd is a path as the AGENT sees it,
+/// which for an agent running elsewhere is normally absent on this Mac.
 public enum RestorePlan: Equatable {
     /// Reopen on that agent with `.restore(acpSessionID:)`.
     case acp(agent: AcpAgentConfig, acpSessionID: String)
