@@ -119,7 +119,7 @@ extension SessionManager {
             sessionStarted: { [weak self] acpSessionID, caps, _ in
                 self?.acpSessionStarted(id, acpSessionID, capabilities: caps)
             },
-            turnEnded: { [weak self] reason in self?.acpTurnEnded(id, reason) },
+            settledIdle: { [weak self] in self?.acpSettledIdle(id) },
             followUpSent: { [weak self] text in self?.acpFollowUpSent(id, text) },
             permissionRequested: { [weak self] title in self?.acpNeedsUser(id, .permission(title)) },
             question: { [weak self] questions in self?.acpNeedsUser(id, .question(questions)) },
@@ -156,11 +156,12 @@ extension SessionManager {
             id, note.kind, "@\(session.displayTitle) \(note.suffix)", HookNotification.truncated(note.body))
     }
 
-    /// `end_turn` is the ACP moment of claude's `idle_prompt`: the same "needs you" note, through
-    /// the one gate, which drops it for the tab being viewed. Any other stop reason (a cancel,
-    /// a refusal, a token limit) is not the agent waiting on the user, so it says nothing.
-    private func acpTurnEnded(_ id: UUID, _ reason: AcpStopReason) {
-        guard reason == .endTurn, let session = sessions.first(where: { $0.id == id }) else { return }
+    /// An `end_turn` that left the tab idle is the ACP moment of claude's `idle_prompt`: the same
+    /// "needs you" note, through the one gate, which drops it for the tab being viewed. The
+    /// controller fires this only once nothing is sent next (a Stop follow-up or a queued prompt
+    /// continues the turn) and never for a cancel, refusal or token limit.
+    private func acpSettledIdle(_ id: UUID) {
+        guard let session = sessions.first(where: { $0.id == id }) else { return }
         postNotification(id, .needsInput, "@\(session.displayTitle) needs you", "The agent is waiting for you")
     }
 

@@ -41,6 +41,10 @@ public final class AcpSessionController: SessionDriver {
             _ acpSessionID: String, _ capabilities: AcpCapabilities, _ configOptions: [AcpConfigOption]
         ) -> Void
         var turnEnded: (AcpStopReason) -> Void
+        /// The tab went idle after an `end_turn` with nothing sent next (no follow-up, queue empty
+        /// or held): the agent is now waiting on the user. Never fires between a turn and the
+        /// follow-up or queued prompt that continues it.
+        var settledIdle: () -> Void
         /// A Stop block's follow-up is about to go out as the next prompt — Admiral's, not the user's.
         var followUpSent: (String) -> Void
         /// The agent's oldest open permission request / elicitation, one at a time: the next
@@ -59,6 +63,7 @@ public final class AcpSessionController: SessionDriver {
             phase: @escaping (Phase) -> Void = { _ in },
             sessionStarted: @escaping (String, AcpCapabilities, [AcpConfigOption]) -> Void = { _, _, _ in },
             turnEnded: @escaping (AcpStopReason) -> Void = { _ in },
+            settledIdle: @escaping () -> Void = {},
             followUpSent: @escaping (String) -> Void = { _ in },
             permissionRequested: @escaping (String) -> Void = { _ in },
             question: @escaping ([AskQuestion]) -> Void = { _ in },
@@ -70,6 +75,7 @@ public final class AcpSessionController: SessionDriver {
             self.phase = phase
             self.sessionStarted = sessionStarted
             self.turnEnded = turnEnded
+            self.settledIdle = settledIdle
             self.followUpSent = followUpSent
             self.permissionRequested = permissionRequested
             self.question = question
@@ -153,6 +159,8 @@ public final class AcpSessionController: SessionDriver {
     /// its own — no follow-up, no drain, and a prompt still in its hook is put back. The next
     /// input clears it and starts draining from the oldest item.
     private var queueHeld = false
+    /// The last finished turn's stop reason, nil after a failed prompt; read once the tab settles idle.
+    private var lastStopReason: AcpStopReason?
     /// A turn that ended while a steer was in flight settles once the steer's answer is in,
     /// so a bounced steer goes back ahead of anything newer.
     private var pendingSettle: String??
@@ -498,6 +506,7 @@ public final class AcpSessionController: SessionDriver {
         let reply = turnReply
         turnReply = ""
         turn = .settling
+        lastStopReason = nil
         guard case let .success(value) = result else {
             // No `turnEnded`: the tab just goes idle. The error is written as the turn's reply so
             // the Chat shows it, and so a TabRun that missed the busy blip still sees output and ends.
@@ -508,6 +517,7 @@ public final class AcpSessionController: SessionDriver {
             return settle(followUp: nil)
         }
         let reason = value["stopReason"]?.stringValue.flatMap(AcpStopReason.init(rawValue:)) ?? .endTurn
+        lastStopReason = reason
         events.turnEnded(reason)
         if reason == .cancelled { queueHeld = true }
         guard reason == .endTurn, let hooks else { return settle(followUp: nil) }
@@ -531,6 +541,7 @@ public final class AcpSessionController: SessionDriver {
         } else {
             turn = .idle
             advance()
+            if turn == .idle, lastStopReason == .endTurn { events.settledIdle() }
             publishStatus()
         }
     }

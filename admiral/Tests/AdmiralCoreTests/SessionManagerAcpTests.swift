@@ -626,6 +626,26 @@ final class SessionManagerAcpTests: XCTestCase {
         XCTAssertEqual(posted.count, 1, "a cancelled turn is the user's own doing — no note")
     }
 
+    /// An `end_turn` that the tab immediately continues (a queued message) is not the agent waiting
+    /// on the user: the note comes only once the queue has drained and the tab is idle.
+    func testNeedsYouWaitsForTheQueueToDrain() async {
+        var posted = 0
+        manager.postNotification = { _, _, _, _ in posted += 1 }
+        let agent = ScriptedAgent()
+        let s = await readyTab(agent)
+        XCTAssertTrue(manager.send(s.id, text: "one"))
+        await until("first prompt") { agent.heldPrompts == 1 }
+        XCTAssertTrue(manager.send(s.id, text: "two"))
+        agent.endPrompt()
+        await until("queued prompt sent") { agent.prompts().count == 2 }
+        try? await Task.sleep(nanoseconds: 50_000_000)
+        XCTAssertEqual(posted, 0, "the queue continues the turn")
+        agent.endPrompt()
+        await until("idle") { session(s.id)?.status == .idle && posted == 1 }
+        try? await Task.sleep(nanoseconds: 50_000_000)
+        XCTAssertEqual(posted, 1)
+    }
+
     /// An ACP tab takes a prompt for certain — queued until the handshake is done counts. So a
     /// TabRun delivering into a tab still `.unknown` past its wait sends the prompt ONCE: no
     /// "did the transcript gain it?" check, and no retry queueing copies behind it.

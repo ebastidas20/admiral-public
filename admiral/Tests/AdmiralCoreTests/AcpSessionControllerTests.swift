@@ -95,6 +95,7 @@ final class AcpSessionControllerTests: XCTestCase {
     private var statuses: [SessionStatus] = []
     private var phases: [AcpSessionController.Phase] = []
     private var stops: [AcpStopReason] = []
+    private var settles = 0
     private var permissions: [String] = []
     private var questions: [[AskQuestion]] = []
     /// Every `requestResolved` and `permissionRequested`, in order: "resolved" / the title.
@@ -108,6 +109,7 @@ final class AcpSessionControllerTests: XCTestCase {
         statuses = []
         phases = []
         stops = []
+        settles = 0
         permissions = []
         questions = []
         requestLog = []
@@ -136,6 +138,7 @@ final class AcpSessionControllerTests: XCTestCase {
             phase: { [unowned self] in phases.append($0) },
             sessionStarted: { [unowned self] id, caps, _ in started = (id, caps) },
             turnEnded: { [unowned self] in stops.append($0) },
+            settledIdle: { [unowned self] in settles += 1 },
             permissionRequested: { [unowned self] in
                 permissions.append($0)
                 requestLog.append($0)
@@ -505,6 +508,35 @@ final class AcpSessionControllerTests: XCTestCase {
         await until("queue drained") { agent.prompts().count == 3 }
         XCTAssertEqual(agent.prompts().last, "[reminder] queued")
         XCTAssertEqual(hooks.after, ["did it", ""])
+    }
+
+    func testSettledIdleFiresOncePerIdleEndTurnNotBetweenFollowUpOrQueue() async {
+        let agent = ScriptedAgent()
+        let hooks = RecordingHooks(followUps: ["review"])
+        let c = await ready(agent, hooks: hooks)
+        XCTAssertTrue(c.deliver("work"))
+        await until("prompt sent") { agent.heldPrompts == 1 }
+        XCTAssertTrue(c.deliver("queued"))
+        agent.endPrompt()
+        await until("follow-up sent") { agent.prompts().count == 2 }
+        XCTAssertEqual(settles, 0, "a follow-up continues the turn")
+        agent.endPrompt()
+        await until("queue drained") { agent.prompts().count == 3 }
+        XCTAssertEqual(settles, 0, "a queued prompt continues the turn")
+        agent.endPrompt()
+        await until("idle") { settles == 1 }
+        XCTAssertEqual(stops, [.endTurn, .endTurn, .endTurn])
+    }
+
+    func testSettledIdleSilentForACancelledTurn() async {
+        let agent = ScriptedAgent()
+        let c = await ready(agent)
+        XCTAssertTrue(c.deliver("work"))
+        await until("prompt sent") { agent.heldPrompts == 1 }
+        agent.endPrompt("cancelled")
+        await until("idle") { statuses.last == .idle }
+        try? await Task.sleep(nanoseconds: 50_000_000)
+        XCTAssertEqual(settles, 0)
     }
 
     /// With the real adapter: one user prompt with a goal open earns exactly one review
