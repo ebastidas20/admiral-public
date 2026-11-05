@@ -41,6 +41,9 @@ final class AppModel: ObservableObject {
     let acpAgentStore: AcpAgentStore
     /// What each agent last advertised (mode, model, …) — Settings → Agents' "Starting options".
     let acpOptionCatalogStore: AcpOptionCatalogStore
+    /// The latest composer option pick per tab: an earlier pick's refusal arriving after a newer
+    /// pick is not shown (`setACPConfigOption`).
+    var acpOptionPicks: [UUID: Int] = [:]
     /// The ACP tab whose log sheet (`AcpLogView`) is up.
     @Published var acpLogSession: AgentSession?
     /// What Test connection last found per agent (by id) — also how the New-session form knows

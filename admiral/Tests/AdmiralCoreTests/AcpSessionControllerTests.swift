@@ -333,6 +333,27 @@ final class AcpSessionControllerTests: XCTestCase {
         }
     }
 
+    /// The agent pushes a new mode (e.g. a plan approved) while a model pick is in flight; the
+    /// pick's answer, an older snapshot, must not put the old mode back.
+    func testSetAnswerDoesNotOverwriteANewerPush() async throws {
+        let agent = optionsAgent()
+        let c = await ready(agent)
+        agent.on("session/set_config_option") { _ in .hold }
+        let pick = Task { try await c.setConfigOption(id: "model", value: "claude-opus-4-6") }
+        await until("pick in flight") { agent.held("session/set_config_option") == 1 }
+        agent.notify(update: Self.json(#"{"sessionUpdate":"current_mode_update","currentModeId":"acceptEdits"}"#))
+        await until("push applied") { c.configOptions.first?.currentValue == "acceptEdits" }
+
+        guard case let .object(o) = Self.advertised, case var .array(stale)? = o["configOptions"],
+              case var .object(model) = stale[1] else { return XCTFail("fixture") }
+        model["currentValue"] = .string("claude-opus-4-6")
+        stale[1] = .object(model)
+        agent.release("session/set_config_option", result: .object(["configOptions": .array(stale)]))
+        try await pick.value
+        XCTAssertEqual(c.configOptions.map(\.currentValue), ["acceptEdits", "claude-opus-4-6"],
+                       "the push's mode stands; only the picked value is patched")
+    }
+
     func testRefusedStartingOptionFailsTheTab() async {
         let agent = optionsAgent()
         agent.on("session/set_config_option") { _ in .error(-32603, "root needs IS_SANDBOX=1") }

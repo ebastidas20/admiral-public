@@ -179,6 +179,9 @@ public final class AcpSessionController: SessionDriver {
     private let replayIntoMirror: Bool
     /// Between sending `session/load` and its `.replayDone`: the updates are history.
     private var replaying = false
+    /// Bumped by every agent push of the options (`config_option_update` / `current_mode_update`),
+    /// so a `set_config_option` answer that raced a newer push does not put the older list back.
+    private var optionPushes = 0
 
     private let inbox: AsyncStream<Inbound>
     private let inboxIn: AsyncStream<Inbound>.Continuation
@@ -322,10 +325,13 @@ public final class AcpSessionController: SessionDriver {
     private func set(_ option: AcpConfigOption, to value: String, sessionID: String) async throws {
         switch option.setter {
         case .configOption:
+            let pushesBefore = optionPushes
             let result = try await connection.request(
                 "session/set_config_option",
                 params: AcpClient.setConfigOptionParams(sessionID: sessionID, configID: option.id, value: value))
-            if result["configOptions"]?.arrayValue != nil {
+            // A push that landed while this was in flight is newer than the answer's list: keep it,
+            // and patch only the picked value.
+            if result["configOptions"]?.arrayValue != nil, optionPushes == pushesBefore {
                 configOptions = AcpConfigOption.decodeAll(result)
             } else {
                 configOptions = configOptions.map { o in
@@ -530,9 +536,11 @@ public final class AcpSessionController: SessionDriver {
         if case let .agentMessage(text) = update, turn == .prompting { turnReply += text }
         switch update {
         case let .configOptions(options):
+            optionPushes += 1
             configOptions = options
             events.configOptionsChanged(options)
         case let .currentMode(mode):
+            optionPushes += 1
             configOptions = configOptions.applyingCurrentMode(mode)
             events.configOptionsChanged(configOptions)
         default: break

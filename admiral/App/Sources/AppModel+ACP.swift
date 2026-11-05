@@ -40,9 +40,13 @@ extension AppModel {
         return nil
     }
 
-    /// The composer's option picker. Nil = done; otherwise the text to show under the composer.
+    /// The composer's option picker. Nil = done, or superseded by a newer pick on the same tab
+    /// (its error would be stale); otherwise the text to show in the composer.
     func setACPConfigOption(_ session: AgentSession, id: String, value: String) async -> String? {
-        await sessions.setACPConfigOption(session.id, id: id, value: value)
+        let pick = (acpOptionPicks[session.id] ?? 0) + 1
+        acpOptionPicks[session.id] = pick
+        let error = await sessions.setACPConfigOption(session.id, id: id, value: value)
+        return acpOptionPicks[session.id] == pick ? error : nil
     }
 
     /// The tab menu's Show ACP log.

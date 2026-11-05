@@ -64,6 +64,15 @@ final class AcpConfigOptionsTests: XCTestCase {
         XCTAssertEqual(options.map(\.id), ["model"])
     }
 
+    func testOnlyBooleanOptionsFallBackToModes() {
+        let options = AcpConfigOption.decodeAll(json("""
+        {"configOptions":[{"id":"fast","name":"Fast","type":"boolean","currentValue":true}],
+         "modes":{"currentModeId":"a","availableModes":[{"id":"a","name":"Ask"}]}}
+        """))
+        XCTAssertEqual(options.map(\.id), ["mode"])
+        XCTAssertEqual(options.first?.setter, .legacyMode)
+    }
+
     func testLegacyModesBecomeOneModeOption() {
         let options = AcpConfigOption.decodeAll(json("""
         {"modes":{"currentModeId":"a","availableModes":[{"id":"a","name":"Ask"},{"id":"b","name":"Code"}]}}

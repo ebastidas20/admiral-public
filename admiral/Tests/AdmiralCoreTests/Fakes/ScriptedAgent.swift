@@ -68,6 +68,19 @@ final class ScriptedAgent: AcpTransport, @unchecked Sendable {
         respond(id: entry.id, error: (code, message))
     }
 
+    /// Requests of `method` held (a handler answered `.hold`) and not yet answered.
+    func held(_ method: String) -> Int { lock.withLock { held.filter { $0.method == method }.count } }
+
+    /// Answers the oldest held request of `method` with `result`.
+    func release(_ method: String, result: JSONValue) {
+        let entry = lock.withLock { () -> (id: JSONValue, method: String)? in
+            guard let i = held.firstIndex(where: { $0.method == method }) else { return nil }
+            return held.remove(at: i)
+        }
+        guard let entry else { return XCTFail("no \(method) held") }
+        respond(id: entry.id, result: result)
+    }
+
     var heldPrompts: Int { lock.withLock { held.filter { $0.method == "session/prompt" }.count } }
 
     func say(_ text: String, session: String = "s1") {
