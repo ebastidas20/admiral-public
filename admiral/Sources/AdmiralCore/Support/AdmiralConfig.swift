@@ -64,15 +64,16 @@ public struct AdmiralConfig: Codable, Equatable, Sendable {
             jira = try c.decodeIfPresent(JiraConnectorConfig.self, forKey: .jira) ?? JiraConnectorConfig()
         }
 
-        /// Browse URL for `key`: the template with `{key}` / `{KEY}` replaced, else
-        /// `jira.siteURL + "/browse/" + key`. Nil when neither is configured.
+        /// Browse URL for `key`: the template with `{key}` / `{KEY}` replaced. A template with
+        /// neither is a site URL (`+ "/browse/{key}"`), and none at all falls back to
+        /// `jira.siteURL`'s. Nil when neither is configured.
         public func openURL(for key: String) -> URL? {
             var template = openURLTemplate.trimmingCharacters(in: .whitespacesAndNewlines)
-            if template.isEmpty {
-                var site = jira.siteURL.trimmingCharacters(in: .whitespacesAndNewlines)
-                while site.hasSuffix("/") { site.removeLast() }
-                guard !site.isEmpty else { return nil }
-                template = site + "/browse/{key}"
+            if template.isEmpty { template = jira.siteURL.trimmingCharacters(in: .whitespacesAndNewlines) }
+            guard !template.isEmpty else { return nil }
+            if !template.contains("{key}") && !template.contains("{KEY}") {
+                while template.hasSuffix("/") { template.removeLast() }
+                template += "/browse/{key}"
             }
             let encoded = key.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? key
             return URL(string: template

@@ -1,22 +1,23 @@
 import Foundation
 
-/// Scans text with configurable regex patterns and returns unique ticket keys in first-seen order.
+/// Scans text with configurable regex patterns and returns unique ticket keys, the most
+/// recently mentioned first — the ticket being worked on now leads; one cited once early sinks.
 public enum TicketKeyFinder {
     /// Apply `patterns` to `text`. Invalid regexes are skipped (never fatal).
     public static func findKeys(in text: String, patterns: [String]) -> [String] {
         guard !text.isEmpty, !patterns.isEmpty else { return [] }
-        var seen = Set<String>()
-        var ordered: [String] = []
+        var latest: [String: Int] = [:] // key -> offset of its last match, across every pattern
+        let range = NSRange(text.startIndex..<text.endIndex, in: text)
         for pattern in patterns {
             guard let regex = try? NSRegularExpression(pattern: pattern) else { continue }
-            let range = NSRange(text.startIndex..<text.endIndex, in: text)
             regex.enumerateMatches(in: text, options: [], range: range) { match, _, _ in
                 guard let match, let r = Range(match.range, in: text) else { return }
                 let key = String(text[r])
-                if seen.insert(key).inserted { ordered.append(key) }
+                latest[key] = max(latest[key] ?? -1, match.range.location)
             }
         }
-        return ordered
+        // Newest first; equal offsets (two patterns matching the same spot) break by key.
+        return latest.sorted { $0.value != $1.value ? $0.value > $1.value : $0.key < $1.key }.map(\.key)
     }
 
     /// The scannable text of a chat ledger: what the user typed and what the agent said —
