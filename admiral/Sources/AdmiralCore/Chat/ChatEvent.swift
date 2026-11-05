@@ -87,11 +87,48 @@ public struct ChatTool: Hashable, Sendable {
     }
 
     /// The last `count` lines of streaming output (a final newline ends a line, it doesn't
-    /// start an empty one) — what the Working row shows of a running command.
+    /// start an empty one) — what the Working row shows of a running command. Bounded: it
+    /// never looks past the last 4 KB, so a single endless line costs no more than that.
     public static func tail(_ text: String, lines count: Int) -> String {
-        var lines = text.split(separator: "\n", omittingEmptySubsequences: false)
-        if text.hasSuffix("\n") { lines.removeLast() }
-        return lines.suffix(count).joined(separator: "\n")
+        shown(text, maxLines: count, maxBytes: 4 * 1024).text
+    }
+
+    /// What a card draws of a long text: its end, at most `maxLines` lines and `maxBytes` bytes.
+    public struct Shown: Equatable, Sendable {
+        public var text: String
+        /// How many lines `text` holds.
+        public var lines: Int
+        /// Whether anything earlier was left out.
+        public var truncated: Bool
+    }
+
+    /// The end of `text` within both limits, found scanning back from the end (never a full
+    /// split). A byte cut that lands mid-line drops that partial line when a whole one follows.
+    public static func shown(_ text: String, maxLines: Int = 2000, maxBytes: Int = 64 * 1024) -> Shown {
+        var body = Substring(text)
+        if body.hasSuffix("\n") { body = body.dropLast() }
+        guard !body.isEmpty, maxLines > 0 else { return Shown(text: "", lines: 0, truncated: !body.isEmpty) }
+        let clipped = String(body).utf8Tail(maxBytes)
+        var truncated = clipped.utf8.count < body.utf8.count
+        let bytes = clipped.utf8
+        var start = bytes.startIndex
+        if truncated, let newline = bytes.firstIndex(of: UInt8(ascii: "\n")) { start = bytes.index(after: newline) }
+        var newlines = 0
+        var index = bytes.endIndex
+        while index > start {
+            let before = bytes.index(before: index)
+            if bytes[before] == UInt8(ascii: "\n") {
+                newlines += 1
+                if newlines == maxLines {
+                    start = index
+                    truncated = true
+                    newlines -= 1
+                    break
+                }
+            }
+            index = before
+        }
+        return Shown(text: String(clipped[start...]), lines: newlines + 1, truncated: truncated)
     }
 }
 

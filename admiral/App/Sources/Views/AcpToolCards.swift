@@ -34,7 +34,10 @@ struct ToolCard: View {
     }
 
     private var header: some View {
+        // Never `.disabled`: a disabled plain button dims its label, and a call with nothing to
+        // show should look like any other. The action just does nothing.
         Button {
+            guard hasDetail else { return }
             withAnimation(.easeOut(duration: 0.12)) { expanded.toggle() }
         } label: {
             HStack(spacing: 8) {
@@ -61,7 +64,7 @@ struct ToolCard: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .disabled(!hasDetail)
+        .accessibilityRemoveTraits(hasDetail ? [] : .isButton)
         .accessibilityLabel("\(tool.name): \(tool.title)")
         .accessibilityValue(tool.status.rawValue)
     }
@@ -108,26 +111,37 @@ private struct ToolStatusMark: View {
     }
 }
 
-/// What a call printed, mono: up to 12 lines show in full, more scroll inside a 12-line box.
+/// What a call printed, mono, in a box that grows to 12 lines and scrolls past that. Only the
+/// end of a long output is drawn (`ChatTool.shown`); the copy button copies all of it.
 private struct ToolOutputView: View {
     let text: String
+    private let shown: ChatTool.Shown
 
     @State private var copied = false
     @State private var hovering = false
+    @State private var contentHeight: CGFloat = 0
 
-    private static let maxLines = 12
-    private static let lineHeight: CGFloat = 15
+    /// 12 lines of 11.5pt mono, plus the text's vertical padding.
+    private static let maxHeight: CGFloat = 12 * 14 + 16
 
-    private var lineCount: Int { text.split(separator: "\n", omittingEmptySubsequences: false).count }
+    init(text: String) {
+        self.text = text
+        self.shown = ChatTool.shown(text)
+    }
 
     var body: some View {
-        Group {
-            if lineCount > Self.maxLines {
-                ScrollView(.vertical) { content }
-                    .frame(height: CGFloat(Self.maxLines) * Self.lineHeight + 16)
-            } else {
-                content
+        VStack(alignment: .leading, spacing: 0) {
+            if shown.truncated {
+                Text("Showing the last \(shown.lines) lines")
+                    .font(.system(size: 11))
+                    .foregroundStyle(Theme.secondaryText)
+                    .padding(.horizontal, 10).padding(.top, 6)
             }
+            // Height from the measured content, so wrapped long lines count too.
+            ScrollView(.vertical) {
+                content.onGeometryChange(for: CGFloat.self) { $0.size.height } action: { contentHeight = $0 }
+            }
+            .frame(height: min(contentHeight, Self.maxHeight))
         }
         .overlay(alignment: .topTrailing) {
             CopyControl(label: "Copy output", copied: $copied) { ChatClipboard.copy(text) }
@@ -138,7 +152,7 @@ private struct ToolOutputView: View {
     }
 
     private var content: some View {
-        Text(text)
+        Text(shown.text)
             .font(.system(size: 11.5, design: .monospaced))
             .foregroundStyle(Theme.primaryText)
             .textSelection(.enabled)
@@ -152,17 +166,27 @@ private struct ToolOutputView: View {
 /// texts' line numbers in the gutter. Long diffs stop at 40 lines until "Show all".
 private struct ToolDiffView: View {
     let path: String
-    let hunks: [LineDiff.Hunk]
     let created: Bool
+    private let rows: [LineDiff.NumberedLine]
+    private let gutter: CGFloat
 
     @State private var showAll = false
 
     private static let collapsedLines = 40
+    /// "Show all" still stops here: every row is its own view in an eager stack.
+    private static let maxLines = 500
+
+    init(path: String, hunks: [LineDiff.Hunk], created: Bool) {
+        self.path = path
+        self.created = created
+        let rows = LineDiff.numbered(hunks)
+        self.rows = rows
+        self.gutter = Self.gutterWidth(rows)
+    }
 
     var body: some View {
-        let rows = LineDiff.numbered(hunks)
-        let visible = showAll ? rows : Array(rows.prefix(Self.collapsedLines))
-        let gutter = gutterWidth(rows)
+        let capped = LineDiff.capped(rows, limit: showAll ? Self.maxLines : Self.collapsedLines)
+        let visible = Array(capped.rows)
         VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 8) {
                 Text(path)
@@ -174,7 +198,7 @@ private struct ToolDiffView: View {
                 if created {
                     Text("New file")
                         .font(.system(size: 10, weight: .semibold))
-                        .foregroundStyle(Theme.checkGreen)
+                        .foregroundStyle(Theme.primaryText)
                         .padding(.horizontal, 6).padding(.vertical, 2)
                         .background(RoundedRectangle(cornerRadius: 4).fill(Theme.diffAdded))
                 }
@@ -187,19 +211,26 @@ private struct ToolDiffView: View {
                 DiffRow(row: row, gutter: gutter)
             }
 
-            if rows.count > visible.count {
-                Button("Show all \(rows.count) lines") { showAll = true }
-                    .buttonStyle(.plain)
-                    .font(.system(size: 11.5, weight: .medium))
-                    .foregroundStyle(Theme.accent)
-                    .padding(.horizontal, 10).padding(.vertical, 6)
+            if capped.hidden > 0 {
+                if showAll {
+                    Text("\(capped.hidden) more lines not shown")
+                        .font(.system(size: 11.5))
+                        .foregroundStyle(Theme.secondaryText)
+                        .padding(.horizontal, 10).padding(.vertical, 6)
+                } else {
+                    Button("Show all \(rows.count) lines") { showAll = true }
+                        .buttonStyle(.plain)
+                        .font(.system(size: 11.5, weight: .medium))
+                        .foregroundStyle(Theme.accent)
+                        .padding(.horizontal, 10).padding(.vertical, 6)
+                }
             }
         }
         .padding(.bottom, 4)
     }
 
     /// Wide enough for the biggest number either side shows.
-    private func gutterWidth(_ rows: [LineDiff.NumberedLine]) -> CGFloat {
+    private static func gutterWidth(_ rows: [LineDiff.NumberedLine]) -> CGFloat {
         let biggest = rows.reduce(1) { max($0, $1.old ?? 0, $1.new ?? 0) }
         return CGFloat(String(biggest).count) * 7 + 10
     }

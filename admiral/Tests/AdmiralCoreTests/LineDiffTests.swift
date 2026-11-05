@@ -79,4 +79,32 @@ final class LineDiffTests: XCTestCase {
         XCTAssertEqual(ChatTool.tail("only", lines: 6), "only")
         XCTAssertEqual(ChatTool.tail("", lines: 6), "")
     }
+
+    /// Long output is drawn from its end, within both a line and a byte cap; the note's count
+    /// is the lines kept.
+    func testShownCapsLinesAndBytes() {
+        let text = (1...10).map { "line \($0)" }.joined(separator: "\n") + "\n"
+        XCTAssertEqual(ChatTool.shown(text, maxLines: 20), ChatTool.Shown(text: String(text.dropLast()), lines: 10, truncated: false))
+        let byLines = ChatTool.shown(text, maxLines: 3)
+        XCTAssertEqual(byLines, ChatTool.Shown(text: "line 8\nline 9\nline 10", lines: 3, truncated: true))
+        // 20 bytes from the end lands mid "line 8"; the partial line goes.
+        let byBytes = ChatTool.shown(text, maxLines: 100, maxBytes: 20)
+        XCTAssertEqual(byBytes, ChatTool.Shown(text: "line 9\nline 10", lines: 2, truncated: true))
+        // One endless line: the byte cap still holds, the partial line stays.
+        let endless = String(repeating: "x", count: 10_000)
+        let one = ChatTool.shown(endless, maxBytes: 100)
+        XCTAssertEqual(one.text.count, 100)
+        XCTAssertEqual(one.lines, 1)
+        XCTAssertTrue(one.truncated)
+        XCTAssertEqual(ChatTool.shown(""), ChatTool.Shown(text: "", lines: 0, truncated: false))
+    }
+
+    func testCappedRowsCountWhatIsLeftOut() {
+        let rows = LineDiff.numbered([LineDiff.Hunk(oldStart: 1, newStart: 1,
+                                                    lines: (1...7).map { .init(kind: .added, text: "\($0)") })])
+        let capped = LineDiff.capped(rows, limit: 5)
+        XCTAssertEqual(capped.rows.count, 5)
+        XCTAssertEqual(capped.hidden, 2)
+        XCTAssertEqual(LineDiff.capped(rows, limit: 50).hidden, 0)
+    }
 }

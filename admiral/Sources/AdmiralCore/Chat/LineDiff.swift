@@ -71,6 +71,11 @@ public enum LineDiff {
         return rows
     }
 
+    /// The rows a diff card draws: the first `limit`, and how many more it leaves out.
+    public static func capped(_ rows: [NumberedLine], limit: Int) -> (rows: ArraySlice<NumberedLine>, hidden: Int) {
+        (rows.prefix(limit), max(0, rows.count - limit))
+    }
+
     /// Trims the common prefix/suffix, LCS on the rest; if the middle exceeds `limit` lines on either side, one hunk
     /// of all removed then all added lines (bounded work). `context` lines around each change.
     public static func hunks(old: String, new: String, context: Int = 3, limit: Int = 1500) -> [Hunk] {
