@@ -169,6 +169,10 @@ final class AcpMessagesTests: XCTestCase {
         XCTAssertEqual(
             decode(#"{"sessionUpdate":"compaction_update","compactionId":"c1","status":"failed","error":"Too short."}"#),
             .compaction(status: "failed", error: "Too short."))
+        XCTAssertEqual(
+            decode(#"{"sessionUpdate":"usage_update","used":1,"size":2,"cost":{"amount":0.1,"currency":"USD"}}"#),
+            .queryFinished)
+        XCTAssertEqual(decode(#"{"sessionUpdate":"usage_update","used":1,"size":2}"#), .unknown("usage_update"))
         XCTAssertEqual(decode(#"{"sessionUpdate":"weird"}"#), .unknown("weird"))
         XCTAssertEqual(AcpUpdate.decode(json(#"{"sessionId":"S","update":{"sessionUpdate":"plan"}}"#))?.sessionID, "S")
         XCTAssertNil(AcpUpdate.decode(json("{}")))

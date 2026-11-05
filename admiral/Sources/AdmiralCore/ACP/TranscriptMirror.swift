@@ -141,6 +141,7 @@ public final class TranscriptMirror {
             default:
                 break
             }
+        case .queryFinished: flush()
         case .terminalExit, .availableCommands, .currentMode, .configOptions, .unknown:
             break
         }

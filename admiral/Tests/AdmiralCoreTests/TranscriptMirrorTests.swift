@@ -282,6 +282,17 @@ final class TranscriptMirrorTests: XCTestCase {
         ])
     }
 
+    /// A turn the agent starts by itself (a background task finished) has no prompt in flight, so
+    /// no `endTurn()`: its reply must land when the agent reports the query's cost, not when the
+    /// next prompt happens to flush it.
+    func testQueryFinishedLandsAnAgentStartedReply() {
+        let (m, url) = make()
+        m.apply(.agentMessage("Deploy still running."))
+        XCTAssertEqual(chat(url), [])
+        m.apply(.queryFinished)
+        XCTAssertEqual(chat(url), ["reply: Deploy still running."])
+    }
+
     func testReplayedUserMessageIsAUserLine() throws {
         let (m, url) = make()
         m.apply(.userMessage("old"))

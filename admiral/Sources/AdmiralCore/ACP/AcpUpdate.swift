@@ -46,6 +46,10 @@ public enum AcpUpdate: Sendable, Equatable {
     case configOptions([AcpConfigOption])
     /// `compaction_update`: `status` in_progress | completed | failed | cancelled; `error` why it failed.
     case compaction(status: String?, error: String?)
+    /// A `usage_update` carrying `cost`: the agent finished one model query. It is the only end
+    /// marker of a turn the agent started itself (a background task finished), which has no
+    /// prompt in flight and so no `stopReason`.
+    case queryFinished
     case unknown(String)
 
     /// The notification's updates: the primary one first, then what rode on its `_meta`
@@ -138,6 +142,7 @@ public enum AcpUpdate: Sendable, Equatable {
         case "config_option_update": return .configOptions(AcpConfigOption.decodeAll(u))
         case "compaction_update":
             return .compaction(status: u["status"]?.stringValue, error: u["error"]?.stringValue)
+        case "usage_update" where u["cost"] != nil: return .queryFinished
         default: return .unknown(kind)
         }
     }
