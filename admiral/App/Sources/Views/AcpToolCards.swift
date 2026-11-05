@@ -8,6 +8,7 @@ struct ToolCard: View {
     let tool: ChatTool
 
     @State private var expanded = false
+    @Environment(\.toolCardsStartExpanded) private var startExpanded
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -23,6 +24,7 @@ struct ToolCard: View {
         .padding(.leading, 34)
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("acp-tool-\(tool.status.rawValue)")
+        .onAppear { if startExpanded { expanded = true } }
     }
 
     private var hasDetail: Bool {
@@ -88,6 +90,11 @@ struct ToolCard: View {
         default: "wrench.and.screwdriver"
         }
     }
+}
+
+extension EnvironmentValues {
+    /// Probe only: every tool card opens already expanded (`-probeAgentsUI` draws the details).
+    @Entry var toolCardsStartExpanded = false
 }
 
 /// Running, done or failed: a spinner, a green check, a red cross.

@@ -871,6 +871,10 @@ struct ChatComposer: View {
     let isWorking: Bool
     /// Called after a send — the chat scrolls to the bottom to show it.
     var onSend: () -> Void = {}
+    /// Probe only: the composer starts with this text (e.g. "/" to open the command menu).
+    var initialText: String = ""
+    /// Probe only: the `@` menu lists these instead of asking the agent's runner.
+    var probeFiles: [String]? = nil
 
     @State private var text = ""
     @State private var attachments: [String] = []
@@ -1019,7 +1023,10 @@ struct ChatComposer: View {
             attachments.append(contentsOf: files)
             return !files.isEmpty
         }
-        .onAppear { focused = true }
+        .onAppear {
+            if text.isEmpty { text = initialText }
+            focused = true
+        }
         .onChange(of: text) { menuSelection = 0 }
         .onChange(of: fileQuery != nil) { _, open in open ? loadFiles() : (fileList = .idle) }
         .onChange(of: session.id) {
@@ -1053,8 +1060,9 @@ struct ChatComposer: View {
         fileList = .loading
         let tab = session
         fileListTab = tab.id
+        let probeFiles = probeFiles
         Task {
-            let files = await model.acpFiles(tab)
+            let files = if let probeFiles { probeFiles } else { await model.acpFiles(tab) }
             // Closed meanwhile, or the composer moved to another tab (whose own load may be running).
             guard fileList == .loading, fileListTab == tab.id else { return }
             if let files {

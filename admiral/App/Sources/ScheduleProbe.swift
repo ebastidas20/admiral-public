@@ -150,7 +150,10 @@ extension AppModel {
 
     /// A view drawn offscreen into a PNG. `ImageRenderer` can't draw text fields or scroll
     /// views, so it goes through a real (unshown) window instead.
-    func renderOffscreen<V: View>(_ view: V, size: NSSize, dark: Bool = true, to path: String) async -> Bool {
+    /// `inspect` sees the laid-out view before it is torn down (e.g. to read its accessibility tree).
+    func renderOffscreen<V: View>(
+        _ view: V, size: NSSize, dark: Bool = true, to path: String, inspect: (NSView) -> Void = { _ in }
+    ) async -> Bool {
         let hosting = NSHostingView(rootView: view.environmentObject(self)
             .environment(\.colorScheme, dark ? .dark : .light))
         hosting.frame = NSRect(origin: .zero, size: size)
@@ -162,6 +165,7 @@ extension AppModel {
         hosting.layoutSubtreeIfNeeded()
         guard let rep = hosting.bitmapImageRepForCachingDisplay(in: hosting.bounds) else { return false }
         hosting.cacheDisplay(in: hosting.bounds, to: rep)
+        inspect(hosting)
         guard let png = rep.representation(using: .png, properties: [:]) else { return false }
         return (try? png.write(to: URL(fileURLWithPath: path))) != nil
     }
