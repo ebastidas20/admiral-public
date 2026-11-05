@@ -119,6 +119,7 @@ extension SessionManager {
             sessionStarted: { [weak self] acpSessionID, caps, _ in
                 self?.acpSessionStarted(id, acpSessionID, capabilities: caps)
             },
+            turnEnded: { [weak self] reason in self?.acpTurnEnded(id, reason) },
             permissionRequested: { [weak self] title in self?.acpNeedsUser(id, .permission(title)) },
             question: { [weak self] questions in self?.acpNeedsUser(id, .question(questions)) },
             requestResolved: { [weak self] in self?.acpRequestsResolved(id) },
@@ -152,6 +153,14 @@ extension SessionManager {
         refreshChat(id)
         postNotification(
             id, note.kind, "@\(session.displayTitle) \(note.suffix)", HookNotification.truncated(note.body))
+    }
+
+    /// `end_turn` is the ACP moment of claude's `idle_prompt`: the same "needs you" note, through
+    /// the one gate, which drops it for the tab being viewed. Any other stop reason (a cancel,
+    /// a refusal, a token limit) is not the agent waiting on the user, so it says nothing.
+    private func acpTurnEnded(_ id: UUID, _ reason: AcpStopReason) {
+        guard reason == .endTurn, let session = sessions.first(where: { $0.id == id }) else { return }
+        postNotification(id, .needsInput, "@\(session.displayTitle) needs you", "The agent is waiting for you")
     }
 
     /// A chat-ledger timestamp for an ACP event, to the millisecond like the mirror's lines.

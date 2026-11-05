@@ -602,6 +602,30 @@ final class SessionManagerAcpTests: XCTestCase {
         }
     }
 
+    /// `end_turn` is the ACP moment of claude's `idle_prompt`: the same "needs you" note, through
+    /// the one gate (which suppresses it for the tab being viewed). Other stop reasons say nothing.
+    func testEndTurnPostsTheNeedsYouNotificationAndCancelDoesNot() async {
+        var posted: [(UUID, NotificationKind, String, String)] = []
+        manager.postNotification = { id, kind, title, body in posted.append((id, kind, title, body)) }
+        let agent = ScriptedAgent()
+        let s = await readyTab(agent)
+        XCTAssertTrue(manager.send(s.id, text: "go"))
+        await until("prompt sent") { agent.heldPrompts == 1 }
+        agent.endPrompt()
+        await until("idle") { session(s.id)?.status == .idle && posted.count == 1 }
+        XCTAssertEqual(posted.first?.0, s.id)
+        XCTAssertEqual(posted.first?.1, .needsInput)
+        XCTAssertEqual(posted.first?.2, "@fix-bug needs you")
+        XCTAssertEqual(posted.first?.3, "The agent is waiting for you")
+
+        XCTAssertTrue(manager.send(s.id, text: "again"))
+        await until("second prompt") { agent.heldPrompts == 1 }
+        agent.endPrompt("cancelled")
+        await until("idle again") { session(s.id)?.status == .idle }
+        try? await Task.sleep(nanoseconds: 50_000_000)
+        XCTAssertEqual(posted.count, 1, "a cancelled turn is the user's own doing — no note")
+    }
+
     /// Deny is the card's interrupt: the request is cancelled and the card closes.
     func testDenyCancelsThePermissionAndClosesTheCard() async {
         let agent = ScriptedAgent()
