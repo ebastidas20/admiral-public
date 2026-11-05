@@ -478,6 +478,20 @@ final class AcpSessionControllerTests: XCTestCase {
         XCTAssertEqual(second.last?["uri"]?.stringValue, "file:///w/a")
     }
 
+    /// A steer is not run as a command, so a slash command waits for the turn to end.
+    func testSlashCommandWaitsForTheTurnInsteadOfSteering() async {
+        let agent = ScriptedAgent(capabilities: steering)
+        let c = await ready(agent)
+        XCTAssertTrue(c.deliver("first"))
+        await until("prompt sent") { agent.heldPrompts == 1 }
+        XCTAssertTrue(c.deliver("/compact"))
+        XCTAssertTrue(c.deliver("after"))
+        XCTAssertEqual(c.queued, ["/compact", "after"], "nothing overtakes the command")
+        XCTAssertFalse(agent.methods.contains("_session/steering"))
+        agent.endPrompt()
+        await until("command sent as a prompt") { agent.prompts() == ["first", "/compact"] }
+    }
+
     func testSteeringPromptRequiredFallsBackToQueue() async {
         let agent = ScriptedAgent(capabilities: steering)
         agent.on("_session/steering") { _ in .result(.object(["outcome": .string("promptRequired")])) }
@@ -664,6 +678,50 @@ final class AcpSessionControllerTests: XCTestCase {
         XCTAssertFalse(c.answer(questions: asked, answers: []), "nothing left to answer")
     }
 
+    /// claude-agent-acp's "Other" is a `<key>_custom` text field beside the choice: it is the
+    /// card's Other box, not a second question, so a typed answer alone completes the card.
+    func testElicitationCustomCompanionFoldsIntoItsChoice() async {
+        let agent = ScriptedAgent()
+        let c = await ready(agent)
+        XCTAssertTrue(c.deliver("go"))
+        await until("prompt sent") { agent.heldPrompts == 1 }
+        func ask(_ id: String) {
+            agent.ask(id: id, method: "elicitation/create", params: .object([
+                "sessionId": .string("s1"), "mode": .string("form"), "message": .string("Next?"),
+                "requestedSchema": .object([
+                    "type": .string("object"),
+                    "properties": .object([
+                        "question_0": .object([
+                            "type": .string("string"), "title": .string("Next item"),
+                            "oneOf": .array([
+                                .object(["const": .string("a"), "title": .string("Alpha")]),
+                                .object(["const": .string("b"), "title": .string("Beta")]),
+                            ]),
+                        ]),
+                        "question_0_custom": .object([
+                            "type": .string("string"), "title": .string("Other"),
+                            "description": .string("Type your own answer"),
+                        ]),
+                    ]),
+                ]),
+            ]))
+        }
+        ask("e1")
+        await until("first question surfaced") { questions.count == 1 }
+        XCTAssertEqual(questions[0].map(\.header), ["Next item"], "the companion is no question of its own")
+        XCTAssertEqual(questions[0][0].options.map(\.label), ["Alpha", "Beta"])
+        XCTAssertTrue(c.answer(questions: questions[0], answers: ["something else"]))
+        await until("first reply") { agent.reply(to: "e1") != nil }
+        XCTAssertEqual(agent.reply(to: "e1")?["result"]?["content"],
+                       .object(["question_0_custom": .string("something else")]))
+
+        ask("e2")
+        await until("second question surfaced") { questions.count == 2 }
+        XCTAssertTrue(c.answer(questions: questions[1], answers: ["Beta"]))
+        await until("second reply") { agent.reply(to: "e2") != nil }
+        XCTAssertEqual(agent.reply(to: "e2")?["result"]?["content"], .object(["question_0": .string("b")]))
+    }
+
     // MARK: - Hooks
 
     func testPromptPassesThroughBeforePromptHook() async {
@@ -674,6 +732,17 @@ final class AcpSessionControllerTests: XCTestCase {
         await until("prompt sent") { agent.heldPrompts == 1 }
         XCTAssertEqual(hooks.before, ["hello"])
         XCTAssertEqual(agent.prompts(), ["[reminder] hello"])
+    }
+
+    /// A slash command runs only when the prompt starts with it: no reminder in front of it.
+    func testSlashCommandSkipsBeforePromptHook() async {
+        let agent = ScriptedAgent()
+        let hooks = RecordingHooks()
+        let c = await ready(agent, hooks: hooks)
+        XCTAssertTrue(c.submitTyped("/clear"))
+        await until("prompt sent") { agent.heldPrompts == 1 }
+        XCTAssertEqual(hooks.before, [])
+        XCTAssertEqual(agent.prompts(), ["/clear"])
     }
 
     func testAfterTurnFollowUpSentBeforeQueue() async {

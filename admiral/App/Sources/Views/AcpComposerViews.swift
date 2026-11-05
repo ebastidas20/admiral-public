@@ -44,7 +44,7 @@ struct AcpOptionChip: View {
                 }
             }
         } label: {
-            Text(option.currentName ?? option.name)
+            Text(option.chipLabel)
                 .font(.system(size: 11))
         }
         .menuStyle(.borderlessButton)

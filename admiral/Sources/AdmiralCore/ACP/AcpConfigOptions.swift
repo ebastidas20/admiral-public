@@ -51,6 +51,13 @@ public struct AcpConfigOption: Hashable, Sendable, Codable, Identifiable {
         currentValue.map { current in values.first { $0.value == current }?.name ?? current }
     }
 
+    /// The composer chip's text: a mode or a model names itself ("Plan", "Opus 5.5"); any other
+    /// option's value says nothing alone ("Off"), so its name leads ("Fast: Off").
+    public var chipLabel: String {
+        guard let current = currentName else { return name }
+        return ["mode", "model"].contains(category ?? "") ? current : "\(name): \(current)"
+    }
+
     /// `configOptions` from a new/load/resume/set result (or a `config_option_update`); when no
     /// select option is kept (absent, empty, or only booleans), a `modes` object becomes ONE option `id:"mode"`, name "Mode", category
     /// "mode", setter `.legacyMode`. Only `type:"select"` options are kept — Admiral does not

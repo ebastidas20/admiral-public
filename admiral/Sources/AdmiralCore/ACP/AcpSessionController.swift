@@ -139,9 +139,13 @@ public final class AcpSessionController: SessionDriver {
             (self.raw, text, hooked, self.links) = (raw, hookedText, true, links)
         }
 
-        /// Through `beforePrompt` once; an already-hooked item passes as it is.
+        /// A slash command (`/clear`, `/compact args`): the agent runs it only when the prompt
+        /// starts with it, so it goes out bare and never as a steer.
+        var isCommand: Bool { raw.hasPrefix("/") }
+
+        /// Through `beforePrompt` once; an already-hooked item, or a command, passes as it is.
         func hooked(by hooks: AcpTurnHooks?) async -> Outgoing {
-            guard !hooked, let hooks else { return self }
+            guard !hooked, !isCommand, let hooks else { return self }
             return Outgoing(raw: raw, hookedText: await hooks.beforePrompt(text), links: links)
         }
     }
@@ -393,12 +397,14 @@ public final class AcpSessionController: SessionDriver {
 
     /// Sends the queue head when the agent can take it: as a prompt when idle, as a steer
     /// mid-prompt (one at a time) when steering is advertised. Otherwise it waits for `settle`.
+    /// A command head waits for the turn to end: a steer is not run as a command.
     private func advance() {
-        guard phase == .ready, !queueHeld, !queue.isEmpty else { return }
+        guard phase == .ready, !queueHeld, let head = queue.first else { return }
         switch turn {
         case .idle:
             send(queue.removeFirst())
-        case .prompting where promptSent && !steerInFlight && !steerBounced && capabilities?.steering == true:
+        case .prompting where promptSent && !steerInFlight && !steerBounced && !head.isCommand
+            && capabilities?.steering == true:
             steer(queue.removeFirst())
         case .prompting, .settling:
             break
@@ -752,6 +758,9 @@ public final class AcpSessionController: SessionDriver {
 /// - `boolean` → Yes / No → true / false.
 /// - `number` / `integer` → free text parsed as a number (kept as text if it is not one).
 /// - anything else → free text.
+/// A choice field's free-text companion `<key>_custom` (claude-agent-acp's "Other") is not a
+/// question of its own: it is the card's Other box under that choice, so typing there alone
+/// answers the question. A typed answer goes to the companion, a picked one to the field.
 /// An unanswered field is left out of `content`.
 struct AcpElicitationForm {
     struct Field {
@@ -760,6 +769,8 @@ struct AcpElicitationForm {
         var kind: Kind
         /// label → value sent back.
         var choices: [(label: String, value: String)]
+        /// The `<key>_custom` field that takes a typed (non-choice) answer.
+        var other: String? = nil
     }
 
     let fields: [Field]
@@ -774,9 +785,15 @@ struct AcpElicitationForm {
         let message = params["message"]?.stringValue ?? ""
         var fields: [Field] = []
         var questions: [AskQuestion] = []
-        for key in keys {
+        let companions = Set(keys.filter { key in
+            guard key.hasSuffix("_custom"), let base = props[String(key.dropLast("_custom".count))] else { return false }
+            return Self.field(key: key, schema: props[key] ?? .null).kind == .text
+                && [.choice, .multi].contains(Self.field(key: "", schema: base).kind)
+        })
+        for key in keys where !companions.contains(key) {
             guard let schema = props[key] else { continue }
-            let field = Self.field(key: key, schema: schema)
+            var field = Self.field(key: key, schema: schema)
+            if companions.contains(key + "_custom") { field.other = key + "_custom" }
             fields.append(field)
             let title = schema["title"]?.stringValue
             questions.append(AskQuestion(
@@ -821,16 +838,26 @@ struct AcpElicitationForm {
             let answer = answers[i].trimmingCharacters(in: .whitespacesAndNewlines)
             guard !answer.isEmpty else { continue }
             func value(_ label: String) -> String { field.choices.first { $0.label == label }?.value ?? label }
+            func isChoice(_ label: String) -> Bool { field.choices.contains { $0.label == label } }
             switch field.kind {
             case .text: out[field.key] = .string(answer)
-            case .choice: out[field.key] = .string(value(answer))
+            case .choice:
+                if let other = field.other, !isChoice(answer) { out[other] = .string(answer) }
+                else { out[field.key] = .string(value(answer)) }
             case .number: out[field.key] = Double(answer).map(JSONValue.number) ?? .string(answer)
             case .boolean:
                 let v = value(answer).lowercased()
                 out[field.key] = ["true", "yes"].contains(v) ? .bool(true)
                     : ["false", "no"].contains(v) ? .bool(false) : .string(answer)
             case .multi:
-                out[field.key] = .array(answer.components(separatedBy: ", ").map { .string(value($0)) })
+                let parts = answer.components(separatedBy: ", ")
+                guard let other = field.other else {
+                    out[field.key] = .array(parts.map { .string(value($0)) })
+                    break
+                }
+                let picked = parts.filter(isChoice), typed = parts.filter { !isChoice($0) }
+                if !picked.isEmpty { out[field.key] = .array(picked.map { .string(value($0)) }) }
+                if !typed.isEmpty { out[other] = .string(typed.joined(separator: ", ")) }
             }
         }
         return .object(out)

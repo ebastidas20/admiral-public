@@ -26,6 +26,20 @@ final class AcpConfigOptionsTests: XCTestCase {
     "modes":{"currentModeId":"default","availableModes":[{"id":"default","name":"Manual"},{"id":"plan","name":"Plan"}]}}
     """
 
+    /// A mode or a model names itself; any other option's value needs its name ("Fast: Off").
+    func testChipLabelLeadsWithTheNameExceptForModeAndModel() {
+        func option(_ name: String, _ category: String?, current: String? = "off") -> AcpConfigOption {
+            AcpConfigOption(id: name.lowercased(), name: name, category: category, currentValue: current,
+                            values: [AcpOptionValue(value: "on", name: "On"), AcpOptionValue(value: "off", name: "Off")])
+        }
+        XCTAssertEqual(option("Mode", "mode").chipLabel, "Off")
+        XCTAssertEqual(option("Model", "model").chipLabel, "Off")
+        XCTAssertEqual(option("Fast", "model_config").chipLabel, "Fast: Off")
+        XCTAssertEqual(option("Effort", "thought_level", current: "on").chipLabel, "Effort: On")
+        XCTAssertEqual(option("Agent", nil, current: "custom").chipLabel, "Agent: custom")
+        XCTAssertEqual(option("Fast", "model_config", current: nil).chipLabel, "Fast")
+    }
+
     func testDecodesClaudeAgentACPOptions() {
         let options = AcpConfigOption.decodeAll(json(Self.claudeAgentACP))
         XCTAssertEqual(options.map(\.id), ["mode", "model"], "configOptions win over modes")
