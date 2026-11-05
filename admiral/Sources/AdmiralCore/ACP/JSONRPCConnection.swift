@@ -42,10 +42,15 @@ public actor JSONRPCConnection {
     /// A traced line: bearer tokens masked (the session bridge's rides on `session/new`), and
     /// cut at `traceLimit`. The `acp:` prefix keeps it out of `AcpLog.lastAgentLine`.
     static func traced(_ arrow: String, _ line: String) -> String {
+        "acp: \(arrow) \(loggable(line))"
+    }
+
+    /// A wire line as it may go in the log: bearer tokens masked, cut at `traceLimit`. Every
+    /// logged line from the agent passes through here — traced, non-JSON or unmatched.
+    static func loggable(_ line: String) -> String {
         let masked = line.replacingOccurrences(
             of: #"Bearer [^"\\]+"#, with: "Bearer ***", options: .regularExpression)
-        let cut = masked.count > traceLimit ? String(masked.prefix(traceLimit)) + "\u{2026}" : masked
-        return "acp: \(arrow) \(cut)"
+        return masked.count > traceLimit ? String(masked.prefix(traceLimit)) + "\u{2026}" : masked
     }
 
     public func onRequest(_ handler: @escaping @Sendable (String, JSONValue) async throws -> JSONValue) {
@@ -114,7 +119,7 @@ public actor JSONRPCConnection {
         guard let value = try? JSONDecoder().decode(JSONValue.self, from: Data(line.utf8)),
               case .object = value, value["jsonrpc"] != nil || value["id"] != nil || value["method"] != nil
         else {
-            log("acp: non-JSON line: \(line)")
+            log("acp: non-JSON line: \(Self.loggable(line))")
             return
         }
         if let method = value["method"]?.stringValue {
@@ -136,7 +141,7 @@ public actor JSONRPCConnection {
                 cont.resume(returning: value["result"] ?? .null)
             }
         } else {
-            log("acp: unmatched message: \(line)")
+            log("acp: unmatched message: \(Self.loggable(line))")
         }
     }
 

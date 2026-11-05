@@ -197,4 +197,22 @@ final class JSONRPCConnectionTests: XCTestCase {
         let long = String(repeating: "a", count: 5_000)
         XCTAssertEqual(JSONRPCConnection.traced("<-", long).count, "acp: <- ".count + JSONRPCConnection.traceLimit + 1)
     }
+
+    /// A non-JSON or unmatched line is logged like traced traffic: bearer masked, length capped —
+    /// with tracing off too, since these two are logged regardless.
+    func testNonJSONAndUnmatchedLinesAreMaskedAndCapped() async throws {
+        let logged = Box<String>()
+        let (t, c) = await make(log: { logged.add($0) })
+        t.feed("Bearer s3cr3t " + String(repeating: "x", count: 5_000))
+        t.feed(#"{"jsonrpc":"2.0","id":99,"result":{"h":"Bearer s3cr3t"}}"#)
+        async let r = c.request("ping", params: .null)
+        _ = await t.waitForSent(1)
+        t.feed(#"{"jsonrpc":"2.0","id":1,"result":null}"#)
+        _ = try await r
+        let lines = logged.values
+        let nonJSON = try XCTUnwrap(lines.first { $0.contains("non-JSON") })
+        let unmatched = try XCTUnwrap(lines.first { $0.contains("unmatched") })
+        for line in [nonJSON, unmatched] { XCTAssertFalse(line.contains("s3cr3t"), line) }
+        XCTAssertLessThanOrEqual(nonJSON.count, "acp: non-JSON line: ".count + JSONRPCConnection.traceLimit + 1)
+    }
 }
