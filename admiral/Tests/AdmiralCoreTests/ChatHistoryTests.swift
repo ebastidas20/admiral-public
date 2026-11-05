@@ -40,6 +40,7 @@ final class ChatHistoryTests: XCTestCase {
             case let .notice(_, text, _): return "notice: \(text)"
             case .ask: return "ask"
             case .needs: return "needs"
+            case let .tool(_, tool, _): return "tool: \(tool.name) \(tool.status.rawValue)"
             }
         }
     }
@@ -61,6 +62,80 @@ final class ChatHistoryTests: XCTestCase {
         ])
         XCTAssertEqual(live, ["you: fix the comet", "agent: Let me look at the status refresh.",
                               "agent: Found it: the pid match is stale.", "agent: Fixed. Tests pass."])
+    }
+
+    private func toolUse(_ id: String, _ name: String, _ input: [String: Any]) -> [String: Any] {
+        ["type": "tool_use", "id": id, "name": name, "input": input]
+    }
+    private func toolResult(_ id: String, _ content: Any, error: Bool = false) -> [String: Any] {
+        ["type": "tool_result", "tool_use_id": id, "content": content, "is_error": error]
+    }
+    private func tools() -> [ChatTool] {
+        ChatHistory.live(base: base, session: sid, transcriptPath: transcript.path, tools: true).items.compactMap {
+            if case let .tool(_, tool, _) = $0 { return tool }
+            return nil
+        }
+    }
+
+    private func writeBashRun() {
+        write([
+            user("list files", 0),
+            assistant([toolUse("t1", "Bash", ["command": "ls -la"])], 1),
+            user([toolResult("t1", "")], 2, extra: ["toolUseResult": ["stdout": "a.swift\nb.swift"]]),
+            assistant([say("Two files.")], 3),
+        ])
+    }
+
+    /// The ACP Chat (`tools: true`) shows each tool call as a card: opened by its tool_use,
+    /// completed by its tool_result, with the command's output from `toolUseResult.stdout`.
+    func testToolsShowAsCardsWhenAsked() {
+        writeBashRun()
+        let items = ChatHistory.live(base: base, session: sid, transcriptPath: transcript.path, tools: true).items
+        XCTAssertEqual(texts(items), ["you: list files", "tool: Bash completed", "agent: Two files."])
+        guard case let .tool(id, tool, ts) = items[1] else { return XCTFail() }
+        XCTAssertEqual(id, -2, "the tool_use line's id")
+        XCTAssertEqual(ts, self.ts(1))
+        XCTAssertEqual(tool.id, "t1")
+        XCTAssertEqual(tool.title, "ls -la")
+        XCTAssertEqual(tool.detail, .output("a.swift\nb.swift"))
+    }
+
+    /// Guard: the PTY Chat is unchanged — no tool cards unless asked for (the default).
+    func testNoToolCardsByDefault() {
+        writeBashRun()
+        XCTAssertEqual(live, ["you: list files", "agent: Two files."])
+        let page = ChatHistory.page(base: base, session: sid, transcriptPath: transcript.path, before: nil)
+        XCTAssertEqual(texts(page.items), ["you: list files", "agent: Two files."])
+    }
+
+    func testToolStatusAndDetail() {
+        write([
+            assistant([toolUse("r", "Bash", ["command": "make"])], 0),
+            assistant([toolUse("f", "Bash", ["command": "false"])], 1),
+            user([toolResult("f", [["type": "text", "text": "```console\nboom\n```"]], error: true)], 2),
+            assistant([toolUse("e", "Edit", ["file_path": "/p/a.swift"])], 3),
+            user([toolResult("e", "ok")], 4, extra: ["toolUseResult": [
+                "filePath": "/p/a.swift", "oldString": "a\n", "newString": "b\n", "type": "update"]]),
+            assistant([toolUse("w", "Write", ["file_path": "/p/n.swift"])], 5),
+            user([toolResult("w", "")], 6, extra: ["toolUseResult": [
+                "filePath": "/p/n.swift", "oldString": "", "newString": "x\n", "type": "create"]]),
+            assistant([toolUse("p", "TodoWrite", ["todos": []])], 7),
+            assistant([toolUse("n", "Read", [:])], 8),
+            user([toolResult("n", "")], 9),
+        ])
+        let all = tools()
+        XCTAssertEqual(all.map(\.id), ["r", "f", "e", "w", "n"], "TodoWrite stays a plan, never a card")
+        XCTAssertEqual(all[0].status, .running, "no result in the window yet")
+        XCTAssertEqual(all[0].detail, .none)
+        XCTAssertEqual(all[1].status, .failed)
+        XCTAssertEqual(all[1].detail, .output("boom"), "a whole-text console fence is stripped")
+        XCTAssertEqual(all[2].status, .completed)
+        XCTAssertEqual(all[2].detail, .diff(path: "/p/a.swift", hunks: LineDiff.hunks(old: "a\n", new: "b\n"),
+                                            created: false))
+        guard case let .diff(_, _, created) = all[3].detail else { return XCTFail("\(all[3])") }
+        XCTAssertTrue(created)
+        XCTAssertEqual(all[4].title, "Read", "no input: the tool's name")
+        XCTAssertEqual(all[4].detail, .none)
     }
 
     /// The ledger records the same Stop reply the transcript holds; it must not show twice.

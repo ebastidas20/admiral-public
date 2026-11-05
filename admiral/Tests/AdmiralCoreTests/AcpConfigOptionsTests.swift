@@ -106,7 +106,7 @@ final class AcpConfigOptionsTests: XCTestCase {
         {"sessionId":"s1","update":{"sessionUpdate":"config_option_update","configOptions":[
           {"id":"model","name":"Model","type":"select","currentValue":"a","options":[{"value":"a","name":"A"}]}]}}
         """))
-        XCTAssertEqual(update?.update, .configOptions([AcpConfigOption(
+        XCTAssertEqual(update?.updates.first, .configOptions([AcpConfigOption(
             id: "model", name: "Model", currentValue: "a", values: [AcpOptionValue(value: "a", name: "A")])]))
     }
 

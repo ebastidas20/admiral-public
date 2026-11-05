@@ -16,7 +16,7 @@ final class AcpComposerPickersTests: XCTestCase {
         """#
         let value = try JSONDecoder().decode(JSONValue.self, from: Data(json.utf8))
         let decoded = try XCTUnwrap(AcpUpdate.decode(value))
-        XCTAssertEqual(decoded.update, .availableCommands([
+        XCTAssertEqual(decoded.updates.first, .availableCommands([
             AcpCommandInfo(name: "web", description: "Search", hint: "query"),
             AcpCommandInfo(name: "init", description: "Init", hint: nil)
         ]))

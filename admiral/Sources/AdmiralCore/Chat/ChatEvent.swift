@@ -24,6 +24,9 @@ public struct ChatEvent: Codable, Equatable, Sendable {
         /// The open question / permission cards were dealt with outside a prompt — an ACP
         /// agent's request answered, allowed or cancelled. Closes them; draws nothing.
         case resolved
+        /// A tool call and, once it ended, its result — read from an ACP tab's transcript
+        /// (`ChatHistory`'s `tools`), never written to the ledger. Carries `tool`.
+        case tool
     }
 
     public var ts: String
@@ -35,17 +38,52 @@ public struct ChatEvent: Codable, Equatable, Sendable {
     /// Stable identity for the rendered item, set by whoever read the event (its ledger line
     /// number; a negative transcript line number for history). Never written to disk.
     public var id: Int?
+    /// The call a `.tool` event shows. Never written to disk.
+    public var tool: ChatTool?
 
     enum CodingKeys: String, CodingKey { case ts, kind, text, source, questions }
 
     public init(ts: String, kind: Kind, text: String? = nil, source: String? = nil,
-                questions: [AskQuestion]? = nil, id: Int? = nil) {
+                questions: [AskQuestion]? = nil, id: Int? = nil, tool: ChatTool? = nil) {
         self.ts = ts
         self.kind = kind
         self.text = text
         self.source = source
         self.questions = questions
         self.id = id
+        self.tool = tool
+    }
+}
+
+/// One tool call as the ACP Chat draws it: what ran, how it ended, and what it produced.
+public struct ChatTool: Hashable, Sendable {
+    /// The call's id (the transcript's `tool_use` id).
+    public var id: String
+    /// The Claude tool name (`Bash`, `Edit`, …).
+    public var name: String
+    /// One line saying what the call did (the command, the file); the name when the input says nothing.
+    public var title: String
+    public var status: Status
+    public var detail: Detail
+
+    public enum Status: String, Sendable {
+        case running, completed, failed
+    }
+
+    public enum Detail: Hashable, Sendable {
+        case none
+        /// What the call printed (a command's stdout, else its result text).
+        case output(String)
+        /// A file edit; `created` when the file is new.
+        case diff(path: String, hunks: [LineDiff.Hunk], created: Bool)
+    }
+
+    public init(id: String, name: String, title: String, status: Status = .running, detail: Detail = .none) {
+        self.id = id
+        self.name = name
+        self.title = title
+        self.status = status
+        self.detail = detail
     }
 }
 

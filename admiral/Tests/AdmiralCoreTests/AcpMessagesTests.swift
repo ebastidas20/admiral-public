@@ -63,7 +63,64 @@ final class AcpMessagesTests: XCTestCase {
     }
 
     private func decode(_ update: String) -> AcpUpdate? {
-        AcpUpdate.decode(json(#"{"sessionId":"S","update":\#(update)}"#))?.update
+        AcpUpdate.decode(json(#"{"sessionId":"S","update":\#(update)}"#))?.updates.first
+    }
+
+    private func decodeAll(_ update: String) -> [AcpUpdate] {
+        AcpUpdate.decode(json(#"{"sessionId":"S","update":\#(update)}"#))?.updates ?? []
+    }
+
+    func testDecodeToolContentItemsKeepsDiffsAndTerminals() {
+        let updates = decodeAll("""
+        {"sessionUpdate":"tool_call_update","toolCallId":"t1","content":[
+          {"type":"diff","path":"/p/a.swift","oldText":"a\\n","newText":"b\\n"},
+          {"type":"content","content":{"type":"text","text":"ok"}},
+          {"type":"terminal","terminalId":"t1"}]}
+        """)
+        guard case let .toolCallUpdate(id, _, content, _, _, items)? = updates.first else {
+            return XCTFail("\(updates)")
+        }
+        XCTAssertEqual(id, "t1")
+        XCTAssertEqual(content, "ok")
+        XCTAssertEqual(items, [.diff(path: "/p/a.swift", oldText: "a\n", newText: "b\n"), .text("ok"),
+                               .terminal(id: "t1")])
+        let created = decodeAll("""
+        {"sessionUpdate":"tool_call_update","toolCallId":"t1","content":[
+          {"type":"diff","path":"/p/n.swift","oldText":null,"newText":"x"}]}
+        """)
+        guard case let .toolCallUpdate(_, _, _, _, _, newItems)? = created.first else { return XCTFail() }
+        XCTAssertEqual(newItems, [.diff(path: "/p/n.swift", oldText: nil, newText: "x")])
+    }
+
+    /// claude-agent-acp's terminal channel (`clientCapabilities._meta.terminal_output`) rides on a
+    /// tool call update's `_meta`: the primary update first, then the output it carried.
+    func testDecodeTerminalOutputAndExitFromMeta() {
+        let updates = decodeAll("""
+        {"sessionUpdate":"tool_call_update","toolCallId":"t1",
+         "_meta":{"terminal_output":{"terminal_id":"t1","data":"hi"}}}
+        """)
+        XCTAssertEqual(updates, [
+            .toolCallUpdate(id: "t1", status: nil, content: nil, locations: []),
+            .terminalOutput(toolCallID: "t1", data: "hi"),
+        ])
+        let exit = decodeAll("""
+        {"sessionUpdate":"tool_call_update","toolCallId":"t1",
+         "_meta":{"terminal_exit":{"terminal_id":"t1","exit_code":2,"signal":null}}}
+        """)
+        XCTAssertEqual(exit.last, .terminalExit(toolCallID: "t1", exitCode: 2))
+    }
+
+    /// When the same update both carries output and closes the call, the output comes first, so
+    /// no consumer sees output for a call it has already closed.
+    func testOutputOnAClosingUpdateIsDeliveredBeforeTheClose() {
+        let updates = decodeAll("""
+        {"sessionUpdate":"tool_call_update","toolCallId":"t1","status":"completed",
+         "_meta":{"terminal_output":{"terminal_id":"t1","data":"bye"}}}
+        """)
+        XCTAssertEqual(updates, [
+            .terminalOutput(toolCallID: "t1", data: "bye"),
+            .toolCallUpdate(id: "t1", status: "completed", content: nil, locations: []),
+        ])
     }
 
     func testDecodeEachUpdateKind() {
@@ -83,7 +140,7 @@ final class AcpMessagesTests: XCTestCase {
             {"sessionUpdate":"tool_call_update","toolCallId":"t1","status":"completed",
              "content":[{"type":"content","content":{"type":"text","text":"ok"}}],"locations":[{"path":"/b"}]}
             """),
-            .toolCallUpdate(id: "t1", status: "completed", content: "ok", locations: ["/b"]))
+            .toolCallUpdate(id: "t1", status: "completed", content: "ok", locations: ["/b"], items: [.text("ok")]))
         // claude-agent-acp sends a tool call's input on an update, not on the call (0.100.0).
         XCTAssertEqual(
             decode(#"{"sessionUpdate":"tool_call_update","toolCallId":"t1","rawInput":{"command":"ls"}}"#),

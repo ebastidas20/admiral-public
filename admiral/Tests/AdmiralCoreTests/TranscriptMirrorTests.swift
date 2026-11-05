@@ -86,6 +86,89 @@ final class TranscriptMirrorTests: XCTestCase {
         XCTAssertEqual(md, "after")
     }
 
+    /// The tool_result line's top-level `toolUseResult`, as real Claude transcripts carry it.
+    private func toolUseResult(_ url: URL) throws -> [String: Any]? {
+        for l in lines(url) {
+            let obj = try JSONSerialization.jsonObject(with: Data(l.utf8)) as? [String: Any]
+            if let result = obj?["toolUseResult"] as? [String: Any] { return result }
+        }
+        return nil
+    }
+
+    func testDiffUpdateGivesTheResultAClaudeShapedEdit() throws {
+        let (m, url) = make()
+        m.apply(.toolCall(id: "t1", title: "Edit a.swift", kind: "edit", status: "pending",
+                          rawInput: .object(["file_path": .string("/p/a.swift")]), locations: []))
+        m.apply(.toolCallUpdate(id: "t1", status: nil, content: nil, locations: [],
+                                items: [.diff(path: "/p/a.swift", oldText: "x", newText: "y")]))
+        // claude-agent-acp's final whole-file diff comes last, and wins.
+        m.apply(.toolCallUpdate(id: "t1", status: nil, content: nil, locations: [],
+                                items: [.diff(path: "/p/a.swift", oldText: "a\n", newText: "b\n")]))
+        m.apply(.toolCallUpdate(id: "t1", status: "completed", content: nil, locations: []))
+        let result = try XCTUnwrap(toolUseResult(url))
+        XCTAssertEqual(result["filePath"] as? String, "/p/a.swift")
+        XCTAssertEqual(result["type"] as? String, "update")
+        XCTAssertEqual(result["oldString"] as? String, "a\n")
+        XCTAssertEqual(result["newString"] as? String, "b\n")
+    }
+
+    func testANewFileDiffIsACreate() throws {
+        let (m, url) = make()
+        m.apply(.toolCall(id: "t1", title: "Write", kind: "edit", status: nil, rawInput: nil, locations: []))
+        m.apply(.toolCallUpdate(id: "t1", status: "completed", content: "done", locations: [],
+                                items: [.diff(path: "/p/n.swift", oldText: nil, newText: "x"), .text("done")]))
+        let result = try XCTUnwrap(toolUseResult(url))
+        XCTAssertEqual(result["type"] as? String, "create")
+        XCTAssertEqual(result["oldString"] as? String, "")
+    }
+
+    func testTerminalOutputAccumulatesIntoStdout() throws {
+        let (m, url) = make()
+        m.apply(.toolCall(id: "t1", title: "ls", kind: "execute", status: "pending",
+                          rawInput: .object(["command": .string("ls")]), locations: []))
+        m.apply(.toolCallUpdate(id: "t1", status: "in_progress", content: nil, locations: [],
+                                items: [.terminal(id: "t1")]))
+        m.apply(.terminalOutput(toolCallID: "t1", data: "a"))
+        m.apply(.terminalOutput(toolCallID: "t1", data: "b"))
+        m.apply(.terminalExit(toolCallID: "t1", exitCode: 0))
+        m.apply(.toolCallUpdate(id: "t1", status: "completed", content: nil, locations: []))
+        XCTAssertEqual(try toolUseResult(url)?["stdout"] as? String, "ab")
+    }
+
+    func testATerminalCallWithoutOutputFallsBackToItsText() throws {
+        let (m, url) = make()
+        m.apply(.toolCall(id: "t1", title: "ls", kind: "execute", status: nil, rawInput: nil, locations: []))
+        m.apply(.toolCallUpdate(id: "t1", status: "completed", content: "plain", locations: [],
+                                items: [.terminal(id: "t1"), .text("plain")]))
+        XCTAssertEqual(try toolUseResult(url)?["stdout"] as? String, "plain")
+    }
+
+    func testAPlainResultHasNoToolUseResult() throws {
+        let (m, url) = make()
+        m.apply(.toolCall(id: "t1", title: "Read", kind: "read", status: nil, rawInput: nil, locations: []))
+        m.apply(.toolCallUpdate(id: "t1", status: "completed", content: "x", locations: [], items: [.text("x")]))
+        XCTAssertNil(try toolUseResult(url))
+    }
+
+    /// End to end on the ACP Chat: the mirror's lines become tool cards only when asked for.
+    func testChatHistoryShowsMirroredToolsOnlyWhenAsked() {
+        let (m, url) = make()
+        m.userPrompt("run it")
+        m.apply(.toolCall(id: "t1", title: "ls", kind: "execute", status: "pending",
+                          rawInput: .object(["command": .string("ls -la")]), locations: []))
+        m.apply(.terminalOutput(toolCallID: "t1", data: "file\n"))
+        m.apply(.toolCallUpdate(id: "t1", status: "completed", content: nil, locations: []))
+        m.endTurn()
+        let plain = ChatHistory.live(base: dir, session: "s1", transcriptPath: url.path).items
+        XCTAssertEqual(plain.count, 1)
+        let items = ChatHistory.live(base: dir, session: "s1", transcriptPath: url.path, tools: true).items
+        guard items.count == 2, case let .tool(_, tool, _) = items[1] else { return XCTFail("\(items)") }
+        XCTAssertEqual(tool.name, "Bash")
+        XCTAssertEqual(tool.title, "ls -la")
+        XCTAssertEqual(tool.status, .completed)
+        XCTAssertEqual(tool.detail, .output("file\n"))
+    }
+
     func testFailedToolCallIsError() {
         let (m, url) = make()
         m.apply(.toolCall(id: "t1", title: "Run", kind: "execute", status: nil, rawInput: nil, locations: []))

@@ -5,6 +5,12 @@ import Foundation
 public enum SessionBackend: Hashable, Sendable, Codable {
     case pty
     case acp(agentName: String)
+
+    /// An ACP tab: its Chat shows tool calls (`ChatHistory`'s `tools`), a PTY tab's never does.
+    public var isACP: Bool {
+        if case .acp = self { return true }
+        return false
+    }
 }
 
 /// How input reaches one tab's agent. `SessionManager` holds one per live tab and routes every

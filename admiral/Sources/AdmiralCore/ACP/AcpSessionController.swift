@@ -524,7 +524,11 @@ public final class AcpSessionController: SessionDriver {
     private func notification(_ method: String, _ params: JSONValue) {
         guard method == "session/update", let decoded = AcpUpdate.decode(params),
               decoded.sessionID == acpSessionID else { return }
-        let update = decoded.update
+        // One notification can carry several updates (a tool call's terminal output rides on its `_meta`).
+        for update in decoded.updates { apply(update) }
+    }
+
+    private func apply(_ update: AcpUpdate) {
         // A `session/load` replay is history: the tab's mirror already holds it (same local id,
         // same file) unless it was lost, and its tool calls / compactions are not new events.
         if replaying {

@@ -61,7 +61,7 @@ public struct AcpHookAdapter: AcpTurnHooks {
         switch update {
         case let .toolCall(id, _, kind, status, _, locations):
             paths = edits.merge(id: id, kind: kind, status: status, locations: locations)
-        case let .toolCallUpdate(id, status, _, locations, _):
+        case let .toolCallUpdate(id, status, _, locations, _, _):
             paths = edits.merge(id: id, kind: nil, status: status, locations: locations)
         default:
             return

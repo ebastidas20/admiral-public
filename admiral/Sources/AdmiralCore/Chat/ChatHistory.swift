@@ -9,6 +9,10 @@ import Foundation
 /// can't say: questions put through the AskUserQuestion mirror, permission prompts, and which
 /// prompts Admiral typed rather than the user. Its Stop replies are not shown — the transcript
 /// holds the same messages, and more.
+///
+/// **Tool calls** show only when asked for (`tools: true`, an ACP tab's Chat): each `tool_use`
+/// opens a `.tool` event, `.running`, and its `tool_result` completes it in place. The PTY Chat
+/// never asks, so it never shows them.
 public enum ChatHistory {
     public static let pageSize = 30
     /// How much of the transcript the live window parses each refresh.
@@ -22,8 +26,9 @@ public enum ChatHistory {
 
     /// The newest `limit` items — the live window the app refreshes every second.
     public static func live(base: URL, session: String, transcriptPath: String?,
-                            limit: Int = pageSize) -> ChatTranscript {
-        let events = timeline(transcript: transcriptPath.map { transcriptEvents(path: $0, tail: liveTailLines) } ?? [],
+                            limit: Int = pageSize, tools: Bool = false) -> ChatTranscript {
+        let transcript = transcriptPath.map { transcriptEvents(path: $0, tail: liveTailLines, tools: tools) } ?? []
+        let events = timeline(transcript: transcript,
                               ledger: ChatLedger.read(base: base, session: session))
         return ChatTranscript(items: Array(ChatFolder.fold(events).items.suffix(limit)))
     }
@@ -33,8 +38,9 @@ public enum ChatHistory {
     /// Reads both sources in full, off the main thread, and keeps only the page: paging costs
     /// a scan, never resident memory.
     public static func page(base: URL, session: String, transcriptPath: String?,
-                            before cursor: String?, limit: Int = pageSize) -> Page {
-        let events = timeline(transcript: transcriptPath.map { transcriptEvents(path: $0, tail: nil) } ?? [],
+                            before cursor: String?, limit: Int = pageSize, tools: Bool = false) -> Page {
+        let transcript = transcriptPath.map { transcriptEvents(path: $0, tail: nil, tools: tools) } ?? []
+        let events = timeline(transcript: transcript,
                               ledger: ChatLedger.read(base: base, session: session, tail: nil))
         let all = ChatFolder.fold(events).items
         let cutoff = cursor.flatMap(date)
@@ -68,18 +74,21 @@ public enum ChatHistory {
     // MARK: - Reading a transcript
 
     /// A transcript file (its last `tail` lines, or all of it) as chat events.
-    public static func transcriptEvents(path: String, tail: Int?) -> [ChatEvent] {
+    public static func transcriptEvents(path: String, tail: Int?, tools: Bool = false) -> [ChatEvent] {
         guard let raw = try? String(contentsOfFile: path, encoding: .utf8) else { return [] }
         let lines = raw.split(separator: "\n", omittingEmptySubsequences: false)
         let start = tail.map { max(0, lines.count - $0) } ?? 0
-        return transcriptEvents(lines: lines[start...], firstLine: start + 1)
+        return transcriptEvents(lines: lines[start...], firstLine: start + 1, tools: tools)
     }
 
     /// Transcript lines as chat events, each `id`'d by its (negated) line number so it keeps
     /// its identity however much of the file was read.
-    public static func transcriptEvents<Lines: Collection>(lines: Lines, firstLine: Int) -> [ChatEvent]
+    public static func transcriptEvents<Lines: Collection>(lines: Lines, firstLine: Int,
+                                                           tools: Bool = false) -> [ChatEvent]
     where Lines.Element: StringProtocol {
         var events: [ChatEvent] = []
+        /// Each open tool call's event, by its tool_use id, for its result to complete.
+        var openTools: [String: Int] = [:]
         for (offset, line) in lines.enumerated() {
             guard line.contains(#""type":"user""#) || line.contains(#""type":"assistant""#),
                   let obj = (try? JSONSerialization.jsonObject(with: Data(line.utf8))) as? [String: Any],
@@ -88,8 +97,69 @@ public enum ChatHistory {
                   let message = obj["message"] as? [String: Any] else { continue }
             let id = -(firstLine + offset)
             if let event = event(from: obj, message: message, ts: ts, id: id) { events.append(event) }
+            guard tools, let blocks = message["content"] as? [[String: Any]] else { continue }
+            for block in blocks {
+                switch block["type"] as? String {
+                case "tool_use":
+                    guard let tool = openedTool(block) else { continue }
+                    openTools[tool.id] = events.count
+                    events.append(ChatEvent(ts: ts, kind: .tool, id: id, tool: tool))
+                case "tool_result":
+                    guard let callID = block["tool_use_id"] as? String,
+                          let index = openTools.removeValue(forKey: callID) else { continue }
+                    events[index].tool?.status = block["is_error"] as? Bool == true ? .failed : .completed
+                    events[index].tool?.detail = toolDetail(result: block, toolUseResult: obj["toolUseResult"])
+                default:
+                    continue
+                }
+            }
         }
         return events
+    }
+
+    // MARK: - Tool calls
+
+    /// A tool_use block as a running call; nil for `TodoWrite`, which is the plan, never a card.
+    private static func openedTool(_ block: [String: Any]) -> ChatTool? {
+        guard let callID = block["id"] as? String, let name = block["name"] as? String, name != "TodoWrite"
+        else { return nil }
+        let input = (block["input"]).flatMap { try? JSONSerialization.data(withJSONObject: $0) }
+            .flatMap { try? JSONDecoder().decode(JSONValue.self, from: $0) }
+        let params = ToolFormatter.params(name: name, input: input)
+        return ChatTool(id: callID, name: name, title: params.isEmpty ? name : params)
+    }
+
+    /// What a finished call shows: its edit when the result names one (`toolUseResult`'s
+    /// `filePath` + `newString`), else its output — `toolUseResult.stdout`, else the result's
+    /// text — else nothing.
+    static func toolDetail(result: [String: Any], toolUseResult: Any?) -> ChatTool.Detail {
+        let structured = toolUseResult as? [String: Any]
+        if let path = structured?["filePath"] as? String, let new = structured?["newString"] as? String {
+            let old = structured?["oldString"] as? String ?? ""
+            let created = structured?["type"] as? String == "create"
+            return .diff(path: path, hunks: LineDiff.hunks(old: old, new: new), created: created)
+        }
+        let text = (structured?["stdout"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+            ?? unfenced(resultText(result["content"]))
+        return text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? .none : .output(text)
+    }
+
+    /// A tool_result's content: a string, or its text blocks joined.
+    private static func resultText(_ content: Any?) -> String {
+        if let string = content as? String { return string }
+        let blocks = content as? [[String: Any]] ?? []
+        return blocks.compactMap { $0["type"] as? String == "text" ? $0["text"] as? String : nil }
+            .joined(separator: "\n")
+    }
+
+    /// claude-agent-acp wraps a command's output in one ```console block; show what is inside.
+    static func unfenced(_ text: String) -> String {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.hasPrefix("```console\n"), trimmed.hasSuffix("\n```") || trimmed == "```console\n```"
+        else { return text }
+        let inner = trimmed.dropFirst("```console\n".count).dropLast("```".count)
+        let body = inner.hasSuffix("\n") ? String(inner.dropLast()) : String(inner)
+        return body.contains("\n```") ? text : body
     }
 
     private static func event(from obj: [String: Any], message: [String: Any], ts: String, id: Int) -> ChatEvent? {

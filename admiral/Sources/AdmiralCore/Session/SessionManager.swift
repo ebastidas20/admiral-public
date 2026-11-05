@@ -23,6 +23,15 @@ public final class SessionManager: ObservableObject {
     /// is decided when the tab is launched, so no input funnel asks again.
     var drivers: [UUID: SessionDriver] = [:]
     private var chatRefreshingIDs: Set<UUID> = []
+    /// ACP command output not yet published into `AgentSession.acpLiveOutput`: tab → call → data.
+    var acpLivePending: [UUID: [String: String]] = [:]
+    /// Tabs with a live-output flush scheduled (`acpLiveFlushScheduler`).
+    var acpLiveFlushScheduled: Set<UUID> = []
+    /// Runs a live-output flush later — 0.2 s, so a chatty command publishes at most five times a
+    /// second per tab. Swappable so tests flush by hand.
+    var acpLiveFlushScheduler: (@escaping @MainActor () -> Void) -> Void = { work in
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { MainActor.assumeIsolated { work() } }
+    }
     private var resolvingIDs: Set<UUID> = []
     private var refreshingIDs: Set<UUID> = []
     private var touchedRefreshingIDs: Set<UUID> = []
@@ -1004,10 +1013,11 @@ public final class SessionManager: ObservableObject {
         chatRefreshingIDs.insert(id)
         let base = supportDir
         let transcript = session.transcriptPath
+        let tools = session.backend.isACP
         Task.detached(priority: .utility) { [weak self] in
             // The live window: the newest items only (transcript + ledger, `ChatHistory`).
             // Anything older is paged in by the view as the reader scrolls up.
-            let chat = ChatHistory.live(base: base, session: sid, transcriptPath: transcript)
+            let chat = ChatHistory.live(base: base, session: sid, transcriptPath: transcript, tools: tools)
             await MainActor.run {
                 guard let self else { return }
                 self.chatRefreshingIDs.remove(id)

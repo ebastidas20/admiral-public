@@ -136,8 +136,10 @@ struct ChatView: View {
         let cursor = (history.first ?? chat.items.first)?.ts
         let base = model.sessions.supportDir
         let transcript = session.transcriptPath
+        let tools = session.backend.isACP
         Task.detached(priority: .userInitiated) {
-            let page = ChatHistory.page(base: base, session: sid, transcriptPath: transcript, before: cursor)
+            let page = ChatHistory.page(
+                base: base, session: sid, transcriptPath: transcript, before: cursor, tools: tools)
             await MainActor.run {
                 loadingHistory = false
                 // No transcript yet (claude hasn't written it): not the end, just not ready.
@@ -227,6 +229,8 @@ private struct ChatItemView: View, Equatable {
         case let .notice(_, text, ts):
             NoticeLine(text: text, ts: ts)
                 .contextMenu { CopyButton(text: text) }
+        case .tool:
+            EmptyView()  // The card comes with the ACP tool views.
         }
     }
 }

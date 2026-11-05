@@ -16,6 +16,12 @@ import Foundation
 /// lands then; anything written before that (its result, a later line, `endTurn`) lands it first,
 /// with what it has, so the order is the agent's.
 ///
+/// A tool result carries a Claude-shaped `toolUseResult` beside its `message`, as claude's own
+/// transcripts do: a call that sent a `diff` gets `{filePath, oldString, newString, type}`
+/// (`type` "create" when there was no old text; of several diffs the last wins, since
+/// claude-agent-acp sends the snippet first and the whole file last), and a call that ran in a
+/// terminal gets `{stdout}` — the output streamed for it (the last 64 KB), else its text.
+///
 /// Contract: call `endTurn()` on EVERY turn exit (any stop reason, error, cancel, transport close).
 /// It is idempotent (a second call writes nothing). `deinit` flushes pending text as a last resort.
 /// Write errors are swallowed: a mirror that cannot write must never take the session down.
@@ -30,6 +36,10 @@ public final class TranscriptMirror {
     private var toolNames: [String: String] = [:]
     private var pendingResults: [String: String] = [:]
     private var closedTools: Set<String> = []
+    private var diffs: [String: (path: String, oldText: String?, newText: String)] = [:]
+    private var terminalCalls: Set<String> = []
+    private var terminalOutput: [String: String] = [:]
+    static let terminalOutputCap = 64 * 1024
     /// Tool calls waiting for their input, in arrival order (see the type's note).
     private var heldTools: [(id: String, name: String, input: JSONValue)] = []
 
@@ -68,13 +78,24 @@ public final class TranscriptMirror {
                 writeAssistant([toolUse(id: id, name: name, input: input)])
             }
             if let status { finish(id: id, status: status) }
-        case let .toolCallUpdate(id, status, content, _, rawInput):
+        case let .toolCallUpdate(id, status, content, _, rawInput, items):
             if let rawInput, !Self.isEmpty(rawInput), let i = heldTools.firstIndex(where: { $0.id == id }) {
                 heldTools[i].input = rawInput
                 writeHeldTools(through: i)
             }
             if let content { pendingResults[id] = content }
+            for item in items {
+                switch item {
+                case let .diff(path, oldText, newText): diffs[id] = (path, oldText, newText)
+                case .terminal: terminalCalls.insert(id)
+                case .text: break
+                }
+            }
             if let status { finish(id: id, status: status) }
+        case let .terminalOutput(id, data):
+            guard !closedTools.contains(id) else { break }
+            terminalCalls.insert(id)
+            terminalOutput[id] = ((terminalOutput[id] ?? "") + data).utf8Tail(Self.terminalOutputCap)
         case let .plan(entries):
             flush()
             let todos = entries.map {
@@ -86,7 +107,7 @@ public final class TranscriptMirror {
             }
             writeAssistant([toolUse(
                 id: "plan-" + UUID().uuidString, name: "TodoWrite", input: .object(["todos": .array(todos)]))])
-        case .availableCommands, .currentMode, .configOptions, .compaction, .unknown:
+        case .terminalExit, .availableCommands, .currentMode, .configOptions, .compaction, .unknown:
             break
         }
     }
@@ -128,13 +149,32 @@ public final class TranscriptMirror {
     private func finish(id: String, status: String) {
         guard status == "completed" || status == "failed", closedTools.insert(id).inserted else { return }
         flush()
+        let text = pendingResults.removeValue(forKey: id) ?? ""
         let result: JSONValue = .object([
             "type": .string("tool_result"),
             "tool_use_id": .string(id),
-            "content": .string(pendingResults.removeValue(forKey: id) ?? ""),
+            "content": .string(text),
             "is_error": .bool(status == "failed"),
         ])
-        writeUser(.array([result]))
+        writeUser(.array([result]), toolUseResult: toolUseResult(id: id, text: text))
+    }
+
+    /// The Claude-shaped structured result for a closing call (see the type's note); nil when it
+    /// sent neither a diff nor terminal output. Forgets what it held for the call.
+    private func toolUseResult(id: String, text: String) -> JSONValue? {
+        let diff = diffs.removeValue(forKey: id)
+        let output = terminalOutput.removeValue(forKey: id)
+        let ranInTerminal = terminalCalls.remove(id) != nil
+        if let diff {
+            return .object([
+                "filePath": .string(diff.path),
+                "oldString": .string(diff.oldText ?? ""),
+                "newString": .string(diff.newText),
+                "type": .string(diff.oldText == nil ? "create" : "update"),
+            ])
+        }
+        guard ranInTerminal else { return nil }
+        return .object(["stdout": .string(output ?? text)])
     }
 
     private func buffer(_ chunk: String, isThought: Bool) {
@@ -163,8 +203,9 @@ public final class TranscriptMirror {
         write(type: "assistant", message: .object(["role": .string("assistant"), "content": .array(blocks)]))
     }
 
-    private func writeUser(_ content: JSONValue) {
-        write(type: "user", message: .object(["role": .string("user"), "content": content]))
+    private func writeUser(_ content: JSONValue, toolUseResult: JSONValue? = nil) {
+        write(type: "user", message: .object(["role": .string("user"), "content": content]),
+              toolUseResult: toolUseResult)
     }
 
     private static let clock: ISO8601DateFormatter = {
@@ -173,9 +214,9 @@ public final class TranscriptMirror {
         return f
     }()
 
-    private func write(type: String, message: JSONValue) {
+    private func write(type: String, message: JSONValue, toolUseResult: JSONValue? = nil) {
         let uuid = UUID().uuidString
-        let line: JSONValue = .object([
+        var fields: [String: JSONValue] = [
             "type": .string(type),
             "uuid": .string(uuid),
             "parentUuid": lastUUID.map(JSONValue.string) ?? .null,
@@ -183,9 +224,10 @@ public final class TranscriptMirror {
             "cwd": .string(cwd),
             "timestamp": .string(Self.clock.string(from: Date())),
             "message": message,
-        ])
+        ]
+        if let toolUseResult { fields["toolUseResult"] = toolUseResult }
         lastUUID = uuid
-        append(line)
+        append(.object(fields))
     }
 
     private func append(_ line: JSONValue) {
@@ -204,5 +246,16 @@ public final class TranscriptMirror {
         } catch {
             // Best effort: the session carries on without a mirror line.
         }
+    }
+}
+
+extension String {
+    /// The last `maxBytes` of UTF-8 (whole characters only): output kept as a bounded tail.
+    func utf8Tail(_ maxBytes: Int) -> String {
+        let bytes = utf8
+        guard bytes.count > maxBytes else { return self }
+        var start = bytes.index(bytes.endIndex, offsetBy: -maxBytes)
+        while start < bytes.endIndex, UTF8.isContinuation(bytes[start]) { start = bytes.index(after: start) }
+        return String(decoding: bytes[start...], as: UTF8.self)
     }
 }

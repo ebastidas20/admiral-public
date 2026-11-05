@@ -120,6 +120,75 @@ final class SessionManagerAcpTests: XCTestCase {
         ((try? String(contentsOf: url, encoding: .utf8)) ?? "").split(separator: "\n").map(String.init)
     }
 
+    // MARK: - Live command output
+
+    /// A command's output on `_meta.terminal_output`, as claude-agent-acp streams it.
+    private func output(_ agent: ScriptedAgent, _ data: String, call: String = "t1", status: String? = nil) {
+        var update: [String: JSONValue] = [
+            "sessionUpdate": .string("tool_call_update"), "toolCallId": .string(call),
+            "_meta": .object(["terminal_output": .object(["terminal_id": .string(call), "data": .string(data)])]),
+        ]
+        if let status { update["status"] = .string(status) }
+        agent.notify(update: .object(update))
+    }
+
+    private func closeCall(_ agent: ScriptedAgent, _ call: String = "t1", status: String = "completed") {
+        agent.notify(update: .object([
+            "sessionUpdate": .string("tool_call_update"), "toolCallId": .string(call), "status": .string(status),
+        ]))
+    }
+
+    func testLiveOutputIsCoalescedThenDroppedWhenTheCallCompletes() async {
+        var flushes: [@MainActor () -> Void] = []
+        manager.acpLiveFlushScheduler = { flushes.append($0) }
+        let agent = ScriptedAgent()
+        let s = await readyTab(agent)
+        output(agent, "a")
+        output(agent, "b")
+        await until("both chunks buffered") { manager.acpLivePending[s.id]?["t1"] == "ab" }
+        XCTAssertEqual(flushes.count, 1, "one publish for a burst")
+        XCTAssertEqual(session(s.id)?.acpLiveOutput, [:], "nothing published before the flush")
+        flushes.removeFirst()()
+        XCTAssertEqual(session(s.id)?.acpLiveOutput, ["t1": "ab"])
+        output(agent, "c")
+        await until("next burst scheduled") { flushes.count == 1 }
+        flushes.removeFirst()()
+        XCTAssertEqual(session(s.id)?.acpLiveOutput, ["t1": "abc"])
+        closeCall(agent)
+        await until("completed call dropped") { session(s.id)?.acpLiveOutput.isEmpty == true }
+    }
+
+    func testLiveOutputKeepsTheLast8KBAndFailedCallsDropIt() async {
+        var flushes: [@MainActor () -> Void] = []
+        manager.acpLiveFlushScheduler = { flushes.append($0) }
+        let agent = ScriptedAgent()
+        let s = await readyTab(agent)
+        output(agent, String(repeating: "x", count: 9000) + "END")
+        await until("flush scheduled") { flushes.count == 1 }
+        flushes.removeFirst()()
+        let kept = session(s.id)?.acpLiveOutput["t1"] ?? ""
+        XCTAssertEqual(kept.utf8.count, 8 * 1024)
+        XCTAssertTrue(kept.hasSuffix("END"))
+        closeCall(agent, status: "failed")
+        await until("failed call dropped") { session(s.id)?.acpLiveOutput.isEmpty == true }
+    }
+
+    func testLiveOutputGoesWhenTheTurnEnds() async {
+        var flushes: [@MainActor () -> Void] = []
+        manager.acpLiveFlushScheduler = { flushes.append($0) }
+        let agent = ScriptedAgent()
+        let s = await readyTab(agent)
+        XCTAssertTrue(manager.send(s.id, text: "go"))
+        await until("prompt sent") { agent.heldPrompts == 1 }
+        output(agent, "running")
+        await until("flush scheduled") { flushes.count == 1 }
+        flushes.removeFirst()()
+        XCTAssertEqual(session(s.id)?.acpLiveOutput, ["t1": "running"])
+        agent.endPrompt()
+        await until("turn over") { session(s.id)?.status == .idle }
+        XCTAssertEqual(session(s.id)?.acpLiveOutput, [:])
+    }
+
     // MARK: - Commission
 
     func testCommissionACPCreatesTabWithMirrorTranscriptAndACPBackend() async {

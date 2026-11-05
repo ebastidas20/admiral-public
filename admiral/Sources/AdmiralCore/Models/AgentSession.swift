@@ -67,6 +67,10 @@ public struct AgentSession: Identifiable, Sendable, Hashable {
     /// An ACP tab's slash commands as the agent last reported them (replaced wholesale on each
     /// update) — what the composer's `/` menu offers. Always empty on a PTY tab.
     public var acpCommands: [AcpCommandInfo] = []
+    /// An ACP tab's running commands' output as it streams (tool call id → the last 8 KB), for
+    /// the Chat's running tool card; the call's entry goes when it completes or fails, and all
+    /// go when the turn ends — the transcript has the finished output. Always empty on a PTY tab.
+    public var acpLiveOutput: [String: String] = [:]
     /// Distinct git repos this session has written to, aggregated from its hook log.
     /// Ephemeral (rebuilt from the on-disk log); not part of the initializer.
     public var touchedRepos: [TouchedRepo] = []

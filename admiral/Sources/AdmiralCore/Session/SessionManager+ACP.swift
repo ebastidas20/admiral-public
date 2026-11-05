@@ -114,7 +114,11 @@ extension SessionManager {
         _ id: UUID, agentID: UUID, controller: WeakController, logURL: URL, logStart: UInt64, command: String
     ) -> AcpSessionController.Events {
         AcpSessionController.Events(
-            status: { [weak self] in self?.applyStatus($0, to: id) },
+            status: { [weak self] status in
+                self?.applyStatus(status, to: id)
+                // Idle (any way a turn ends, errors included) or dead: nothing of the turn still runs.
+                if status != .busy { self?.acpClearLiveOutput(id) }
+            },
             phase: { [weak self] phase in
                 self?.acpPhaseChanged(
                     id, phase, controller: controller.value, logURL: logURL, logStart: logStart, command: command)
@@ -129,14 +133,54 @@ extension SessionManager {
             question: { [weak self] questions in self?.acpNeedsUser(id, .question(questions)) },
             requestResolved: { [weak self] in self?.acpRequestsResolved(id) },
             queueChanged: { [weak self] queued in self?.update(id) { $0.acpQueued = queued } },
-            update: { [weak self] event in
-                self?.update(id) {
-                    $0.lastActivityAt = Date()
-                    if case .availableCommands(let commands) = event { $0.acpCommands = commands }
-                }
-            },
+            update: { [weak self] event in self?.acpUpdate(id, event) },
             configOptionsChanged: { [weak self] options in self?.update(id) { $0.acpConfigOptions = options } },
             log: { AcpLog.append($0, to: logURL) })
+    }
+
+    /// One of the agent's updates, into the tab: its activity stamp, its slash commands, and its
+    /// running commands' live output (published coalesced, see `acpLiveFlushScheduler`).
+    func acpUpdate(_ id: UUID, _ event: AcpUpdate) {
+        let closed: String?
+        switch event {
+        case let .terminalOutput(call, data):
+            acpLivePending[id, default: [:]][call, default: ""] += data
+            if acpLiveFlushScheduled.insert(id).inserted {
+                acpLiveFlushScheduler { [weak self] in self?.acpFlushLiveOutput(id) }
+            }
+            closed = nil
+        case let .toolCall(call, _, _, status, _, _), let .toolCallUpdate(call, status, _, _, _, _):
+            closed = status == "completed" || status == "failed" ? call : nil
+        default:
+            closed = nil
+        }
+        if let closed { acpLivePending[id]?[closed] = nil }
+        update(id) {
+            $0.lastActivityAt = Date()
+            if case .availableCommands(let commands) = event { $0.acpCommands = commands }
+            if let closed { $0.acpLiveOutput[closed] = nil }
+        }
+    }
+
+    /// Publishes the output buffered since the last flush, each call kept to its last 8 KB.
+    func acpFlushLiveOutput(_ id: UUID) {
+        acpLiveFlushScheduled.remove(id)
+        guard let pending = acpLivePending.removeValue(forKey: id), !pending.isEmpty else { return }
+        update(id) { session in
+            for (call, data) in pending {
+                let joined = (session.acpLiveOutput[call] ?? "") + data
+                session.acpLiveOutput[call] = joined.utf8Tail(Self.acpLiveOutputCap)
+            }
+        }
+    }
+
+    nonisolated static let acpLiveOutputCap = 8 * 1024
+
+    /// The tab went idle or dead: no command of its turn is still running.
+    private func acpClearLiveOutput(_ id: UUID) {
+        acpLivePending[id] = nil
+        guard sessions.first(where: { $0.id == id })?.acpLiveOutput.isEmpty == false else { return }
+        update(id) { $0.acpLiveOutput = [:] }
     }
 
     /// The composer's picker: one of an ACP tab's config options to `value`. Nil = done (the tab's
