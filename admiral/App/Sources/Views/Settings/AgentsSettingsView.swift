@@ -64,6 +64,7 @@ struct AgentsSettingsView: View {
                     .accessibilityIdentifier("agents-empty")
             }
             ForEach(agents) { agent in row(agent) }
+            if !agents.isEmpty && apiServerWarningShown { apiServerWarning(leading: 0) }
             HStack {
                 Button("Add Agent") { edit(AcpAgentDraft.new(), isNew: true) }
                     .accessibilityIdentifier("agents-add")
@@ -101,7 +102,7 @@ struct AgentsSettingsView: View {
 
     private func form(_ current: AcpAgentDraft) -> some View {
         let config = current.config
-        let errors = config.validationErrors(among: agents)
+        let errors = config.validationErrors(among: agents, openTabAgents: openTabAgents)
         return SettingsCard(draftIsNew ? "New agent" : "Edit \u{201C}\(config.name)\u{201D}",
                             "Launched directly — no shell — with one literal argument per line.") {
             VStack(alignment: .leading, spacing: 12) {
@@ -135,12 +136,7 @@ struct AgentsSettingsView: View {
                     }
                     .accessibilityIdentifier("agent-errors")
                 }
-                if apiServerOn ?? model.config.features.apiServer {
-                    note("exclamationmark.shield.fill",
-                         "The API server on :\(model.apiServerPort ?? model.apiServerPreferredPort) has no "
-                             + "authentication. A container may be able to reach it.")
-                        .accessibilityIdentifier("agent-api-warning")
-                }
+                if apiServerWarningShown { apiServerWarning(leading: 106) }
                 testResult(config)
                 HStack(spacing: 8) {
                     Button(testing ? "Testing\u{2026}" : "Test Connection") { test(config) }
@@ -239,7 +235,7 @@ struct AgentsSettingsView: View {
     }
 
     private func save(_ config: AcpAgentConfig) {
-        guard config.validationErrors(among: agents).isEmpty else { return }
+        guard config.validationErrors(among: agents, openTabAgents: openTabAgents).isEmpty else { return }
         if let i = agents.firstIndex(where: { $0.id == config.id }) {
             agents[i] = config
         } else {
@@ -264,6 +260,25 @@ struct AgentsSettingsView: View {
     }
 
     // MARK: - Pieces
+
+    /// The agents named by open tabs — a rename of one of them is refused (R12).
+    private var openTabAgents: [String] {
+        model.sessions.sessions.compactMap {
+            if case let .acp(name) = $0.backend { return name }
+            return nil
+        }
+    }
+
+    /// Agents configured and the API server on: a container may reach the unauthenticated
+    /// server, so the pane says so — at the list, and again in an open form.
+    private var apiServerWarningShown: Bool { apiServerOn ?? model.config.features.apiServer }
+
+    private func apiServerWarning(leading: CGFloat) -> some View {
+        note("exclamationmark.shield.fill",
+             "The API server on :\(model.apiServerPort ?? model.apiServerPreferredPort) has no "
+                 + "authentication. A container may be able to reach it.", leading: leading)
+            .accessibilityIdentifier("agent-api-warning")
+    }
 
     private func binding(_ key: WritableKeyPath<AcpAgentDraft, String>) -> Binding<String> {
         Binding(get: { draft?[keyPath: key] ?? "" }, set: { draft?[keyPath: key] = $0 })
@@ -303,11 +318,11 @@ struct AgentsSettingsView: View {
             .padding(.leading, 106)
     }
 
-    private func note(_ icon: String, _ text: String) -> some View {
+    private func note(_ icon: String, _ text: String, leading: CGFloat = 106) -> some View {
         Label(text, systemImage: icon)
             .font(.system(size: 11)).foregroundStyle(Theme.busyAmber)
             .fixedSize(horizontal: false, vertical: true)
-            .padding(.leading, 106)
+            .padding(.leading, leading)
     }
 
     private func chip(_ text: String, on: Bool) -> some View {

@@ -140,4 +140,23 @@ final class AcpAgentConfigTests: XCTestCase {
         XCTAssertNil(config.exec)
         XCTAssertEqual(config.effectiveExec, AcpCommand(command: "docker", args: ["exec", "box"]))
     }
+
+    /// R12: a rename while a tab is open on the old name would orphan that tab (it finds its
+    /// agent by name), so it is refused; with no tab on it, or a case-only change, it is fine.
+    func testRenameIsRefusedWhileATabUsesTheOldName() {
+        let saved = AcpAgentConfig.sample
+        var renamed = saved
+        renamed.name = "claude-box-2"
+        XCTAssertEqual(renamed.validationErrors(among: [saved], openTabAgents: ["CLAUDE-BOX"]),
+                       [AcpAgentConfig.renameWithOpenTabs])
+        XCTAssertEqual(renamed.validationErrors(among: [saved], openTabAgents: ["other"]), [])
+        XCTAssertEqual(renamed.validationErrors(among: [saved]), [])
+        var recased = saved
+        recased.name = "Claude-Box"
+        XCTAssertEqual(recased.validationErrors(among: [saved], openTabAgents: ["claude-box"]), [])
+        var unsaved = renamed
+        unsaved.id = UUID()
+        XCTAssertEqual(unsaved.validationErrors(among: [saved], openTabAgents: ["claude-box"]), [],
+                       "a new agent renames nothing")
+    }
 }

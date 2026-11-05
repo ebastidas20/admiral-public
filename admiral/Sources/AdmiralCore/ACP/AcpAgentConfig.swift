@@ -92,14 +92,29 @@ public struct AcpAgentConfig: Codable, Hashable, Sendable, Identifiable {
 
     /// `validationErrors`, plus the name's uniqueness among `agents` (case-insensitive, like
     /// `AcpAgentStore.agent(named:)` and every lookup by name): this agent's own saved entry —
-    /// same `id` — does not count against it. What Settings → Agents checks before saving.
-    public func validationErrors(among agents: [AcpAgentConfig]) -> [String] {
+    /// same `id` — does not count against it. And a rename is refused while a tab is open on
+    /// the old name (`openTabAgents`, the names in open tabs' `.acp(agentName:)`): tabs and their
+    /// restore records find their agent by name, so the rename would orphan them (R12). A
+    /// change of case only is not a rename — every lookup ignores case. What Settings → Agents
+    /// checks before saving.
+    public func validationErrors(among agents: [AcpAgentConfig], openTabAgents: [String] = []) -> [String] {
         let name = self.name.trimmingCharacters(in: .whitespaces)
-        let taken = !name.isEmpty && agents.contains {
-            $0.id != id && $0.name.trimmingCharacters(in: .whitespaces).caseInsensitiveCompare(name) == .orderedSame
+        func same(_ a: String, _ b: String) -> Bool {
+            a.trimmingCharacters(in: .whitespaces).caseInsensitiveCompare(b.trimmingCharacters(in: .whitespaces))
+                == .orderedSame
         }
-        return validationErrors + (taken ? ["an agent named \u{201C}\(name)\u{201D} already exists"] : [])
+        var errors = validationErrors
+        if !name.isEmpty, agents.contains(where: { $0.id != id && same($0.name, name) }) {
+            errors.append("an agent named \u{201C}\(name)\u{201D} already exists")
+        }
+        if let saved = agents.first(where: { $0.id == id }), !same(saved.name, name),
+           openTabAgents.contains(where: { same($0, saved.name) }) {
+            errors.append(Self.renameWithOpenTabs)
+        }
+        return errors
     }
+
+    public static let renameWithOpenTabs = "Close this agent's tabs before renaming it."
 
     /// The agent ignores `--dangerously-skip-permissions`; permissions are set via `defaultMode`.
     public var passesIgnoredSkipPermissionsFlag: Bool {

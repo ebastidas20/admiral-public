@@ -67,6 +67,9 @@ extension AppModel {
                 self.acpAgentStore.save([valid, legacy])
                 await draw("agents-ignored-flag", settings(legacy, apiServerOn: true),
                            NSSize(width: 640, height: 1180), dark: dark)
+                // The list alone, form closed: the warning stands at the list (both on).
+                await draw("agents-api-warning", settings(nil, apiServerOn: true),
+                           NSSize(width: 640, height: 360), dark: dark)
             }
 
             // The checks behind what was drawn, from the same Core the view reads.
@@ -93,6 +96,23 @@ extension AppModel {
                 AcpLog.append(#"acp: <- {"id":1,"jsonrpc":"2.0","result":{"agentInfo":{"name":"claude-agent-acp"}}}"#,
                               to: logURL)
                 AcpLog.append("[claude-agent-acp] session s1 ready", to: logURL)
+            }
+            // R12: the tabs' agent, being renamed while they are open — refused, and said so.
+            let pptBox = AcpAgentConfig(
+                name: "PPT box", launch: AcpCommand(command: "docker", args: ["exec", "-i", "ppt-claude-1", "agent"]),
+                cwd: "/workspace")
+            var renamed = pptBox
+            renamed.name = "PPT box (renamed)"
+            let openNames = self.sessions.sessions.compactMap { s -> String? in
+                if case let .acp(name) = s.backend { return name }
+                return nil
+            }
+            check("renaming an agent with open tabs is refused",
+                  renamed.validationErrors(among: [pptBox], openTabAgents: openNames)
+                      == [AcpAgentConfig.renameWithOpenTabs], openNames.joined(separator: ", "))
+            for dark in [true, false] {
+                self.acpAgentStore.save([pptBox])
+                await draw("agents-rename-blocked", settings(renamed), NSSize(width: 640, height: 1180), dark: dark)
             }
             for dark in [true, false] {
                 self.sidebarCollapsed = false
