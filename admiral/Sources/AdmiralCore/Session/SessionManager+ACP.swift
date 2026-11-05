@@ -126,8 +126,9 @@ extension SessionManager {
         update(id) {
             $0.acpSessionID = acpSessionID
             $0.connectError = nil
-            $0.acpCapabilities = AcpCapabilityRecord(negotiated: capabilities)
         }
+        let hasExec = sessions.first(where: { $0.id == id }).flatMap(acpRunner(for:)) != nil
+        update(id) { $0.acpCapabilities = AcpCapabilityRecord(negotiated: capabilities, hasExec: hasExec) }
         probeEnvironment(id)
         guard let s = sessions.first(where: { $0.id == id }), !s.scratch else { return }
         persistRecord(of: s)

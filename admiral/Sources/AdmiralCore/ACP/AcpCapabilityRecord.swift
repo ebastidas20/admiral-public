@@ -10,15 +10,23 @@ public enum AcpFeature: String, CaseIterable, Sendable {
 /// tooltip) and the git/PR features (skip the tab) both read, so neither re-derives the answer.
 ///
 /// `git`/`gh`/`ghAuthed` are nil until probed — and stay nil when the agent has no exec
-/// command, since there is then nowhere to run them.
+/// command, since there is then nowhere to run them. `hasExec` tells those two nils apart, so a
+/// tab whose probes are still running says so instead of claiming it has no exec.
 public struct AcpCapabilityRecord: Sendable, Hashable {
     public var negotiated: AcpCapabilities
+    /// The agent has an exec command — fixed when the record is built, before any probe.
+    public var hasExec: Bool
     public var git: Bool?
     public var gh: Bool?
     public var ghAuthed: Bool?
 
-    public init(negotiated: AcpCapabilities, git: Bool? = nil, gh: Bool? = nil, ghAuthed: Bool? = nil) {
+    public init(
+        negotiated: AcpCapabilities, hasExec: Bool = false,
+        git: Bool? = nil, gh: Bool? = nil, ghAuthed: Bool? = nil
+    ) {
         self.negotiated = negotiated
+        // A probe result means it ran somewhere: there is an exec.
+        self.hasExec = hasExec || git != nil || gh != nil || ghAuthed != nil
         self.git = git
         self.gh = gh
         self.ghAuthed = ghAuthed
@@ -30,11 +38,11 @@ public struct AcpCapabilityRecord: Sendable, Hashable {
     public func reason(_ f: AcpFeature) -> String? {
         switch f {
         case .branch, .touchedRepos:
-            return Self.toolReason(git, tool: "git")
+            return toolReason(git, tool: "git")
         case .prWatch:
             // PR watch reads the repos the tab wrote to, so whatever stops those stops it first.
             if let blocked = reason(.touchedRepos) { return blocked }
-            if let missing = Self.toolReason(gh, tool: "gh") { return missing }
+            if let missing = toolReason(gh, tool: "gh") { return missing }
             return ghAuthed == true ? nil : "gh is not logged in in the agent's environment"
         case .fork:
             return negotiated.fork ? nil : Self.unsupported("fork")
@@ -48,9 +56,10 @@ public struct AcpCapabilityRecord: Sendable, Hashable {
         }
     }
 
-    private static func toolReason(_ found: Bool?, tool: String) -> String? {
+    private func toolReason(_ found: Bool?, tool: String) -> String? {
         switch found {
-        case nil: return "No exec command configured for this agent"
+        case nil:
+            return hasExec ? "Checking the agent's environment\u{2026}" : "No exec command configured for this agent"
         case false?: return "\(tool) not found in the agent's environment"
         case true?: return nil
         }

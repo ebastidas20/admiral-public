@@ -28,6 +28,7 @@ final class AcpCapabilityRecordTests: XCTestCase {
 
     func testNoExecDisablesGitFeaturesWithReason() {
         let record = AcpCapabilityRecord(negotiated: caps())
+        XCTAssertFalse(record.hasExec)
         for f in allGitFeatures {
             XCTAssertFalse(record.isEnabled(f), "\(f)")
             XCTAssertEqual(record.reason(f), "No exec command configured for this agent", "\(f)")
@@ -35,6 +36,22 @@ final class AcpCapabilityRecordTests: XCTestCase {
         XCTAssertEqual(AcpCapabilityRecord.probe(runner: nil, cwd: "/workspace").git, nil)
         XCTAssertEqual(AcpCapabilityRecord.probe(runner: nil, cwd: "/workspace").gh, nil)
         XCTAssertEqual(AcpCapabilityRecord.probe(runner: nil, cwd: "/workspace").ghAuthed, nil)
+    }
+
+    func testProbingRecordSaysCheckingNotNoExec() {
+        let probing = AcpCapabilityRecord(negotiated: caps(), hasExec: true)
+        for f in allGitFeatures {
+            XCTAssertFalse(probing.isEnabled(f), "\(f)")
+            XCTAssertEqual(probing.reason(f), "Checking the agent's environment\u{2026}", "\(f)")
+        }
+        XCTAssertEqual(probing.reason(.branch)?.last, "\u{2026}", "the ellipsis is the one Unicode character")
+
+        var landed = probing
+        landed.git = true
+        landed.gh = true
+        landed.ghAuthed = false
+        XCTAssertTrue(landed.isEnabled(.branch))
+        XCTAssertEqual(landed.reason(.prWatch), "gh is not logged in in the agent's environment")
     }
 
     func testGitMissingDisablesGitFeaturesWithReason() {

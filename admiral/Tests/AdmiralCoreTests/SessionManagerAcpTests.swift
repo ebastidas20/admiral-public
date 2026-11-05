@@ -503,6 +503,7 @@ final class SessionManagerAcpTests: XCTestCase {
         await until("probes") { session(s.id)?.acpCapabilities?.git != nil }
         let record = session(s.id)?.acpCapabilities
         XCTAssertEqual(record?.negotiated.fork, true)
+        XCTAssertEqual(record?.hasExec, true)
         XCTAssertEqual(record?.git, true)
         XCTAssertEqual(record?.gh, true)
         XCTAssertEqual(record?.ghAuthed, false)
@@ -525,6 +526,7 @@ final class SessionManagerAcpTests: XCTestCase {
         await until("record") { session(s.id)?.acpCapabilities != nil }
         let record = session(s.id)?.acpCapabilities
         XCTAssertNil(record?.git)
+        XCTAssertEqual(record?.hasExec, false)
         XCTAssertEqual(record?.reason(.branch), "No exec command configured for this agent")
         XCTAssertNil(manager.gitAccess(for: try! XCTUnwrap(session(s.id))))
         manager.refreshGitBranch(for: s.id)
