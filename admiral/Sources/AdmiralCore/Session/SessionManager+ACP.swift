@@ -139,22 +139,33 @@ extension SessionManager {
     }
 
     /// One of the agent's updates, into the tab: its activity stamp, its slash commands, and its
-    /// running commands' live output (published coalesced, see `acpLiveFlushScheduler`).
+    /// running commands' live output.
+    ///
+    /// Output never publishes on its own: it is buffered and published — with the activity stamp —
+    /// by one flush per `acpLiveFlushScheduler` window, so a chatty command costs at most five
+    /// publishes a second. That includes the bare `tool_call_update` each chunk rides on, which
+    /// carries nothing else.
     func acpUpdate(_ id: UUID, _ event: AcpUpdate) {
         let closed: String?
         switch event {
         case let .terminalOutput(call, data):
+            guard acpLiveClosed[id]?.contains(call) != true else { return }
             acpLivePending[id, default: [:]][call, default: ""] += data
             if acpLiveFlushScheduled.insert(id).inserted {
                 acpLiveFlushScheduler { [weak self] in self?.acpFlushLiveOutput(id) }
             }
-            closed = nil
+            return
+        case .toolCallUpdate(_, nil, nil, _, nil, []):
+            return
         case let .toolCall(call, _, _, status, _, _), let .toolCallUpdate(call, status, _, _, _, _):
             closed = status == "completed" || status == "failed" ? call : nil
         default:
             closed = nil
         }
-        if let closed { acpLivePending[id]?[closed] = nil }
+        if let closed {
+            acpLivePending[id]?[closed] = nil
+            acpLiveClosed[id, default: []].insert(closed)
+        }
         update(id) {
             $0.lastActivityAt = Date()
             if case .availableCommands(let commands) = event { $0.acpCommands = commands }
@@ -167,6 +178,7 @@ extension SessionManager {
         acpLiveFlushScheduled.remove(id)
         guard let pending = acpLivePending.removeValue(forKey: id), !pending.isEmpty else { return }
         update(id) { session in
+            session.lastActivityAt = Date()
             for (call, data) in pending {
                 let joined = (session.acpLiveOutput[call] ?? "") + data
                 session.acpLiveOutput[call] = joined.utf8Tail(Self.acpLiveOutputCap)
@@ -179,6 +191,7 @@ extension SessionManager {
     /// The tab went idle or dead: no command of its turn is still running.
     private func acpClearLiveOutput(_ id: UUID) {
         acpLivePending[id] = nil
+        acpLiveClosed[id] = nil
         guard sessions.first(where: { $0.id == id })?.acpLiveOutput.isEmpty == false else { return }
         update(id) { $0.acpLiveOutput = [:] }
     }

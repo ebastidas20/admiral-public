@@ -101,6 +101,9 @@ public enum ChatHistory {
             for block in blocks {
                 switch block["type"] as? String {
                 case "tool_use":
+                    // The tool_use LINE's id: unique only because the ACP mirror writes one
+                    // tool_use per line and no text with it. A claude transcript can do both, so
+                    // a caller passing `tools: true` for one would need ids of its own.
                     guard let tool = openedTool(block) else { continue }
                     openTools[tool.id] = events.count
                     events.append(ChatEvent(ts: ts, kind: .tool, id: id, tool: tool))

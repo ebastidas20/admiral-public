@@ -1,3 +1,4 @@
+import Combine
 import XCTest
 @testable import AdmiralCore
 
@@ -143,19 +144,30 @@ final class SessionManagerAcpTests: XCTestCase {
         manager.acpLiveFlushScheduler = { flushes.append($0) }
         let agent = ScriptedAgent()
         let s = await readyTab(agent)
-        output(agent, "a")
-        output(agent, "b")
-        await until("both chunks buffered") { manager.acpLivePending[s.id]?["t1"] == "ab" }
-        XCTAssertEqual(flushes.count, 1, "one publish for a burst")
+        var publishes = 0
+        let watch = manager.$sessions.dropFirst().sink { _ in publishes += 1 }
+        defer { watch.cancel() }
+        for chunk in ["a", "b", "c", "d"] { output(agent, chunk) }
+        await until("every chunk buffered") { manager.acpLivePending[s.id]?["t1"] == "abcd" }
+        XCTAssertEqual(publishes, 0, "chunks never publish the session on their own")
+        XCTAssertEqual(flushes.count, 1, "one flush for a burst")
         XCTAssertEqual(session(s.id)?.acpLiveOutput, [:], "nothing published before the flush")
+        let before = session(s.id)?.lastActivityAt
         flushes.removeFirst()()
-        XCTAssertEqual(session(s.id)?.acpLiveOutput, ["t1": "ab"])
-        output(agent, "c")
+        XCTAssertEqual(publishes, 1, "the burst is one publish")
+        XCTAssertEqual(session(s.id)?.acpLiveOutput, ["t1": "abcd"])
+        XCTAssertNotEqual(session(s.id)?.lastActivityAt, before, "the flush stamps the activity")
+        output(agent, "e")
         await until("next burst scheduled") { flushes.count == 1 }
         flushes.removeFirst()()
-        XCTAssertEqual(session(s.id)?.acpLiveOutput, ["t1": "abc"])
+        XCTAssertEqual(session(s.id)?.acpLiveOutput, ["t1": "abcde"])
         closeCall(agent)
         await until("completed call dropped") { session(s.id)?.acpLiveOutput.isEmpty == true }
+        // A straggling chunk on its own notification after the close opens nothing again.
+        output(agent, "late")
+        output(agent, "other", call: "t2")
+        await until("the next call's chunk buffered") { manager.acpLivePending[s.id]?["t2"] == "other" }
+        XCTAssertNil(manager.acpLivePending[s.id]?["t1"])
     }
 
     func testLiveOutputKeepsTheLast8KBAndFailedCallsDropIt() async {

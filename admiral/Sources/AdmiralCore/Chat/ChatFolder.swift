@@ -17,8 +17,10 @@ public struct ChatTranscript: Equatable, Sendable {
     }
 
     /// claude is blocked on the user: an unanswered question or permission prompt is last.
+    /// Tool items don't count: a call written after an open card (a parallel call, or one whose
+    /// input came late) leaves the agent no less blocked.
     public var isWaiting: Bool {
-        switch items.last {
+        switch items.last(where: { if case .tool = $0 { return false }; return true }) {
         case .ask(_, _, _, true)?, .needs(_, _, _, true)?: return true
         default: return false
         }

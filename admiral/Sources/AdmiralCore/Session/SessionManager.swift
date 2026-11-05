@@ -27,6 +27,9 @@ public final class SessionManager: ObservableObject {
     var acpLivePending: [UUID: [String: String]] = [:]
     /// Tabs with a live-output flush scheduled (`acpLiveFlushScheduler`).
     var acpLiveFlushScheduled: Set<UUID> = []
+    /// Calls that completed or failed this turn, per tab: output arriving for them later is
+    /// dropped instead of re-opening a live entry. Cleared when the tab leaves busy.
+    var acpLiveClosed: [UUID: Set<String>] = [:]
     /// Runs a live-output flush later — 0.2 s, so a chatty command publishes at most five times a
     /// second per tab. Swappable so tests flush by hand.
     var acpLiveFlushScheduler: (@escaping @MainActor () -> Void) -> Void = { work in

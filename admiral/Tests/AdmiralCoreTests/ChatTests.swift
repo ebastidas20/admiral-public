@@ -136,6 +136,19 @@ final class ChatHookTests: XCTestCase {
         XCTAssertNil(ChatFolder.fold(events).openAsk)
     }
 
+    /// A tool call written after an open card (a parallel call, a call whose input came late)
+    /// does not hide that the agent is waiting on the user.
+    func testAToolItemAfterAnOpenCardStillWaits() {
+        let tool = ChatTool(id: "t1", name: "Bash", title: "ls")
+        var events = [ChatEvent(ts: "1", kind: .prompt, text: "go"), ChatEvent(ts: "2", kind: .needs, text: "Run rm"),
+                      ChatEvent(ts: "3", kind: .tool, tool: tool)]
+        XCTAssertTrue(ChatFolder.fold(events).isWaiting)
+        events = [ChatEvent(ts: "1", kind: .prompt, text: "go"), ask(), ChatEvent(ts: "3", kind: .tool, tool: tool)]
+        XCTAssertTrue(ChatFolder.fold(events).isWaiting)
+        events = [ChatEvent(ts: "1", kind: .prompt, text: "go"), ChatEvent(ts: "3", kind: .tool, tool: tool)]
+        XCTAssertFalse(ChatFolder.fold(events).isWaiting)
+    }
+
     /// `.resolved` (an ACP request answered outside a prompt) closes the open cards and draws
     /// nothing; a card that comes after it is open again.
     func testResolvedClosesOpenCardsAndDrawsNothing() {

@@ -55,7 +55,8 @@ public enum LineDiff {
         return group(ops, context: context)
     }
 
-    /// Lines of a text; a final newline ends the last line rather than starting an empty one.
+    /// Lines of a text; a final newline ends the last line rather than starting an empty one — so
+    /// adding or dropping only the final newline is no change (no hunks).
     static func lines(_ text: String) -> [String] {
         guard !text.isEmpty else { return [] }
         var parts = text.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
