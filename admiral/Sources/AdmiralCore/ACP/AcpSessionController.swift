@@ -125,18 +125,24 @@ public final class AcpSessionController: SessionDriver {
     /// A queued prompt. `raw` is what the user (or Admiral) wrote — what the mirror shows, as a
     /// claude transcript never shows a hook's `additionalContext` as part of the prompt; `text`
     /// is what goes on the wire, and `hooked` = it already went through `beforePrompt` (a steer
-    /// the agent bounced, or a prompt put back by an interrupt).
+    /// the agent bounced, or a prompt put back by an interrupt). `links` (`@file` mentions) ride
+    /// along unhooked, after the text, whichever way it goes out.
     private struct Outgoing {
         var raw: String
         var text: String
         var hooked: Bool
-        init(text: String) { (raw, self.text, hooked) = (text, text, false) }
-        init(raw: String, hookedText: String) { (self.raw, text, hooked) = (raw, hookedText, true) }
+        var links: [AcpResourceLink] = []
+        init(text: String, links: [AcpResourceLink] = []) {
+            (raw, self.text, hooked, self.links) = (text, text, false, links)
+        }
+        init(raw: String, hookedText: String, links: [AcpResourceLink] = []) {
+            (self.raw, text, hooked, self.links) = (raw, hookedText, true, links)
+        }
 
         /// Through `beforePrompt` once; an already-hooked item passes as it is.
         func hooked(by hooks: AcpTurnHooks?) async -> Outgoing {
             guard !hooked, let hooks else { return self }
-            return Outgoing(raw: raw, hookedText: await hooks.beforePrompt(text))
+            return Outgoing(raw: raw, hookedText: await hooks.beforePrompt(text), links: links)
         }
     }
     private enum Inbound: Sendable {
@@ -371,13 +377,14 @@ public final class AcpSessionController: SessionDriver {
     /// text went nowhere (failed or ended tab).
     ///
     /// Every input joins the back of the queue and `advance` moves the queue, so nothing ever
-    /// overtakes an older item — whether it goes out as a prompt or a steer.
-    private func accept(_ text: String) -> Bool {
+    /// overtakes an older item — whether it goes out as a prompt or a steer. `links` are the
+    /// composer's `@file` mentions (`SessionManager.sendACP`); every other funnel has none.
+    public func accept(_ text: String, links: [AcpResourceLink] = []) -> Bool {
         switch phase {
         case .failed, .ended: return false
         case .connecting, .ready: break
         }
-        queue.append(Outgoing(text: text))
+        queue.append(Outgoing(text: text, links: links))
         queueHeld = false
         advance()
         return true
@@ -459,7 +466,7 @@ public final class AcpSessionController: SessionDriver {
         let (connection, hooks, inboxIn) = (connection, hooks, inboxIn)
         Task { [weak self] in
             let item = await item.hooked(by: hooks)
-            let text = item.text
+            let (text, links) = (item.text, item.links)
             guard let self, self.phase == .ready, let sid = self.acpSessionID else { return }
             guard !self.queueHeld else {
                 // Interrupted before it went out: not sent, and not lost — back at the head.
@@ -474,7 +481,7 @@ public final class AcpSessionController: SessionDriver {
             let result: Result<JSONValue, Error>
             do {
                 result = .success(try await connection.request(
-                    "session/prompt", params: AcpClient.promptParams(sessionID: sid, text: text)))
+                    "session/prompt", params: AcpClient.promptParams(sessionID: sid, text: text, links: links)))
             } catch {
                 result = .failure(error)
             }
@@ -497,7 +504,8 @@ public final class AcpSessionController: SessionDriver {
             let result: Result<JSONValue, Error>
             do {
                 result = .success(try await connection.request(
-                    "_session/steering", params: AcpClient.steeringParams(sessionID: sid, text: item.text)))
+                    "_session/steering",
+                    params: AcpClient.steeringParams(sessionID: sid, text: item.text, links: item.links)))
             } catch {
                 result = .failure(error)
             }

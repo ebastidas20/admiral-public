@@ -58,18 +58,56 @@ public enum AcpClient {
         .object(["sessionId": .string(sessionID), "configId": .string(configID), "value": .string(value)])
     }
 
-    public static func promptParams(sessionID: String, text: String) -> JSONValue {
-        .object([
-            "sessionId": .string(sessionID),
-            "prompt": .array([.object(["type": .string("text"), "text": .string(text)])]),
-        ])
+    /// The text block, then one `resource_link` per `@file` mention (always a link, never an
+    /// embedded resource: the agent reads the file in its own environment).
+    public static func promptParams(sessionID: String, text: String, links: [AcpResourceLink] = []) -> JSONValue {
+        let blocks: [JSONValue] = [.object(["type": .string("text"), "text": .string(text)])]
+            + links.map {
+                .object(["type": .string("resource_link"), "uri": .string($0.uri), "name": .string($0.path)])
+            }
+        return .object(["sessionId": .string(sessionID), "prompt": .array(blocks)])
     }
 
     /// `_session/steering`: same shape as a prompt, plus `_meta.idleBehavior`.
-    public static func steeringParams(sessionID: String, text: String) -> JSONValue {
-        guard case var .object(o) = promptParams(sessionID: sessionID, text: text) else { return .null }
+    public static func steeringParams(sessionID: String, text: String, links: [AcpResourceLink] = []) -> JSONValue {
+        guard case var .object(o) = promptParams(sessionID: sessionID, text: text, links: links) else { return .null }
         o["_meta"] = .object(["idleBehavior": .string("promptRequired")])
         return .object(o)
+    }
+}
+
+/// One `@file` mention on its way out: `path` relative to the agent's cwd (the link's `name`),
+/// `absolutePath` in the agent's environment (the link's `file://` uri).
+public struct AcpResourceLink: Hashable, Sendable {
+    public var path: String
+    public var absolutePath: String
+
+    public init(path: String, absolutePath: String) {
+        self.path = path
+        self.absolutePath = absolutePath
+    }
+
+    /// `cwd` + "/" + `path`, with `.`/`..`/empty segments resolved.
+    public init(path: String, cwd: String) {
+        var segments: [Substring] = []
+        for segment in (cwd + "/" + path).split(separator: "/") {
+            switch segment {
+            case ".": continue
+            case "..": _ = segments.popLast()
+            default: segments.append(segment)
+            }
+        }
+        self.init(path: path, absolutePath: "/" + segments.joined(separator: "/"))
+    }
+
+    /// `file://` + the absolute path, percent-encoded per segment (a space is `%20`).
+    public var uri: String {
+        var allowed = CharacterSet.urlPathAllowed
+        allowed.remove("/")
+        let encoded = absolutePath.split(separator: "/", omittingEmptySubsequences: false)
+            .map { $0.addingPercentEncoding(withAllowedCharacters: allowed) ?? String($0) }
+            .joined(separator: "/")
+        return "file://" + encoded
     }
 }
 

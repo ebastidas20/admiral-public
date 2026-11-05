@@ -354,6 +354,46 @@ extension SessionManager {
         return (runner, 5)
     }
 
+    static let acpFilesTTL: TimeInterval = 30
+    nonisolated static let acpFilesTimeout: TimeInterval = 15
+    nonisolated static let acpFilesCap = 20_000
+
+    /// The files in an ACP tab's cwd, as git sees them (tracked + untracked, ignores applied),
+    /// read in the agent's environment through the tab's runner — for the composer's `@` menu.
+    /// nil = no runner (the agent has no exec command); not a git repo, or any failure = [].
+    /// One run per tab per `acpFilesTTL`; calls inside it share that run.
+    public func acpFiles(_ tab: UUID) async -> [String]? {
+        guard let session = sessions.first(where: { $0.id == tab }),
+              let runner = acpRunner(for: session) else { return nil }
+        if let cached = acpFileLists[tab], Date().timeIntervalSince(cached.at) < Self.acpFilesTTL {
+            return await cached.files.value
+        }
+        let cwd = session.cwd
+        let files = Task.detached(priority: .userInitiated) { () -> [String] in
+            let argv = ["git", "-c", "core.quotepath=off", "ls-files", "--cached", "--others",
+                        "--exclude-standard"]
+            guard let out = runner.run(argv, cwd: cwd, timeout: Self.acpFilesTimeout), out.code == 0 else {
+                return []
+            }
+            return Array(out.stdout.split(separator: "\n", omittingEmptySubsequences: true)
+                .prefix(Self.acpFilesCap).map(String.init))
+        }
+        acpFileLists[tab] = (Date(), files)
+        return await files.value
+    }
+
+    /// The ACP composer's send: the text as typed (what the mirror and UserPromptSubmit see),
+    /// plus one `resource_link` per mention — a path relative to the tab's cwd, linked at its
+    /// absolute path in the agent's environment. False when the tab is not a live ACP tab.
+    @discardableResult
+    public func sendACP(_ tab: UUID, text: String, mentions: [String]) -> Bool {
+        guard let controller = acpController(for: tab),
+              let session = sessions.first(where: { $0.id == tab }) else { return false }
+        update(tab) { $0.lastActivityAt = Date() }
+        let links = mentions.map { AcpResourceLink(path: $0, cwd: session.cwd) }
+        return controller.accept(Self.typedText(text), links: links)
+    }
+
     /// The runner into an ACP tab's environment (its agent's exec command, via
     /// `acpRunnerFactory`); nil on a PTY tab, or when the agent has no exec or is gone.
     public func acpRunner(for session: AgentSession) -> CommandRunner? {

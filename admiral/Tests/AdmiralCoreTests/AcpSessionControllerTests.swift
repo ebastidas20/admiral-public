@@ -432,6 +432,42 @@ final class AcpSessionControllerTests: XCTestCase {
         XCTAssertEqual(agent.prompts(), ["first"])
     }
 
+    /// `@file` mentions ride as `resource_link` blocks after the text — on a prompt and on a steer.
+    func testLinksGoOutOnThePromptAndOnASteer() async {
+        let agent = ScriptedAgent(capabilities: steering)
+        let c = await ready(agent)
+        let a = AcpResourceLink(path: "src/a.swift", cwd: "/workspace")
+        let b = AcpResourceLink(path: "docs/b c.md", cwd: "/workspace")
+        XCTAssertTrue(c.accept("first", links: [a]))
+        await until("prompt sent") { agent.heldPrompts == 1 }
+        XCTAssertTrue(c.accept("second", links: [b]))
+        await until("steering sent") { agent.methods.contains("_session/steering") }
+        let prompt = agent.params(of: "session/prompt").first?["prompt"]?.arrayValue ?? []
+        XCTAssertEqual(prompt.count, 2)
+        XCTAssertEqual(prompt.last?["type"]?.stringValue, "resource_link")
+        XCTAssertEqual(prompt.last?["uri"]?.stringValue, "file:///workspace/src/a.swift")
+        XCTAssertEqual(prompt.last?["name"]?.stringValue, "src/a.swift")
+        let steer = agent.params(of: "_session/steering").first?["prompt"]?.arrayValue ?? []
+        XCTAssertEqual(steer.first?["text"]?.stringValue, "second")
+        XCTAssertEqual(steer.last?["uri"]?.stringValue, "file:///workspace/docs/b%20c.md")
+        XCTAssertEqual(c.queued, [])
+    }
+
+    /// A steer the agent bounced goes out later as a prompt — with its links still on it.
+    func testBouncedSteerKeepsItsLinks() async {
+        let agent = ScriptedAgent(capabilities: steering)
+        agent.on("_session/steering") { _ in .result(.object(["outcome": .string("promptRequired")])) }
+        let c = await ready(agent)
+        XCTAssertTrue(c.deliver("first"))
+        await until("prompt sent") { agent.heldPrompts == 1 }
+        XCTAssertTrue(c.accept("second", links: [AcpResourceLink(path: "a", cwd: "/w")]))
+        await until("queued") { c.queued == ["second"] }
+        agent.endPrompt()
+        await until("queued prompt sent") { agent.prompts() == ["first", "second"] }
+        let second = agent.params(of: "session/prompt").last?["prompt"]?.arrayValue ?? []
+        XCTAssertEqual(second.last?["uri"]?.stringValue, "file:///w/a")
+    }
+
     func testSteeringPromptRequiredFallsBackToQueue() async {
         let agent = ScriptedAgent(capabilities: steering)
         agent.on("_session/steering") { _ in .result(.object(["outcome": .string("promptRequired")])) }

@@ -1646,14 +1646,24 @@ final class AppModel: ObservableObject {
     }
 
     /// The composer's send: the text plus any attached paths (escaped as a Finder drop types
-    /// them), typed into the session.
-    func sendChat(_ text: String, attachments: [String], to session: AgentSession) {
+    /// them), typed into the session. On an ACP tab, `mentions` (the `@file` paths picked from
+    /// the agent's files) go along as resource links.
+    func sendChat(_ text: String, attachments: [String], mentions: [String] = [], to session: AgentSession) {
         var message = text.trimmingCharacters(in: .whitespacesAndNewlines)
         if let paths = TerminalDrop.pasteText(paths: attachments) {
             message += (message.isEmpty ? "" : " ") + paths.trimmingCharacters(in: .whitespaces)
         }
         guard !message.isEmpty else { return }
-        sessions.sendTyped(session.id, text: message)
+        if session.backend == .pty {
+            sessions.sendTyped(session.id, text: message)
+        } else {
+            sessions.sendACP(session.id, text: message, mentions: mentions)
+        }
+    }
+
+    /// The files an ACP tab's `@` menu lists; nil = the agent has no exec command to list them with.
+    func acpFiles(_ session: AgentSession) async -> [String]? {
+        await sessions.acpFiles(session.id)
     }
 
     /// The question card's Submit: the answers go in as the next prompt.

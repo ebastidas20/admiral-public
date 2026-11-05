@@ -30,10 +30,17 @@ final class SessionManagerAcpTests: XCTestCase {
         let ghAuthed: Bool
         let defaultTimeout: TimeInterval = 5
 
-        init(ghAuthed: Bool = true) { self.ghAuthed = ghAuthed }
+        /// What `git ls-files` prints; nil = it fails (not a repo).
+        var lsFiles: String?
+
+        init(ghAuthed: Bool = true, lsFiles: String? = nil) {
+            self.ghAuthed = ghAuthed
+            self.lsFiles = lsFiles
+        }
 
         func run(_ argv: [String], cwd: String?, timeout: TimeInterval) -> (code: Int32, stdout: String)? {
             lock.withLock { _calls.append(argv) }
+            if argv.contains("ls-files") { return lsFiles.map { (0, $0) } ?? (128, "") }
             if argv == ["gh", "auth", "status"] { return (ghAuthed ? 0 : 1, "") }
             if argv.contains("--version") { return (0, "") }
             if argv.contains("symbolic-ref") { return (0, "feature-x\n") }
@@ -336,6 +343,43 @@ final class SessionManagerAcpTests: XCTestCase {
         XCTAssertFalse(manager.answerAsk(s.id, questions: [], answers: []), "no open question")
         XCTAssertFalse(manager.allowPermission(s.id), "no open permission")
         XCTAssertFalse(manager.send(UUID(), text: "nowhere"))
+    }
+
+    // MARK: - @file
+
+    private let lsFilesArgv = ["git", "-c", "core.quotepath=off", "ls-files", "--cached", "--others",
+                               "--exclude-standard"]
+
+    func testACPFilesListsThroughTheRunnerAndCaches() async {
+        execRunner = ExecFake(lsFiles: "a\nb\n")
+        let s = await readyTab()
+        let first = await manager.acpFiles(s.id)
+        XCTAssertEqual(first, ["a", "b"])
+        let second = await manager.acpFiles(s.id)
+        XCTAssertEqual(second, ["a", "b"])
+        XCTAssertEqual(execRunner?.calls.filter { $0 == lsFilesArgv }.count, 1, "the second call is cached")
+    }
+
+    func testACPFilesNotARepoIsEmptyAndNoRunnerIsNil() async {
+        let s = await readyTab()
+        let notRepo = await manager.acpFiles(s.id)
+        XCTAssertEqual(notRepo, [])
+        execRunner = nil
+        let other = await readyTab(callsign: "other")
+        let none = await manager.acpFiles(other.id)
+        XCTAssertNil(none)
+    }
+
+    func testSendACPCarriesMentionsAsLinks() async throws {
+        let agent = ScriptedAgent()
+        let s = await readyTab(agent)
+        XCTAssertTrue(manager.sendACP(s.id, text: "look at @src/a b.swift", mentions: ["src/a b.swift"]))
+        await until("prompt") { !agent.prompts().isEmpty }
+        XCTAssertTrue(agent.prompts()[0].hasSuffix("look at @src/a b.swift"), agent.prompts()[0])
+        let blocks = agent.params(of: "session/prompt").first?["prompt"]?.arrayValue ?? []
+        XCTAssertEqual(blocks.last?["uri"]?.stringValue, "file://\(agentCwd)/src/a%20b.swift")
+        XCTAssertEqual(blocks.last?["name"]?.stringValue, "src/a b.swift")
+        XCTAssertFalse(manager.sendACP(UUID(), text: "nowhere", mentions: []))
     }
 
     func testFailedHandshakeStrandsNothingSilently() async throws {

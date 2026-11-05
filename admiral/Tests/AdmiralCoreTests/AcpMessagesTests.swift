@@ -62,6 +62,17 @@ final class AcpMessagesTests: XCTestCase {
         XCTAssertEqual(st["prompt"], p["prompt"])
     }
 
+    func testPromptAndSteeringCarryResourceLinks() {
+        let link = AcpResourceLink(path: "src/a b.swift", cwd: "/p")
+        let p = AcpClient.promptParams(sessionID: "s1", text: "see", links: [link])
+        XCTAssertEqual(p, json(#"""
+        {"sessionId":"s1","prompt":[{"type":"text","text":"see"},
+        {"type":"resource_link","uri":"file:///p/src/a%20b.swift","name":"src/a b.swift"}]}
+        """#))
+        let st = AcpClient.steeringParams(sessionID: "s1", text: "see", links: [link])
+        XCTAssertEqual(st["prompt"], p["prompt"])
+    }
+
     private func decode(_ update: String) -> AcpUpdate? {
         AcpUpdate.decode(json(#"{"sessionId":"S","update":\#(update)}"#))?.updates.first
     }

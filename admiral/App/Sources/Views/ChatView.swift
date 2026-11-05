@@ -876,9 +876,14 @@ struct ChatComposer: View {
     @State private var attachments: [String] = []
     /// An ACP option the agent refused, until the next pick.
     @State private var optionError: String?
-    @State private var slashSelection = 0
-    /// The text Esc closed the `/` menu on; it stays closed until the text changes.
-    @State private var slashDismissedText: String?
+    /// The highlighted row of whichever menu is open (`/` or `@` — never both).
+    @State private var menuSelection = 0
+    /// The text Esc closed the open menu on; it stays closed until the text changes.
+    @State private var menuDismissedText: String?
+    /// The agent's files for the open `@` query, fetched once per open.
+    @State private var fileList: AcpFileListState = .idle
+    /// Every file any listing on this tab returned: what a sent `@path` is checked against.
+    @State private var knownFiles: Set<String> = []
     @FocusState private var focused: Bool
 
     private var hasContent: Bool {
@@ -886,12 +891,38 @@ struct ChatComposer: View {
     }
 
     private var slashCandidates: [AcpCommandInfo] {
-        guard session.backend != .pty, text != slashDismissedText,
+        guard session.backend != .pty, text != menuDismissedText,
               let partial = SlashCommandPicker.query(in: text) else { return [] }
         return SlashCommandPicker.candidates(partial, commands: session.acpCommands)
     }
 
     private var slashOpen: Bool { !slashCandidates.isEmpty }
+
+    /// The `@` query, on an ACP tab, when the `/` menu's text shape is not the one typed.
+    private var fileQuery: FileMentionPicker.Query? {
+        guard session.backend != .pty, SlashCommandPicker.query(in: text) == nil else { return nil }
+        return FileMentionPicker.query(in: text)
+    }
+
+    /// The `@` menu, when it shows: a notice while loading / with no list, else the matches
+    /// (none = closed).
+    private var fileMenu: AcpFileMenuContent? {
+        guard text != menuDismissedText, let query = fileQuery else { return nil }
+        switch fileList {
+        case .idle, .loading: return .loading
+        case .unavailable: return .unavailable
+        case let .loaded(files):
+            let matches = FileMentionPicker.candidates(query.partial, files: files)
+            return matches.isEmpty ? nil : .files(matches)
+        }
+    }
+
+    /// The files the keys move through and accept (a notice row takes no keys).
+    private var fileCandidates: [String] {
+        if case let .files(files) = fileMenu { files } else { [] }
+    }
+
+    private var menuRowCount: Int { slashOpen ? slashCandidates.count : fileCandidates.count }
 
     /// The hint of the command whose "/name " is the whole text, shown after it.
     private var slashHint: String? {
@@ -922,16 +953,16 @@ struct ChatComposer: View {
                     .fixedSize(horizontal: false, vertical: true)
                     .focused($focused)
                     .onKeyPress(.return, phases: .down) { press in
-                        if slashOpen { acceptSlash(); return .handled }
+                        if menuRowCount > 0 { acceptMenu(); return .handled }
                         if press.modifiers.contains(.shift) || press.modifiers.contains(.option) { return .ignored }
                         send()
                         return .handled
                     }
-                    .onKeyPress(.tab) { slashOpen ? { acceptSlash(); return .handled }() : .ignored }
-                    .onKeyPress(.upArrow) { moveSlash(-1) }
-                    .onKeyPress(.downArrow) { moveSlash(1) }
+                    .onKeyPress(.tab) { menuRowCount > 0 ? { acceptMenu(); return .handled }() : .ignored }
+                    .onKeyPress(.upArrow) { moveMenu(-1) }
+                    .onKeyPress(.downArrow) { moveMenu(1) }
                     .onKeyPress(.escape) {
-                        if slashOpen { slashDismissedText = text; return .handled }
+                        if slashOpen || fileMenu != nil { menuDismissedText = text; return .handled }
                         guard text.isEmpty, isWorking else { return .ignored }
                         model.interrupt(session)
                         return .handled
@@ -951,14 +982,22 @@ struct ChatComposer: View {
                                    onStop: { model.interrupt(session) }, onSend: send)
             }
         }
-        .composerBox(focused: focused || slashOpen)
+        .composerBox(focused: focused || slashOpen || fileMenu != nil)
         // Anchored above the box: a zero-height strip on its top edge, the list hanging up from it.
         .overlay(alignment: .top) {
             if slashOpen {
                 Color.clear.frame(maxWidth: .infinity).frame(height: 0)
                     .overlay(alignment: .bottom) {
                         AcpSlashMenu(candidates: slashCandidates,
-                                     selection: min(slashSelection, slashCandidates.count - 1)) { acceptSlash($0) }
+                                     selection: min(menuSelection, slashCandidates.count - 1)) { acceptMenu($0) }
+                            .fixedSize(horizontal: false, vertical: true)
+                            .padding(.bottom, 6)
+                    }
+            } else if let fileMenu {
+                Color.clear.frame(maxWidth: .infinity).frame(height: 0)
+                    .overlay(alignment: .bottom) {
+                        AcpFileMenu(content: fileMenu,
+                                    selection: min(menuSelection, max(fileCandidates.count - 1, 0))) { acceptMenu($0) }
                             .fixedSize(horizontal: false, vertical: true)
                             .padding(.bottom, 6)
                     }
@@ -971,22 +1010,48 @@ struct ChatComposer: View {
             return !files.isEmpty
         }
         .onAppear { focused = true }
-        .onChange(of: text) { slashSelection = 0 }
+        .onChange(of: text) { menuSelection = 0 }
+        .onChange(of: fileQuery != nil) { _, open in open ? loadFiles() : (fileList = .idle) }
         .onChange(of: session.id) {
-            text = ""; attachments = []; optionError = nil; slashDismissedText = nil; focused = true
+            text = ""; attachments = []; optionError = nil; menuDismissedText = nil; focused = true
+            fileList = .idle; knownFiles = []
         }
     }
 
-    private func moveSlash(_ delta: Int) -> KeyPress.Result {
-        guard slashOpen else { return .ignored }
-        slashSelection = GroupMentionPicker.move(
-            min(slashSelection, slashCandidates.count - 1), by: delta, count: slashCandidates.count)
+    private func moveMenu(_ delta: Int) -> KeyPress.Result {
+        let count = menuRowCount
+        guard count > 0 else { return .ignored }
+        menuSelection = GroupMentionPicker.move(min(menuSelection, count - 1), by: delta, count: count)
         return .handled
     }
 
-    private func acceptSlash(_ index: Int? = nil) {
-        guard slashOpen else { return }
-        text = SlashCommandPicker.insert(slashCandidates[min(index ?? slashSelection, slashCandidates.count - 1)])
+    /// Return / Tab / a click on the open menu's row.
+    private func acceptMenu(_ index: Int? = nil) {
+        let count = menuRowCount
+        guard count > 0 else { return }
+        let i = min(index ?? menuSelection, count - 1)
+        if slashOpen {
+            text = SlashCommandPicker.insert(slashCandidates[i])
+        } else if let query = fileQuery {
+            text = FileMentionPicker.insert(fileCandidates[i], into: text, at: query)
+        }
+    }
+
+    /// The `@` menu opened: list the agent's files (the manager caches them briefly), keeping
+    /// every path seen so a sent `@path` is recognised.
+    private func loadFiles() {
+        fileList = .loading
+        let tab = session
+        Task {
+            let files = await model.acpFiles(tab)
+            guard fileList == .loading else { return }   // closed (or the tab changed) meanwhile
+            if let files {
+                fileList = .loaded(files)
+                knownFiles.formUnion(files)
+            } else {
+                fileList = .unavailable
+            }
+        }
     }
 
     private var chips: some View {
@@ -1009,7 +1074,8 @@ struct ChatComposer: View {
 
     private func send() {
         guard hasContent else { return }
-        model.sendChat(text, attachments: attachments, to: session)
+        let mentions = session.backend == .pty ? [] : FileMentionPicker.mentions(in: text, files: knownFiles)
+        model.sendChat(text, attachments: attachments, mentions: mentions, to: session)
         text = ""
         attachments = []
         onSend()

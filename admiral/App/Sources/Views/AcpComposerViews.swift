@@ -131,3 +131,63 @@ struct AcpSlashMenu: View {
         .accessibilityIdentifier("acp-slash-\(command.name)")
     }
 }
+
+/// What the `@` menu shows: a one-row notice while the list loads or when there is none to
+/// load, else the matching files.
+enum AcpFileMenuContent: Equatable {
+    case notice(String)
+    case files([String])
+
+    static let loading = AcpFileMenuContent.notice("Loading files…")
+    static let unavailable = AcpFileMenuContent.notice("File list unavailable: this agent has no exec command")
+}
+
+/// Where the composer's file list is for the open `@` query.
+enum AcpFileListState: Equatable {
+    case idle, loading, unavailable
+    case loaded([String])
+}
+
+/// The `@` menu above an ACP tab's composer: each file's basename in bold, its path in mono
+/// beside it. Same look as the `/` menu; a notice row is disabled.
+struct AcpFileMenu: View {
+    let content: AcpFileMenuContent
+    let selection: Int
+    let pick: (Int) -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            switch content {
+            case let .notice(text):
+                Text(text)
+                    .font(.system(size: 12)).foregroundStyle(Theme.secondaryText)
+                    .padding(.horizontal, 9).padding(.vertical, 6)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .accessibilityIdentifier("acp-file-notice")
+            case let .files(files):
+                ForEach(files.indices, id: \.self) { i in row(files[i], i) }
+            }
+        }
+        .padding(4)
+        .background(RoundedRectangle(cornerRadius: 10).fill(Theme.bubbleBackground))
+        .overlay(RoundedRectangle(cornerRadius: 10).stroke(Theme.bubbleBorder))
+        .shadow(color: .black.opacity(0.2), radius: 15, y: 8)
+        .accessibilityIdentifier("acp-file-menu")
+    }
+
+    private func row(_ path: String, _ i: Int) -> some View {
+        HStack(spacing: 10) {
+            Text(FileMentionPicker.basename(path))
+                .font(.system(size: 13, weight: .semibold)).foregroundStyle(Theme.primaryText).lineLimit(1)
+            Text(path)
+                .font(.system(size: 11.5, design: .monospaced)).foregroundStyle(Theme.secondaryText)
+                .lineLimit(1).truncationMode(.head)
+            Spacer(minLength: 8)
+        }
+        .padding(.horizontal, 9).padding(.vertical, 6)
+        .background(RoundedRectangle(cornerRadius: 6).fill(i == selection ? Theme.rowSelection : Color.clear))
+        .contentShape(Rectangle())
+        .onTapGesture { pick(i) }
+        .accessibilityIdentifier("acp-file-\(path)")
+    }
+}

@@ -30,6 +30,9 @@ public final class SessionManager: ObservableObject {
     /// Calls that completed or failed this turn, per tab: output arriving for them later is
     /// dropped instead of re-opening a live entry. Cleared when the tab leaves busy.
     var acpLiveClosed: [UUID: Set<String>] = [:]
+    /// Each ACP tab's last `git ls-files` (`acpFiles`): when it started, and the listing (in
+    /// flight or done), so calls within `acpFilesTTL` share one run.
+    var acpFileLists: [UUID: (at: Date, files: Task<[String], Never>)] = [:]
     /// Runs a live-output flush later — 0.2 s, so a chatty command publishes at most five times a
     /// second per tab. Swappable so tests flush by hand.
     var acpLiveFlushScheduler: (@escaping @MainActor () -> Void) -> Void = { work in
@@ -637,6 +640,7 @@ public final class SessionManager: ObservableObject {
             OutputSchemaStore.set(nil, base: supportDir, session: sid)
         }
         drivers[id] = nil
+        acpFileLists[id] = nil
         clientToolBroker.failAll(token: session.token, message: "session closed")
         // Remove this session's on-disk hook state (log + injected settings).
         let sessionDir = supportDir.appendingPathComponent("sessions").appendingPathComponent(session.token)
