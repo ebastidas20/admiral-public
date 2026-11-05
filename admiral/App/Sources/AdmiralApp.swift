@@ -61,7 +61,7 @@ struct AdmiralCommands: Commands {
             }
             Button("Fork Session") { model.forkSelected() }
                 .keyboardShortcut("f", modifiers: [.command, .shift])
-                .disabled(model.sessions.selectedSession == nil)
+                .disabled(model.sessions.selectedSession.map { model.forkDisabledReason($0) != nil } ?? true)
         }
         CommandMenu("Session") {
             Button("Search") { model.requestSearchFocus() }
@@ -77,7 +77,8 @@ struct AdmiralCommands: Commands {
                     model.toggleViewMode()
                 }
                 .keyboardShortcut("j", modifiers: .command)
-                .disabled(!model.selectedHasChat)
+                // An ACP tab is Chat only: nothing to switch to.
+                .disabled(!model.selectedCanToggleView)
             }
             Divider()
             Button("Promote to Permanent Tab…") { model.promoteSelected() }

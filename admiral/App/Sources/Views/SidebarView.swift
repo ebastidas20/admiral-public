@@ -444,6 +444,9 @@ struct SessionRow: View {
             name: session.displayTitle, collapsed: collapsed, selected: selected,
             onSelect: onSelect, onEditIcon: { editing = true },
             trailing: {
+                // An ACP tab names its agent here — the provider badge's slot — so a tab in a
+                // container never reads as one on this Mac.
+                if case let .acp(agentName) = session.backend { AgentBadge(name: agentName) }
                 if let sid = session.claudeSessionID,
                    model.watchdog.phase(forSession: sid) != .disarmed {
                     Image(systemName: "binoculars.fill")
@@ -468,7 +471,15 @@ struct SessionRow: View {
         }
         .contextMenu {
             Button("Edit Name, Color & Icon…") { editing = true }
-            Button("Fork Session") { model.fork(session.id) }
+            if let reason = model.forkDisabledReason(session) {
+                // A disabled menu item cannot show a tooltip, so the reason rides on its title.
+                Button("Fork Session (\(reason))") {}.disabled(true)
+            } else {
+                Button("Fork Session") { model.fork(session.id) }
+            }
+            if session.backend != .pty {
+                Button("Show ACP Log") { model.showACPLog(session) }
+            }
             // Managed (claude) sessions only — reload resumes the transcript, which a plain
             // shell doesn't have.
             if session.claudeSessionID != nil {
@@ -506,6 +517,23 @@ struct SessionRow: View {
                 }
             }
         }
+    }
+}
+
+/// The agent an ACP tab runs on, as a small capsule in the row's trailing slot.
+struct AgentBadge: View {
+    let name: String
+
+    var body: some View {
+        Text(name.count > 16 ? name.prefix(15) + "\u{2026}" : name)
+            .font(.system(size: 9.5, weight: .semibold))
+            .foregroundStyle(Theme.secondaryText)
+            .lineLimit(1)
+            .fixedSize()
+            .padding(.horizontal, 6).padding(.vertical, 2)
+            .background(Capsule().fill(Theme.chipBackground))
+            .help("Runs on the ACP agent \u{201C}\(name)\u{201D}")
+            .accessibilityIdentifier("agent-badge")
     }
 }
 

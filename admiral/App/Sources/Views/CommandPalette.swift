@@ -6,6 +6,8 @@ struct PaletteCommand {
     let title: String
     let shortcut: String
     let icon: String
+    /// Shown dimmed and does nothing when picked — the row still lists its shortcut.
+    var disabled = false
     let run: () -> Void
 }
 
@@ -26,6 +28,10 @@ enum PaletteItem {
         case let .command(c): return c.icon
         case .prompt: return "paperplane.fill"
         }
+    }
+    var disabled: Bool {
+        if case let .command(c) = self { return c.disabled }
+        return false
     }
     var trailing: String {
         switch self {
@@ -137,7 +143,8 @@ struct CommandPalette: View {
         ]
         if model.config.features.chatView {
             c.append(.init(title: model.selectedViewMode == .chat ? "Show Terminal" : "Show Chat",
-                           shortcut: Shortcuts.toggleChat, icon: "bubble.left.and.text.bubble.right") { model.toggleViewMode() })
+                           shortcut: Shortcuts.toggleChat, icon: "bubble.left.and.text.bubble.right",
+                           disabled: !model.selectedCanToggleView) { model.toggleViewMode() })
         }
         c += [
             .init(title: model.showTouchedReposPanel ? "Hide Footprint" : "Show Footprint",
@@ -154,8 +161,10 @@ struct CommandPalette: View {
                            icon: "pin") { model.promoteSelected() })
         }
         if model.sessions.selectedSession != nil {
-            c.append(.init(title: "Fork Session", shortcut: Shortcuts.forkSession,
-                           icon: "arrow.triangle.branch") { model.forkSelected() })
+            c.append(.init(title: "Fork Session", shortcut: Shortcuts.forkSession, icon: "arrow.triangle.branch",
+                           disabled: model.sessions.selectedSession.flatMap(model.forkDisabledReason) != nil) {
+                model.forkSelected()
+            })
             c.append(.init(title: "Move Session Up", shortcut: Shortcuts.moveItemUp,
                            icon: "arrow.up") { model.moveSelectedUp() })
             c.append(.init(title: "Move Session Down", shortcut: Shortcuts.moveItemDown,
@@ -197,7 +206,7 @@ struct CommandPalette: View {
         DispatchQueue.main.async {
             switch item {
             case let .command(c):
-                c.run()
+                if !c.disabled { c.run() }
             case let .prompt(text, session):
                 model.selectTerminal(session.id)
                 model.sessions.send(session.id, text: text)
@@ -226,6 +235,7 @@ private struct PaletteRow: View {
         }
         .padding(.horizontal, 10)
         .frame(height: 34)
+        .opacity(item.disabled ? 0.45 : 1)
         .background(RoundedRectangle(cornerRadius: 7, style: .continuous)
             .fill(selected ? Theme.rowSelection : Color.clear))
     }

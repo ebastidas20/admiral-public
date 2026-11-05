@@ -102,6 +102,7 @@ struct ChatView: View {
             })
             .accessibilityIdentifier("chat-content")
 
+            if session.backend != .pty { AcpTabStrip(session: session) }
             ChatComposer(session: session, isWorking: session.status == .busy, onSend: jumpToBottom)
         }
         .paneBackground(Theme.contentBackground)
@@ -797,8 +798,11 @@ private struct NeedsCard: View {
                     Button("Allow") { model.allowPermission(session) }
                         .buttonStyle(.borderedProminent).tint(Theme.accent)
                     Button("Deny") { model.interrupt(session) }
-                    Button("Open in terminal") { model.setViewMode(.terminal, for: session) }
-                        .buttonStyle(.link)
+                    // An ACP tab has no terminal to open.
+                    if session.backend == .pty {
+                        Button("Open in terminal") { model.setViewMode(.terminal, for: session) }
+                            .buttonStyle(.link)
+                    }
                 }
             }
             .padding(12)

@@ -58,6 +58,11 @@ struct TouchedReposPanel: View {
 
     @ViewBuilder
     private var tabBody: some View {
+            // An ACP tab: its agent, why it is down, and which features are off and why.
+            if let session = model.sessions.selectedSession, case let .acp(agentName) = session.backend {
+                AcpFootprintSection(session: session, agentName: agentName)
+                Divider().opacity(0.5)
+            }
             if let session = model.sessions.selectedSession,
                !session.touchedRepos.isEmpty || !session.tickets.isEmpty {
                 ScrollView {

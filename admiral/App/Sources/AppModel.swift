@@ -37,6 +37,13 @@ final class AppModel: ObservableObject {
     /// reach `bridgeSocket`, calls the session tools. Up while any ACP agent is configured.
     private var sessionBridgeServer: SessionMCPHTTPServer?
     private var acpAgentsObserver: NSObjectProtocol?
+    /// Settings → Agents: the configured ACP agents (profile-aware, like the tab stores).
+    let acpAgentStore: AcpAgentStore
+    /// The ACP tab whose log sheet (`AcpLogView`) is up.
+    @Published var acpLogSession: AgentSession?
+    /// What Test connection last found per agent (by id) — also how the New-session form knows
+    /// whether an agent lists sessions before any tab on it is open.
+    @Published var acpConnectionTests: [UUID: AcpConnectionTestResult] = [:]
     private var sessionBridgePolicy = SessionBridgePolicy()
     /// Parks `tools/call` from API tool tabs. Same broker `SessionManager` hands the
     /// Anthropic endpoint; the `client` MCP process is the only other side of this socket.
@@ -618,6 +625,9 @@ final class AppModel: ObservableObject {
     /// `-probeGroupsUI <dir>`: the group chat UI (sidebar, window, picker, popover, sheet) drawn
     /// into PNGs from a fixture, dark and light, no claude (see `GroupsProbe.swift`).
     private let probeGroupsUI: String?
+    /// `-probeAgentsUI <dir>`: Settings → Agents and ACP tabs drawn into PNGs from a fixture,
+    /// dark and light, no agent (see `AgentsProbe.swift`).
+    private let probeAgentsUI: String?
     private var timer: Timer?
     /// Optional isolation profile (from `ADMIRAL_PROFILE` / `-admiralProfile`). When set, the
     /// tab list and per-tab data (open-sessions restore, appearance, footprint) live in a
@@ -666,6 +676,7 @@ final class AppModel: ObservableObject {
         self.probeTitlebarTranscript = argValue("-probeTitlebarTranscript")
         self.probeSheets = argValue("-probeSheets")
         self.probeGroupsUI = argValue("-probeGroupsUI")
+        self.probeAgentsUI = argValue("-probeAgentsUI")
         let testHome = argValue("-uiTestClaudeHome").map { URL(fileURLWithPath: $0) }
         // Isolation profile: `ADMIRAL_PROFILE` env (primary — a dev instance is launched by
         // direct-exec with the var set) or `-admiralProfile <slug>`. When set, the tab stores
@@ -795,6 +806,7 @@ final class AppModel: ObservableObject {
         // Re-read per call: restore, reload and fork find an agent edited in Settings since launch.
         let acpAgentStore = AcpAgentStore(defaults: storeDefaults)
         manager.acpAgents = { acpAgentStore.load() }
+        self.acpAgentStore = acpAgentStore
         // Goals live in the support dir, not defaults: the hook helper reads them too.
         let goals = GoalsStore(base: manager.supportDir)
         self.goalsStore = goals
@@ -962,6 +974,10 @@ final class AppModel: ObservableObject {
         }
         bridge.postNotification = { [weak self] id, kind, title, body in
             self?.notifications.post(kind: kind, title: title, body: body, sessionID: id)
+        }
+        // An ACP agent blocked on a permission or a question: the same one gated post.
+        sessions.postNotification = { [weak self] id, kind, title, body in
+            _ = self?.notifications.post(kind: kind, title: title, body: body, sessionID: id)
         }
         notifications.start()
         host.onNotification = { [weak self] view, text in
@@ -1213,6 +1229,11 @@ final class AppModel: ObservableObject {
         // Groups UI probe: same place — fixture tabs with no process, no bridge, no restore.
         if let dir = probeGroupsUI {
             runGroupsUIProbe(dir: dir)
+            return
+        }
+        // Agents UI probe: same place — fixture ACP tabs with no agent, no bridge, no restore.
+        if let dir = probeAgentsUI {
+            runAgentsUIProbe(dir: dir)
             return
         }
 
@@ -1574,6 +1595,8 @@ final class AppModel: ObservableObject {
     /// Chat or Terminal for `session`. Unmanaged (bash) tabs have no chat: always Terminal.
     /// When `config.features.chatView` is off, every session is forced to Terminal.
     func viewMode(for session: AgentSession) -> ChatLedger.Mode {
+        // An ACP tab has no terminal: Chat is all there is, whatever the Chat flag says.
+        guard session.backend == .pty else { return .chat }
         guard config.features.chatView else { return .terminal }
         guard session.agentType.isManaged, let sid = session.claudeSessionID else { return .terminal }
         if let cached = viewModeCache[sid] { return cached }
@@ -1590,11 +1613,16 @@ final class AppModel: ObservableObject {
         sessions.selectedSession.map { $0.agentType.isManaged && $0.claudeSessionID != nil } ?? false
     }
 
+    /// ⌘J has something to switch to: a PTY tab with a chat. An ACP tab is Chat only.
+    var selectedCanToggleView: Bool {
+        selectedHasChat && sessions.selectedSession?.backend == .pty
+    }
+
     /// ⌘J / the toolbar switch. Written through to the file, so the next AskUserQuestion
     /// the session makes is routed by the mode it is in now.
     /// No-op when `config.features.chatView` is off (chat stays unavailable).
     func setViewMode(_ mode: ChatLedger.Mode, for session: AgentSession) {
-        guard config.features.chatView else { return }
+        guard config.features.chatView, session.backend == .pty else { return }
         guard session.agentType.isManaged, let sid = session.claudeSessionID else { return }
         ChatLedger.setMode(mode, base: sessions.supportDir, session: sid)
         objectWillChange.send()
@@ -1602,7 +1630,7 @@ final class AppModel: ObservableObject {
     }
 
     func toggleViewMode() {
-        guard let session = sessions.selectedSession, selectedHasChat else { return }
+        guard let session = sessions.selectedSession, selectedCanToggleView else { return }
         setViewMode(viewMode(for: session) == .chat ? .terminal : .chat, for: session)
     }
 

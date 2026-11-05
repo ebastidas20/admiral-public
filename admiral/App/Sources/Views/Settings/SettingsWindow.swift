@@ -4,7 +4,7 @@ import AdmiralCore
 /// The Settings sheet (feature 1e), laid out like the Schedules sheet: a category list on the
 /// left, the chosen section on the right under its title. Closed by the system's Close button
 /// (`ButtonRole.close`): every setting applies as it changes, so closing loses nothing.
-/// Wired: Appearance (theme), Sessions (launch options), Watchdog (goals + the watchdog's rules),
+/// Wired: Appearance (theme), Sessions (launch options), Agents (ACP agents), Watchdog (goals + the watchdog's rules),
 /// Tickets (patterns + Jira connector), Bridge & API (server/port/scratch tabs), Notifications,
 /// Experimental Features (the config's feature flags). Shortcuts remains a placeholder.
 ///
@@ -21,7 +21,7 @@ struct SettingsWindow: View {
     }
 
     enum SettingsSection: String, CaseIterable, Identifiable {
-        case appearance = "Appearance", sessions = "Sessions",
+        case appearance = "Appearance", sessions = "Sessions", agents = "Agents",
              watchdog = "Watchdog", tickets = "Tickets", bridge = "Bridge & API",
              notifications = "Notifications", experimental = "Experimental Features",
              shortcuts = "Shortcuts"
@@ -32,6 +32,7 @@ struct SettingsWindow: View {
             switch self {
             case .appearance: return ("circle.lefthalf.filled", "How Admiral looks.")
             case .sessions: return ("terminal", "How new tabs launch, and what bash tabs reopen.")
+            case .agents: return ("shippingbox", "ACP agents — in a container or elsewhere — that tabs can run on.")
             case .watchdog: return ("eye", "Goal nudges, the watchdog, and the rules it follows.")
             case .tickets: return ("ticket", "Ticket keys found in a session's chat, and their status.")
             case .bridge: return ("network", "The local API server, scratch tabs, and the bridge socket.")
@@ -130,6 +131,8 @@ struct SettingsWindow: View {
         switch section {
         case .sessions:
             SessionLaunchView(store: model.launchOptionsStore, bashRestoreStore: model.bashRestoreStore)
+        case .agents:
+            AgentsSettingsView()
         case .appearance:
             AppearanceSettingsView()
         case .bridge:

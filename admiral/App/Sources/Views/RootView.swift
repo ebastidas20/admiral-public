@@ -55,7 +55,8 @@ struct RootView: View {
                 }
                 ToolbarItem(placement: .primaryAction) {
                     if model.config.features.chatView, model.selectedGroup == nil,
-                       let session = model.sessions.selectedSession, model.selectedHasChat {
+                       // Not on an ACP tab: Chat is all it has.
+                       let session = model.sessions.selectedSession, model.selectedCanToggleView {
                         Picker("View", selection: Binding(
                             get: { model.viewMode(for: session) },
                             set: { model.setViewMode($0, for: session) }
@@ -98,6 +99,9 @@ struct RootView: View {
         .sheet(isPresented: $model.showSettings) { SettingsWindow() }
         .sheet(isPresented: $model.showSchedules) { SchedulesWindow() }
         .sheet(item: $model.newGroupSheet) { request in NewGroupSheet(request: request) }
+        .sheet(item: $model.acpLogSession) { session in
+            if let url = model.acpLogURL(for: session) { AcpLogView(title: session.displayTitle, url: url) }
+        }
     }
 }
 

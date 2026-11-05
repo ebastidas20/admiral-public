@@ -4,7 +4,9 @@ import AdmiralCore
 
 /// The shared New Claude Code / New Bash form: name the session and choose the working
 /// directory (type a path or browse). `model.newSessionMode` decides which kind is
-/// created. A "New Bash" just opens a plain `zsh` login shell in the folder.
+/// created. A "New Bash" just opens a plain `zsh` login shell in the folder. A claude session
+/// can instead run on a configured ACP agent (the agent picker): its folder is the agent's,
+/// and the CC Switch model does not apply — the agent brings its own.
 struct NewTerminalForm: View {
     @EnvironmentObject var model: AppModel
     @Environment(\.dismiss) private var dismiss
@@ -20,17 +22,26 @@ struct NewTerminalForm: View {
     @State private var showingProviderPicker = false
     /// Starts at the Settings → Bridge & API "new tabs are scratch" choice.
     @State private var scratch = false
+    /// Settings → Agents, read when the form opens; nil choice = Claude Code on this Mac.
+    @State private var agents: [AcpAgentConfig] = []
+    @State private var agentID: UUID?
+    /// Import sessions…: nil = not asked; the list once the agent answered.
+    @State private var imported: [(acpSessionID: String, title: String?)]?
+    @State private var importing = false
     @FocusState private var nameFocused: Bool
 
     private var isBash: Bool { model.newSessionMode == .bash }
+    private var agent: AcpAgentConfig? { isBash ? nil : agents.first { $0.id == agentID } }
 
     /// A plain shell carries no `--settings` file, so there is nothing to inject a provider
     /// through — the control belongs to claude sessions only.
-    private var canUseCustomModel: Bool { !isBash && !model.ccSwitchProviders.isEmpty }
+    private var canUseCustomModel: Bool { !isBash && agent == nil && !model.ccSwitchProviders.isEmpty }
     private var provider: CCSwitchProvider? { model.ccSwitchProvider(id: providerID) }
 
     private var expandedFolder: String { (folder as NSString).expandingTildeInPath }
     private var folderValid: Bool {
+        // The agent's folder is on its side (a container's `/workspace`), not on this Mac.
+        if agent != nil { return folder.trimmingCharacters(in: .whitespaces).hasPrefix("/") }
         var isDir: ObjCBool = false
         return FileManager.default.fileExists(atPath: expandedFolder, isDirectory: &isDir) && isDir.boolValue
     }
@@ -40,21 +51,23 @@ struct NewTerminalForm: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
-            Text(isBash ? "New Bash" : "New Claude Code").font(.system(size: 15, weight: .semibold))
+            Text(isBash ? "New Bash" : agent.map { "New \($0.name) Session" } ?? "New Claude Code")
+                .font(.system(size: 15, weight: .semibold))
+            if !isBash && !agents.isEmpty { agentPicker }
 
             labeled("Name", required: true) {
                 TextField(isBash ? "e.g. shell" : "e.g. worker-1", text: $agentName)
                     .textFieldStyle(.plain).focused($nameFocused)
                     .onSubmit { if canCreate { create() } }
             }
-            labeled("Folder", required: true) {
+            labeled(agent == nil ? "Folder" : "Folder, as the agent sees it", required: true) {
                 HStack(spacing: 8) {
-                    TextField("~/", text: $folder).textFieldStyle(.plain)
-                    Button("Choose…") { picking = true }
+                    TextField(agent == nil ? "~/" : "/workspace", text: $folder).textFieldStyle(.plain)
+                    if agent == nil { Button("Choose…") { picking = true } }
                 }
             }
             if !folder.isEmpty && !folderValid {
-                Text("Not a folder: \(expandedFolder)")
+                Text(agent == nil ? "Not a folder: \(expandedFolder)" : "Must be an absolute path")
                     .font(.system(size: 11)).foregroundStyle(.red)
             }
             if canUseCustomModel { customModelRow }
@@ -70,6 +83,8 @@ struct NewTerminalForm: View {
                     .foregroundStyle(Theme.secondaryText)
                     .fixedSize(horizontal: false, vertical: true)
             }
+
+            if let agent, model.acpListsSessions(agent) != false { importSection(agent) }
 
             HStack {
                 Spacer()
@@ -90,6 +105,11 @@ struct NewTerminalForm: View {
             model.refreshCCSwitchProviders()
             providerID = model.launchOptionsStore.load().providerID
             scratch = model.scratchByDefault
+            agents = model.acpAgents
+        }
+        .onChange(of: agentID) {
+            imported = nil
+            folder = agent?.cwd ?? "~/"
         }
         .fileImporter(isPresented: $picking, allowedContentTypes: [.folder], allowsMultipleSelection: false) { result in
             if case let .success(urls) = result, let url = urls.first { folder = url.path }
@@ -156,7 +176,74 @@ struct NewTerminalForm: View {
         }
     }
 
+    /// "Claude Code (this Mac)" — today's PTY tab — or one of Settings → Agents.
+    private var agentPicker: some View {
+        labeled("Agent", required: false) {
+            Picker("", selection: $agentID) {
+                Text("Claude Code (this Mac)").tag(UUID?.none)
+                ForEach(agents) { Text($0.name).tag(UUID?.some($0.id)) }
+            }
+            .labelsHidden()
+            .pickerStyle(.menu)
+            .accessibilityIdentifier("new-session-agent")
+        }
+    }
+
+    /// Import sessions…: the agent's sessions in its folder that no tab holds yet; Open
+    /// restores one in a new tab (or selects the tab that holds it, if one opened since).
+    @ViewBuilder
+    private func importSection(_ agent: AcpAgentConfig) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 8) {
+                Button("Import Sessions\u{2026}") { loadImports(agent) }
+                    .disabled(importing)
+                    .accessibilityIdentifier("new-session-import")
+                if importing { ProgressView().controlSize(.small) }
+                Spacer()
+            }
+            if let imported {
+                if imported.isEmpty {
+                    Text("No sessions to import in \(agent.cwd).")
+                        .font(.system(size: 11)).foregroundStyle(Theme.secondaryText)
+                } else {
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: 4) {
+                            ForEach(imported, id: \.acpSessionID) { entry in
+                                HStack(spacing: 8) {
+                                    Text(entry.title ?? entry.acpSessionID)
+                                        .font(.system(size: 12)).lineLimit(1).truncationMode(.tail)
+                                    Spacer(minLength: 6)
+                                    Button("Open") {
+                                        model.openImportedACP(agent: agent, acpSessionID: entry.acpSessionID,
+                                                              title: entry.title)
+                                        dismiss()
+                                    }
+                                    .controlSize(.small)
+                                }
+                            }
+                        }
+                    }
+                    .frame(maxHeight: 140)
+                }
+            }
+        }
+    }
+
+    private func loadImports(_ agent: AcpAgentConfig) {
+        importing = true
+        Task {
+            imported = await model.sessions.importACPSessions(agent: agent)
+            importing = false
+        }
+    }
+
     private func create() {
+        if let agent {
+            model.newACPSession(agent: agent, name: agentName, cwd: folder.trimmingCharacters(in: .whitespaces),
+                                scratch: scratch)
+            dismiss()
+            return
+        }
         model.newSession(
             name: agentName, cwd: expandedFolder,
             provider: useCustomModel ? provider : nil,
