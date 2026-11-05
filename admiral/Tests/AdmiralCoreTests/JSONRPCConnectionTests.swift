@@ -188,4 +188,13 @@ final class JSONRPCConnectionTests: XCTestCase {
         let alive = try await r2
         XCTAssertEqual(alive, .string("alive"))
     }
+
+    /// The ACP log holds the traffic, with the session bridge's bearer masked and long lines cut.
+    func testTracedLinesMaskBearerAndAreCapped() {
+        let line = #"{"headers":[{"name":"Authorization","value":"Bearer s3cr3t-token"}]}"#
+        XCTAssertEqual(JSONRPCConnection.traced("->", line),
+                       #"acp: -> {"headers":[{"name":"Authorization","value":"Bearer ***"}]}"#)
+        let long = String(repeating: "a", count: 5_000)
+        XCTAssertEqual(JSONRPCConnection.traced("<-", long).count, "acp: <- ".count + JSONRPCConnection.traceLimit + 1)
+    }
 }

@@ -37,8 +37,15 @@ public final class AcpSessionController: SessionDriver {
             _ acpSessionID: String, _ capabilities: AcpCapabilities, _ configOptions: [AcpConfigOption]
         ) -> Void
         var turnEnded: (AcpStopReason) -> Void
+        /// The agent's oldest open permission request / elicitation, one at a time: the next
+        /// is surfaced only once the one before it is answered (after `requestResolved`).
         var permissionRequested: (_ title: String) -> Void
         var question: ([AskQuestion]) -> Void
+        /// Open requests were answered or released (cancelled) — any card showing them is done.
+        /// Always reported before the next open request is surfaced.
+        var requestResolved: () -> Void
+        /// `queued` changed.
+        var queueChanged: ([String]) -> Void
         var update: (AcpUpdate) -> Void
 
         public init(
@@ -48,6 +55,8 @@ public final class AcpSessionController: SessionDriver {
             turnEnded: @escaping (AcpStopReason) -> Void = { _ in },
             permissionRequested: @escaping (String) -> Void = { _ in },
             question: @escaping ([AskQuestion]) -> Void = { _ in },
+            requestResolved: @escaping () -> Void = {},
+            queueChanged: @escaping ([String]) -> Void = { _ in },
             update: @escaping (AcpUpdate) -> Void = { _ in }
         ) {
             self.status = status
@@ -56,6 +65,8 @@ public final class AcpSessionController: SessionDriver {
             self.turnEnded = turnEnded
             self.permissionRequested = permissionRequested
             self.question = question
+            self.requestResolved = requestResolved
+            self.queueChanged = queueChanged
             self.update = update
         }
     }
@@ -112,9 +123,13 @@ public final class AcpSessionController: SessionDriver {
     }
 
     private var turn: Turn = .idle
-    private var queue: [Outgoing] = []
+    private var queue: [Outgoing] = [] {
+        didSet { events.queueChanged(queued) }
+    }
     private var turnReply = ""
-    private var heldPermissions: [(options: [JSONValue], reply: CheckedContinuation<JSONValue, Error>)] = []
+    private var heldPermissions: [
+        (title: String, options: [JSONValue], reply: CheckedContinuation<JSONValue, Error>)
+    ] = []
     private var heldElicitations: [(form: AcpElicitationForm, reply: CheckedContinuation<JSONValue, Error>)] = []
     private var lastStatus: SessionStatus?
     /// True once this turn's `session/prompt` is on the wire: steering before that would land
@@ -320,6 +335,7 @@ public final class AcpSessionController: SessionDriver {
         held.reply.resume(returning: .object([
             "action": .string("accept"), "content": held.form.content(answers: answers),
         ]))
+        resolved()
         return true
     }
 
@@ -333,6 +349,7 @@ public final class AcpSessionController: SessionDriver {
         held.reply.resume(returning: .object([
             "outcome": .object(["outcome": .string("selected"), "optionId": .string(id)]),
         ]))
+        resolved()
         return true
     }
 
@@ -452,14 +469,14 @@ public final class AcpSessionController: SessionDriver {
         guard phase != .ended else { return reply.resume(returning: Self.cancelledReply(method)) }
         switch method {
         case "session/request_permission":
-            heldPermissions.append((params["options"]?.arrayValue ?? [], reply))
-            events.permissionRequested(params["toolCall"]?["title"]?.stringValue ?? "Permission requested")
+            heldPermissions.append((Self.permissionTitle(params), params["options"]?.arrayValue ?? [], reply))
+            if heldPermissions.count == 1 { events.permissionRequested(heldPermissions[0].title) }
         case "elicitation/create":
             guard let form = AcpElicitationForm(params: params) else {
                 return reply.resume(returning: .object(["action": .string("decline")]))
             }
             heldElicitations.append((form, reply))
-            events.question(form.questions)
+            if heldElicitations.count == 1 { events.question(form.questions) }
         default:
             reply.resume(throwing: JSONRPCError.methodNotFound)
         }
@@ -551,6 +568,20 @@ public final class AcpSessionController: SessionDriver {
         heldElicitations = []
         for held in permissions { held.reply.resume(returning: Self.cancelledReply("session/request_permission")) }
         for held in elicitations { held.reply.resume(returning: Self.cancelledReply("elicitation/create")) }
+        if !permissions.isEmpty || !elicitations.isEmpty { events.requestResolved() }
+    }
+
+    /// One open request was answered: say so, then surface what is still open — the next of
+    /// each kind (a resolution closes every card, so a held request of the other kind is
+    /// shown again rather than lost).
+    private func resolved() {
+        events.requestResolved()
+        if let next = heldPermissions.first { events.permissionRequested(next.title) }
+        if let next = heldElicitations.first { events.question(next.form.questions) }
+    }
+
+    private static func permissionTitle(_ params: JSONValue) -> String {
+        params["toolCall"]?["title"]?.stringValue ?? "Permission requested"
     }
 
     private static func cancelledReply(_ method: String) -> JSONValue {

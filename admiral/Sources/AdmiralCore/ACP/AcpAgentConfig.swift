@@ -90,6 +90,17 @@ public struct AcpAgentConfig: Codable, Hashable, Sendable, Identifiable {
         return errors
     }
 
+    /// `validationErrors`, plus the name's uniqueness among `agents` (case-insensitive, like
+    /// `AcpAgentStore.agent(named:)` and every lookup by name): this agent's own saved entry —
+    /// same `id` — does not count against it. What Settings → Agents checks before saving.
+    public func validationErrors(among agents: [AcpAgentConfig]) -> [String] {
+        let name = self.name.trimmingCharacters(in: .whitespaces)
+        let taken = !name.isEmpty && agents.contains {
+            $0.id != id && $0.name.trimmingCharacters(in: .whitespaces).caseInsensitiveCompare(name) == .orderedSame
+        }
+        return validationErrors + (taken ? ["an agent named \u{201C}\(name)\u{201D} already exists"] : [])
+    }
+
     /// The agent ignores `--dangerously-skip-permissions`; permissions are set via `defaultMode`.
     public var passesIgnoredSkipPermissionsFlag: Bool {
         launch.args.contains("--dangerously-skip-permissions")

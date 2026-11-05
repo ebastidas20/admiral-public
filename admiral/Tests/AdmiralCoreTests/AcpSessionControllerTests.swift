@@ -97,6 +97,9 @@ final class AcpSessionControllerTests: XCTestCase {
     private var stops: [AcpStopReason] = []
     private var permissions: [String] = []
     private var questions: [[AskQuestion]] = []
+    /// Every `requestResolved` and `permissionRequested`, in order: "resolved" / the title.
+    private var requestLog: [String] = []
+    private var queues: [[String]] = []
     private var started: (id: String, caps: AcpCapabilities)?
 
     override func setUp() async throws {
@@ -107,6 +110,8 @@ final class AcpSessionControllerTests: XCTestCase {
         stops = []
         permissions = []
         questions = []
+        requestLog = []
+        queues = []
         started = nil
     }
 
@@ -131,8 +136,13 @@ final class AcpSessionControllerTests: XCTestCase {
             phase: { [unowned self] in phases.append($0) },
             sessionStarted: { [unowned self] id, caps, _ in started = (id, caps) },
             turnEnded: { [unowned self] in stops.append($0) },
-            permissionRequested: { [unowned self] in permissions.append($0) },
+            permissionRequested: { [unowned self] in
+                permissions.append($0)
+                requestLog.append($0)
+            },
             question: { [unowned self] in questions.append($0) },
+            requestResolved: { [unowned self] in requestLog.append("resolved") },
+            queueChanged: { [unowned self] in queues.append($0) },
             update: { _ in })
         return AcpSessionController(
             config: config, connection: connection, mirror: mirror,
@@ -359,6 +369,42 @@ final class AcpSessionControllerTests: XCTestCase {
         XCTAssertEqual(outcome?["outcome"]?.stringValue, "selected")
         XCTAssertEqual(outcome?["optionId"]?.stringValue, "once")
         XCTAssertFalse(c.allowPermission(), "nothing left to allow")
+    }
+
+    /// One card at a time: a second permission request waits until the first is answered, and
+    /// the answer is reported (closing the first card) before the second is surfaced.
+    func testPermissionRequestsSurfaceOneAtATimeAfterResolution() async {
+        let agent = ScriptedAgent()
+        let c = await ready(agent)
+        XCTAssertTrue(c.deliver("go"))
+        await until("prompt sent") { agent.heldPrompts == 1 }
+        agent.ask(id: "p1", method: "session/request_permission", params: permissionParams)
+        var second = permissionParams
+        if case var .object(o) = second {
+            o["toolCall"] = .object(["title": .string("Run make deploy")])
+            second = .object(o)
+        }
+        agent.ask(id: "p2", method: "session/request_permission", params: second)
+        await until("first surfaced") { permissions.count == 1 }
+        for _ in 0..<20 { await Task.yield() }
+        XCTAssertEqual(permissions, ["Run rm -rf build"], "the second waits for the first")
+
+        XCTAssertTrue(c.allowPermission())
+        await until("second surfaced") { permissions.count == 2 }
+        XCTAssertEqual(requestLog, ["Run rm -rf build", "resolved", "Run make deploy"])
+        c.interrupt()
+        await until("p2 cancelled") { agent.reply(to: "p2") != nil }
+        XCTAssertEqual(requestLog.last, "resolved", "a cancel closes the open card too")
+    }
+
+    func testQueueChangesAreReported() async {
+        let agent = ScriptedAgent()
+        let c = await ready(agent)
+        XCTAssertTrue(c.deliver("one"))
+        await until("prompt sent") { agent.heldPrompts == 1 }
+        XCTAssertTrue(c.deliver("two"))
+        await until("queued") { queues.last == ["two"] }
+        XCTAssertEqual(c.queued, ["two"])
     }
 
     func testInterruptCancelsOpenPermission() async {

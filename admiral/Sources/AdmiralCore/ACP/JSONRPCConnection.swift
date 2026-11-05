@@ -19,6 +19,8 @@ public struct JSONRPCError: Error, Equatable {
 public actor JSONRPCConnection {
     private let transport: AcpTransport
     private let log: @Sendable (String) -> Void
+    /// Every line in (`acp: <-`) and out (`acp: ->`) also goes to `log` — the tab's ACP log.
+    private let traceTraffic: Bool
     private var nextId = 1
     private var pending: [Int: CheckedContinuation<JSONValue, Error>] = [:]
     private var requestHandler: (@Sendable (String, JSONValue) async throws -> JSONValue)?
@@ -27,9 +29,23 @@ public actor JSONRPCConnection {
     private var readTask: Task<Void, Never>?
     private var closed = false
 
-    public init(transport: AcpTransport, log: @escaping @Sendable (String) -> Void) {
+    public init(transport: AcpTransport, traceTraffic: Bool = false, log: @escaping @Sendable (String) -> Void) {
         self.transport = transport
+        self.traceTraffic = traceTraffic
         self.log = log
+    }
+
+    /// The longest traced line: a streamed chunk is small, but a tool result or a replayed
+    /// history can be huge, and the log is read back by a view.
+    static let traceLimit = 2_000
+
+    /// A traced line: bearer tokens masked (the session bridge's rides on `session/new`), and
+    /// cut at `traceLimit`. The `acp:` prefix keeps it out of `AcpLog.lastAgentLine`.
+    static func traced(_ arrow: String, _ line: String) -> String {
+        let masked = line.replacingOccurrences(
+            of: #"Bearer [^"\\]+"#, with: "Bearer ***", options: .regularExpression)
+        let cut = masked.count > traceLimit ? String(masked.prefix(traceLimit)) + "\u{2026}" : masked
+        return "acp: \(arrow) \(cut)"
     }
 
     public func onRequest(_ handler: @escaping @Sendable (String, JSONValue) async throws -> JSONValue) {
@@ -88,10 +104,13 @@ public actor JSONRPCConnection {
     private func write(_ object: [String: JSONValue]) throws {
         let data = try JSONEncoder().encode(JSONValue.object(object))
         // JSONEncoder escapes control characters, so the output is a single line.
-        try transport.send(line: String(decoding: data, as: UTF8.self))
+        let line = String(decoding: data, as: UTF8.self)
+        if traceTraffic { log(Self.traced("->", line)) }
+        try transport.send(line: line)
     }
 
     private func handle(line: String) {
+        if traceTraffic { log(Self.traced("<-", line)) }
         guard let value = try? JSONDecoder().decode(JSONValue.self, from: Data(line.utf8)),
               case .object = value, value["jsonrpc"] != nil || value["id"] != nil || value["method"] != nil
         else {

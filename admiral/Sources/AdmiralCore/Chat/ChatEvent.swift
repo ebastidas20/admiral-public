@@ -21,6 +21,9 @@ public struct ChatEvent: Codable, Equatable, Sendable {
         /// error, a slash command and its output, an interrupt, a compaction. Read from the
         /// transcript, never written to the ledger.
         case notice
+        /// The open question / permission cards were dealt with outside a prompt — an ACP
+        /// agent's request answered, allowed or cancelled. Closes them; draws nothing.
+        case resolved
     }
 
     public var ts: String

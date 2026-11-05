@@ -58,6 +58,9 @@ public struct AgentSession: Identifiable, Sendable, Hashable {
     /// container, a refused mode), or the agent exiting later — with the agent's last stderr
     /// line when it left one. Nil while it runs; a reload starts a fresh session, so it clears.
     public var connectError: String? = nil
+    /// An ACP tab's client-side queue (`AcpSessionController.queued`): input that waits for the
+    /// agent's turn to end, oldest first. Always empty on a PTY tab (claude queues its own).
+    public var acpQueued: [String] = []
     /// Distinct git repos this session has written to, aggregated from its hook log.
     /// Ephemeral (rebuilt from the on-disk log); not part of the initializer.
     public var touchedRepos: [TouchedRepo] = []

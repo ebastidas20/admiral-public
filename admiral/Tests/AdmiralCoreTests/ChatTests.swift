@@ -136,6 +136,21 @@ final class ChatHookTests: XCTestCase {
         XCTAssertNil(ChatFolder.fold(events).openAsk)
     }
 
+    /// `.resolved` (an ACP request answered outside a prompt) closes the open cards and draws
+    /// nothing; a card that comes after it is open again.
+    func testResolvedClosesOpenCardsAndDrawsNothing() {
+        var events = [ChatEvent(ts: "1", kind: .prompt, text: "go"), ask(),
+                      ChatEvent(ts: "2", kind: .needs, text: "Run rm")]
+        XCTAssertTrue(ChatFolder.fold(events).isWaiting)
+        events.append(ChatEvent(ts: "3", kind: .resolved))
+        let folded = ChatFolder.fold(events)
+        XCTAssertFalse(folded.isWaiting)
+        XCTAssertNil(folded.openAsk)
+        XCTAssertEqual(folded.items.count, 3, "no item of its own")
+        events.append(ChatEvent(ts: "4", kind: .needs, text: "Run make"))
+        XCTAssertTrue(ChatFolder.fold(events).isWaiting)
+    }
+
     private let stoppedTask = """
         <task-notification>
         <task-id>task-fixture-1</task-id>

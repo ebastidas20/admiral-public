@@ -56,7 +56,7 @@ public enum ChatHistory {
                 events[i].source = tagged.source
             }
         }
-        events += ledger.filter { $0.kind == .ask || $0.kind == .needs }
+        events += ledger.filter { [.ask, .needs, .resolved].contains($0.kind) }
         return events.enumerated()
             .sorted { lhs, rhs in
                 let l = date(lhs.element.ts) ?? .distantPast, r = date(rhs.element.ts) ?? .distantPast

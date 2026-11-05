@@ -113,6 +113,9 @@ public final class SessionManager: ObservableObject {
     /// launch: true = the tab's agent is offered it (`AcpMCPServer.sessionBridge`); false = no
     /// MCP server, and the tab's `bridgeTools` says the bridge is not running. Set by the app.
     public var sessionBridgeRunning: () -> Bool = { false }
+    /// Posts a native notification (`NotificationService.post(kind:…)`, the one gate) for an
+    /// ACP tab whose agent is blocked on the user: tab id, kind, title, body. Set by the app.
+    public var postNotification: (UUID, NotificationKind, String, String) -> Void = { _, _, _, _ in }
 
     public init(
         host: TerminalHost,

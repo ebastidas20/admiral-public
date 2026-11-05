@@ -560,4 +560,164 @@ final class SessionManagerAcpTests: XCTestCase {
         XCTAssertEqual(manager.gitAccess(for: s)?.interval, 2)
         XCTAssertTrue(manager.gitAccess(for: s)?.runner is LocalCommandRunner)
     }
+
+    // MARK: - Permission / elicitation into the chat, queue, test connection, import
+
+    private let permissionParams: JSONValue = .object([
+        "sessionId": .string("s1"),
+        "toolCall": .object(["title": .string("Run rm -rf build")]),
+        "options": .array([
+            .object(["optionId": .string("once"), "kind": .string("allow_once"), "name": .string("Allow")]),
+            .object(["optionId": .string("no"), "kind": .string("reject_once"), "name": .string("Reject")]),
+        ]),
+    ])
+
+    private func chatItems(_ s: AgentSession) -> [ChatItem] {
+        ChatHistory.live(base: base, session: s.claudeSessionID ?? "", transcriptPath: s.transcriptPath).items
+    }
+
+    /// A permission request becomes the PTY tab's permission card (a `.needs` ledger event)
+    /// and a "needs you" notification; it is never answered on its own, and Allow closes it.
+    func testPermissionRequestShowsTheCardNotifiesAndAllowClosesIt() async throws {
+        var posted: [(NotificationKind, String, String)] = []
+        manager.postNotification = { _, kind, title, body in posted.append((kind, title, body)) }
+        let agent = ScriptedAgent()
+        let s = await readyTab(agent)
+        XCTAssertTrue(manager.send(s.id, text: "go"))
+        await until("prompt sent") { agent.heldPrompts == 1 }
+        agent.ask(id: "p1", method: "session/request_permission", params: permissionParams)
+        await until("card") { chatItems(s).contains { if case .needs(_, _, _, true) = $0 { true } else { false } } }
+        guard case let .needs(_, text, _, _)? = chatItems(s).last else { return XCTFail("no needs card") }
+        XCTAssertEqual(text, "Run rm -rf build")
+        XCTAssertEqual(posted.map(\.0), [.needsInput])
+        XCTAssertEqual(posted.first?.1, "@fix-bug needs you")
+        XCTAssertEqual(posted.first?.2, "Run rm -rf build")
+        XCTAssertNil(agent.reply(to: "p1"), "never auto-approved")
+
+        XCTAssertTrue(manager.allowPermission(s.id))
+        await until("allowed") { agent.reply(to: "p1") != nil }
+        XCTAssertEqual(agent.reply(to: "p1")?["result"]?["outcome"]?["optionId"]?.stringValue, "once")
+        await until("card closed") {
+            !chatItems(s).contains { if case .needs(_, _, _, true) = $0 { true } else { false } }
+        }
+    }
+
+    /// Deny is the card's interrupt: the request is cancelled and the card closes.
+    func testDenyCancelsThePermissionAndClosesTheCard() async {
+        let agent = ScriptedAgent()
+        let s = await readyTab(agent)
+        XCTAssertTrue(manager.send(s.id, text: "go"))
+        await until("prompt sent") { agent.heldPrompts == 1 }
+        agent.ask(id: "p1", method: "session/request_permission", params: permissionParams)
+        await until("card") { ChatHistory.live(base: base, session: s.claudeSessionID!, transcriptPath: nil).isWaiting }
+        manager.interrupt(s.id)
+        await until("cancelled") { agent.reply(to: "p1") != nil }
+        XCTAssertEqual(agent.reply(to: "p1")?["result"]?["outcome"]?["outcome"]?.stringValue, "cancelled")
+        await until("card closed") {
+            !ChatHistory.live(base: base, session: s.claudeSessionID!, transcriptPath: nil).isWaiting
+        }
+    }
+
+    /// An elicitation is the AskUserQuestion card; its answers go back as the elicitation's
+    /// response — not typed in as a prompt — and the card closes.
+    func testElicitationShowsTheQuestionCardAndIsAnsweredAsTheResponse() async throws {
+        var posted: [NotificationKind] = []
+        manager.postNotification = { _, kind, _, _ in posted.append(kind) }
+        let agent = ScriptedAgent()
+        let s = await readyTab(agent)
+        XCTAssertTrue(manager.send(s.id, text: "go"))
+        await until("prompt sent") { agent.heldPrompts == 1 }
+        agent.ask(id: "e1", method: "elicitation/create", params: .object([
+            "sessionId": .string("s1"), "mode": .string("form"), "message": .string("Pick a database"),
+            "requestedSchema": .object(["type": .string("object"), "properties": .object([
+                "db": .object(["type": .string("string"), "title": .string("DB"),
+                               "enum": .array([.string("pg"), .string("my")])]),
+            ])]),
+        ]))
+        let sid = try XCTUnwrap(s.claudeSessionID)
+        await until("card") { ChatHistory.live(base: base, session: sid, transcriptPath: nil).openAsk != nil }
+        let questions = try XCTUnwrap(
+            ChatHistory.live(base: base, session: sid, transcriptPath: nil).openAsk?.questions)
+        XCTAssertEqual(questions.first?.header, "DB")
+        XCTAssertEqual(posted, [.question])
+
+        XCTAssertTrue(manager.answerAsk(s.id, questions: questions, answers: ["pg"]))
+        await until("answered") { agent.reply(to: "e1") != nil }
+        XCTAssertEqual(agent.reply(to: "e1")?["result"]?["action"]?.stringValue, "accept")
+        XCTAssertEqual(agent.reply(to: "e1")?["result"]?["content"]?["db"]?.stringValue, "pg")
+        XCTAssertEqual(agent.prompts().count, 1, "the answer is not a typed prompt")
+        await until("card closed") { ChatHistory.live(base: base, session: sid, transcriptPath: nil).openAsk == nil }
+    }
+
+    func testQueuedInputShowsOnTheTab() async {
+        let agent = ScriptedAgent()
+        let s = await readyTab(agent)
+        XCTAssertTrue(manager.send(s.id, text: "first"))
+        await until("prompt sent") { agent.heldPrompts == 1 }
+        XCTAssertTrue(manager.send(s.id, text: "second"))
+        await until("queued") { session(s.id)?.acpQueued == ["second"] }
+        agent.endPrompt()
+        await until("drained") { session(s.id)?.acpQueued == [] }
+    }
+
+    /// Test connection: initialize only — never session/new — then the agent is ended; the
+    /// result is the record a tab would start with, exec probes included.
+    func testConnectionTestInitializesOnlyAndProbes() async throws {
+        let agent = ScriptedAgent(capabilities: fork)
+        agent.on("initialize") { _ in
+            .result(.object([
+                "agentCapabilities": self.fork,
+                "agentInfo": .object(["name": .string("claude-agent-acp"), "version": .string("0.100.0")]),
+            ]))
+        }
+        scripted.append(agent)
+        let result = await manager.testACPConnection(ppt)
+        guard case let .connected(record) = result else { return XCTFail("expected connected, got \(result)") }
+        XCTAssertEqual(record.negotiated.agentName, "claude-agent-acp")
+        XCTAssertEqual(record.negotiated.agentVersion, "0.100.0")
+        XCTAssertTrue(record.isEnabled(.fork))
+        XCTAssertEqual(record.git, true)
+        XCTAssertEqual(record.ghAuthed, true)
+        XCTAssertEqual(agent.methods, ["initialize"], "never session/new as a health check")
+        XCTAssertTrue(agent.fake.terminated)
+        XCTAssertTrue(manager.sessions.isEmpty, "a test opens no tab")
+    }
+
+    func testConnectionTestFailureCarriesTheAgentsStderr() async throws {
+        let dead = ScriptedAgent()
+        let log = SessionManager.acpLogURL(base: base, session: "test-\(ppt.id.uuidString.lowercased())")
+        dead.on("initialize") { [dead] _ in
+            AcpLog.append("Error response from daemon: container c is not running", to: log)
+            dead.fake.finish()
+            return .hold
+        }
+        scripted.append(dead)
+        let result = await manager.testACPConnection(ppt)
+        XCTAssertEqual(result, .failed(
+            message: "the agent exited or did not answer initialize: "
+                + "Error response from daemon: container c is not running",
+            log: log))
+    }
+
+    func testOpeningAnImportedSessionTwiceSelectsTheOpenTab() async {
+        scripted.append(ScriptedAgent(capabilities: resume))
+        let first = manager.openImportedACP(agent: ppt, acpSessionID: "a7", title: "Fix the login bug")
+        XCTAssertEqual(first.displayTitle, "Fix-the-login-bug")
+        await until("restored") { session(first.id)?.status == .idle }
+        XCTAssertEqual(launched.last?.params(of: "session/resume").first?["sessionId"]?.stringValue, "a7")
+        let other = await readyTab(callsign: "other")
+        XCTAssertEqual(manager.selectedID, other.id)
+        let again = manager.openImportedACP(agent: ppt, acpSessionID: "a7", title: "Fix the login bug")
+        XCTAssertEqual(again.id, first.id)
+        XCTAssertEqual(manager.selectedID, first.id)
+        XCTAssertEqual(manager.sessions.count, 2)
+    }
+
+    /// The fork gate reads the tab's record — the same source as the menu item.
+    func testForkGateReadsTheCapabilityRecord() async {
+        let source = await readyTab(ScriptedAgent(capabilities: fork))
+        manager.update(source.id) { $0.acpCapabilities?.negotiated.fork = false }
+        manager.fork(source.id)
+        XCTAssertEqual(manager.sessions.count, 1, "the record says no fork")
+    }
 }

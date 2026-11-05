@@ -50,7 +50,7 @@ public enum TicketKeyFinder {
         case .prompt:
             return event.source == nil
                 && !text.drop(while: \.isWhitespace).hasPrefix("<task-notification>")
-        case .needs, .notice: return false
+        case .needs, .notice, .resolved: return false
         }
     }
 }

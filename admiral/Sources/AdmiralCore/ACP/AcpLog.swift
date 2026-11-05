@@ -23,15 +23,43 @@ public enum AcpLog {
         ((try? FileManager.default.attributesOfItem(atPath: url.path))?[.size] as? NSNumber)?.uint64Value ?? 0
     }
 
+    /// How much of the log's end `lastAgentLine` reads, and how long a line it hands back: the
+    /// line is shown in the UI (`connectError`), so neither a chatty agent nor one huge stderr
+    /// line may make that read, or that label, unbounded.
+    static let tailBytes: UInt64 = 8 * 1024
+    public static let maxLineLength = 300
+
     /// The last line the agent itself wrote (its stderr) after `offset`: the real reason a
-    /// container or binary refused to start. Admiral's own lines carry an `acp:` prefix and are skipped.
+    /// container or binary refused to start. Admiral's own lines carry an `acp:` prefix and are
+    /// skipped. Only the last `tailBytes` are read, and the line is cut at `maxLineLength`.
     public static func lastAgentLine(_ url: URL, after offset: UInt64) -> String? {
         guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }
         defer { try? handle.close() }
-        guard (try? handle.seek(toOffset: offset)) != nil, let data = try? handle.readToEnd() else { return nil }
-        return String(decoding: data, as: UTF8.self).split(separator: "\n")
+        let end = size(url)
+        let start = max(offset, end > tailBytes ? end - tailBytes : 0)
+        guard (try? handle.seek(toOffset: start)) != nil, let data = try? handle.readToEnd() else { return nil }
+        let lines = String(decoding: data, as: UTF8.self).split(separator: "\n", omittingEmptySubsequences: false)
             .map { $0.trimmingCharacters(in: .whitespaces) }
-            .last { !$0.isEmpty && !$0.hasPrefix("acp:") }
+        func agentLine(_ l: String) -> Bool { !l.isEmpty && !l.hasPrefix("acp:") }
+        // A read that starts mid-file starts mid-line: that first fragment is only the end of
+        // a line, used only when no whole line follows it (one stderr line longer than the tail).
+        let whole = start > offset ? lines.dropFirst() : lines[...]
+        guard let line = whole.last(where: agentLine) ?? lines.first.flatMap({ agentLine($0) ? $0 : nil })
+        else { return nil }
+        return line.count > maxLineLength ? String(line.prefix(maxLineLength - 1)) + "\u{2026}" : line
+    }
+
+    /// The log's last `maxBytes`, from the first whole line in them — what the ACP log view
+    /// shows. Empty when there is no log yet.
+    public static func tail(_ url: URL, maxBytes: UInt64 = 256 * 1024) -> String {
+        guard let handle = try? FileHandle(forReadingFrom: url) else { return "" }
+        defer { try? handle.close() }
+        let end = size(url)
+        let start = end > maxBytes ? end - maxBytes : 0
+        guard (try? handle.seek(toOffset: start)) != nil, let data = try? handle.readToEnd() else { return "" }
+        let text = String(decoding: data, as: UTF8.self)
+        guard start > 0, let newline = text.firstIndex(of: "\n") else { return text }
+        return String(text[text.index(after: newline)...])
     }
 
     /// Appends one line. Best effort: a log that cannot be written never takes a tab down.

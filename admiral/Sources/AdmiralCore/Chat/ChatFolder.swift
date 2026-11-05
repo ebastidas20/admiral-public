@@ -107,6 +107,8 @@ public enum ChatFolder {
             case .notice:
                 guard let text = event.text, !text.isEmpty else { continue }
                 items.append(.notice(id: index, text: text, ts: event.ts))
+            case .resolved:
+                closeOpen(&items, asks: true)
             }
         }
         return ChatTranscript(items: items)

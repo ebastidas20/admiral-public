@@ -75,7 +75,8 @@ extension SessionManager {
         var controller: AcpSessionController?
         do {
             let transport = try acpTransportFactory(config, logURL)
-            let connection = JSONRPCConnection(transport: transport, log: { AcpLog.append($0, to: logURL) })
+            let connection = JSONRPCConnection(
+                transport: transport, traceTraffic: true, log: { AcpLog.append($0, to: logURL) })
             let box = WeakController()
             let hooks = AcpHookAdapter(
                 base: supportDir, token: session.token, sessionID: sessionID, cwd: cwd,
@@ -118,7 +119,55 @@ extension SessionManager {
             sessionStarted: { [weak self] acpSessionID, caps, _ in
                 self?.acpSessionStarted(id, acpSessionID, capabilities: caps)
             },
+            permissionRequested: { [weak self] title in self?.acpNeedsUser(id, .permission(title)) },
+            question: { [weak self] questions in self?.acpNeedsUser(id, .question(questions)) },
+            requestResolved: { [weak self] in self?.acpRequestsResolved(id) },
+            queueChanged: { [weak self] queued in self?.update(id) { $0.acpQueued = queued } },
             update: { [weak self] _ in self?.update(id) { $0.lastActivityAt = Date() } })
+    }
+
+    /// What an ACP agent is blocked on: a permission request or an elicitation.
+    enum AcpUserRequest {
+        case permission(String)
+        case question([AskQuestion])
+    }
+
+    /// The agent is blocked on the user: the request goes into the tab's chat ledger — the
+    /// same `.needs` / `.ask` events a PTY tab's hooks write, so the Chat view draws the same
+    /// permission and question cards — and a notification goes out through the one gate.
+    /// Nothing here answers it: a permission is never approved on the user's behalf.
+    private func acpNeedsUser(_ id: UUID, _ request: AcpUserRequest) {
+        guard let session = sessions.first(where: { $0.id == id }), let sid = session.claudeSessionID else { return }
+        let event: ChatEvent
+        let note: (kind: NotificationKind, suffix: String, body: String)
+        switch request {
+        case let .permission(title):
+            event = ChatEvent(ts: Self.acpChatTimestamp(), kind: .needs, text: title)
+            note = (.needsInput, "needs you", title)
+        case let .question(questions):
+            event = ChatEvent(ts: Self.acpChatTimestamp(), kind: .ask, questions: questions)
+            note = (.question, "is asking", questions.first?.question ?? "The agent has a question for you")
+        }
+        ChatLedger.append(event, base: supportDir, session: sid)
+        refreshChat(id)
+        postNotification(
+            id, note.kind, "@\(session.displayTitle) \(note.suffix)", HookNotification.truncated(note.body))
+    }
+
+    /// A chat-ledger timestamp for an ACP event, to the millisecond like the mirror's lines.
+    /// The ledger and the mirror are merged by time, so a whole-second stamp would sort a
+    /// permission card BEFORE the prompt that led to it — and that prompt would close it.
+    nonisolated public static func acpChatTimestamp(_ now: Date = Date()) -> String {
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return f.string(from: now)
+    }
+
+    /// The agent's open requests were answered or cancelled: their cards close.
+    private func acpRequestsResolved(_ id: UUID) {
+        guard let sid = sessions.first(where: { $0.id == id })?.claudeSessionID else { return }
+        ChatLedger.append(ChatEvent(ts: Self.acpChatTimestamp(), kind: .resolved), base: supportDir, session: sid)
+        refreshChat(id)
     }
 
     /// The agent named its session: remember it (and what it negotiated) on the tab, probe its
@@ -210,12 +259,13 @@ extension SessionManager {
         return acpAgent(named: agentName).flatMap(acpRunnerFactory)
     }
 
-    /// An ACP fork: only when the agent advertised `session/fork`, else a no-op. The source's
+    /// An ACP fork: only when the tab's capability record enables it (the agent advertised
+    /// `session/fork`) — the same record the fork menu item reads — else a no-op. The source's
     /// mirror is copied to the fork's, so its Chat starts with the shared history (the agent
     /// replays none on fork).
     func forkACP(_ source: AgentSession, agentName: String) {
         guard let sourceACP = source.acpSessionID,
-              acpController(for: source.id)?.capabilities?.fork == true,
+              source.acpCapabilities?.isEnabled(.fork) == true,
               let sourceSID = source.claudeSessionID,
               let agent = acpAgent(named: agentName) else { return }
         let newID = UUID().uuidString.lowercased()
@@ -274,7 +324,8 @@ extension SessionManager {
             AcpLog.append("acp: could not launch \(agent.name) to list sessions: \(error)", to: logURL)
             return []
         }
-        let connection = JSONRPCConnection(transport: transport, log: { AcpLog.append($0, to: logURL) })
+        let connection = JSONRPCConnection(
+            transport: transport, traceTraffic: true, log: { AcpLog.append($0, to: logURL) })
         await connection.start()
         // A hung agent must not hang the caller: closing fails every pending request.
         let watchdog = Task {

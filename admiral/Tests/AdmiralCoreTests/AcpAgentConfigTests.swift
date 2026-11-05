@@ -79,4 +79,65 @@ final class AcpAgentConfigTests: XCTestCase {
         XCTAssertTrue(c.env.isEmpty)
         XCTAssertTrue(c.defaultConfigOptions.isEmpty)
     }
+
+    /// R5: a name already used by another agent (any case) is refused; the agent's own saved
+    /// entry (same id) is not a duplicate of itself.
+    func testDuplicateNameIsRejectedCaseInsensitively() {
+        let saved = AcpAgentConfig.sample
+        var copy = AcpAgentConfig.sample
+        copy.id = UUID()
+        copy.name = "  CLAUDE-box "
+        XCTAssertEqual(copy.validationErrors(among: [saved]),
+                       ["an agent named \u{201C}CLAUDE-box\u{201D} already exists"])
+        XCTAssertEqual(saved.validationErrors(among: [saved]), [], "editing an agent keeps its own name")
+        copy.name = "claude-box-2"
+        XCTAssertEqual(copy.validationErrors(among: [saved]), [])
+        copy.name = ""
+        XCTAssertEqual(copy.validationErrors(among: [saved]), ["name is required"], "an empty name is not a duplicate")
+    }
+
+    /// The connect-error reason is shown in the UI: one huge stderr line is cut, and only the
+    /// log's tail is read (an early line beyond it is not reached).
+    func testLastAgentLineIsCappedAndReadsOnlyTheTail() throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("acp-log-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let log = dir.appendingPathComponent("t.log")
+        AcpLog.append("early reason", to: log)
+        AcpLog.append(String(repeating: "x", count: 20_000), to: log)
+        AcpLog.append("acp: admiral's own note", to: log)
+        let line = try XCTUnwrap(AcpLog.lastAgentLine(log, after: 0))
+        XCTAssertEqual(line.count, AcpLog.maxLineLength)
+        XCTAssertTrue(line.hasPrefix("xxx") && line.hasSuffix("\u{2026}"))
+
+        AcpLog.append("short last line", to: log)
+        XCTAssertEqual(AcpLog.lastAgentLine(log, after: 0), "short last line")
+        let end = AcpLog.size(log)
+        XCTAssertNil(AcpLog.lastAgentLine(log, after: end), "nothing after the offset")
+    }
+
+    func testDraftRoundTripsAConfig() {
+        let config = AcpAgentConfig(
+            name: "PPT", launch: AcpCommand(command: "docker", args: ["exec", "-i", "-e", "A=b c", "box", "agent"]),
+            env: ["PATH": "/opt/bin:/usr/bin", "TOKEN": "x=y"], cwd: "/workspace", defaultMode: nil,
+            defaultConfigOptions: ["model": "opus"], exec: AcpCommand(command: "docker", args: ["exec", "box"]))
+        XCTAssertEqual(AcpAgentDraft(config).config, config)
+    }
+
+    func testDraftParsesLinesAndPairsAndEmptyExecMeansDerived() {
+        var draft = AcpAgentDraft.new()
+        XCTAssertEqual(draft.defaultMode, "bypassPermissions")
+        XCTAssertEqual(draft.cwd, "/workspace")
+        draft.name = " PPT "
+        draft.command = "docker"
+        draft.args = "exec\n  -i\n\nbox\nnpx -y pkg@1.2.3\n"
+        draft.env = "FOO=bar=baz\nnot a pair\n=nokey\n BAR = 1"
+        draft.defaultMode = "  "
+        let config = draft.config
+        XCTAssertEqual(config.name, "PPT")
+        XCTAssertEqual(config.launch.args, ["exec", "-i", "box", "npx -y pkg@1.2.3"])
+        XCTAssertEqual(config.env, ["FOO": "bar=baz", "BAR": " 1"])
+        XCTAssertNil(config.defaultMode, "blank = no mode set")
+        XCTAssertNil(config.exec)
+        XCTAssertEqual(config.effectiveExec, AcpCommand(command: "docker", args: ["exec", "box"]))
+    }
 }
