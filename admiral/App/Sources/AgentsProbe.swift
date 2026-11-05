@@ -48,12 +48,15 @@ extension AppModel {
                     "exec", "-i", "-w", "/path/in/container", "-e", "HOME=/home/node", "my-container",
                     "npx", "-y", "@agentclientprotocol/claude-agent-acp@0.100.0"]),
                 env: ["DOCKER_CONFIG": "/path/to/docker-config", "NAME": "value"], cwd: "/path/in/container",
-                defaultConfigOptions: ["model": "opus"])
+                workspace: .elsewhere(exec: AcpCommand(command: "docker", args: [
+                    "exec", "-w", "/path/in/container", "-e", "HOME=/home/node", "my-container"])),
+                defaultConfigOptions: ["model": "opus"], mcpCallbackURL: "http://host.docker.internal:4142")
             let legacy = AcpAgentConfig(
                 name: "JetBrains import",
                 launch: AcpCommand(command: "docker", args: [
                     "exec", "-i", "other-container", "claude-agent-acp", "--dangerously-skip-permissions"]),
-                env: ["DOCKER_HOST": "unix:///var/run/docker.sock"], cwd: "/path/in/container")
+                env: ["DOCKER_HOST": "unix:///var/run/docker.sock"], cwd: "/path/in/container",
+                workspace: .elsewhere(exec: nil), mcpCallbackURL: "http://host.docker.internal:4142")
             self.acpAgentStore.save([])
             let collapsed = self.sidebarCollapsed
             for dark in [true, false] {
@@ -64,7 +67,7 @@ extension AppModel {
                 self.acpConnectionTests[valid.id] = .connected(Self.probeRecord(fork: true, list: true, git: true))
                 await draw("agents-valid", settings(valid), NSSize(width: 640, height: 1180), dark: dark)
 
-                // A new agent: every list empty, one placeholder row each, exec derived from nothing.
+                // A new agent: This Mac, every list empty, one placeholder row each.
                 await draw("agents-new", AgentsSettingsView(draft: AcpAgentDraft.new(), isNew: true)
                     .frame(width: 640).background(Theme.surface), NSSize(width: 640, height: 900), dark: dark)
 
@@ -99,10 +102,12 @@ extension AppModel {
                   "args \(AcpAgentDraft(valid).args.rows.count) rows")
             check("the ignored flag is detected",
                   legacy.passesIgnoredSkipPermissionsFlag && !valid.passesIgnoredSkipPermissionsFlag, "legacy only")
-            check("exec is derived from the launch",
-                  valid.effectiveExec == AcpCommand(command: "docker", args: [
+            check("the exec runs next to the agent",
+                  valid.execRunnerCommand == AcpCommand(command: "docker", args: [
                       "exec", "-w", "/path/in/container", "-e", "HOME=/home/node", "my-container"]),
-                  valid.effectiveExec.map { ([$0.command] + $0.args).joined(separator: " ") } ?? "nil")
+                  valid.execRunnerCommand.map { ([$0.command] + $0.args).joined(separator: " ") } ?? "nil")
+            check("a new agent runs on this Mac", AcpAgentDraft.new().workspace == .thisMac
+                    && AcpAgentDraft.new().config.mcpCallbackURL == "http://127.0.0.1:4142", "draft.new()")
 
             // ACP tabs, registered without a process. Their agent is not in the store, so no
             // timer ever runs its exec.
@@ -119,7 +124,8 @@ extension AppModel {
             let containerBox = AcpAgentConfig(
                 name: "Container box",
                 launch: AcpCommand(command: "docker", args: ["exec", "-i", "my-container", "agent"]),
-                cwd: "/path/in/container")
+                cwd: "/path/in/container", workspace: .elsewhere(exec: nil),
+                mcpCallbackURL: "http://host.docker.internal:4142")
             var renamed = containerBox
             renamed.name = "Container box (renamed)"
             let openNames = self.sessions.sessions.compactMap { s -> String? in

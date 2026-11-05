@@ -103,11 +103,22 @@ public final class SessionManager: ObservableObject {
     /// The configured ACP agents (Settings → Agents), re-read per call so restore, reload and
     /// fork find an agent edited since launch. None unless the app wires it.
     public var acpAgents: () -> [AcpAgentConfig] = { [] }
-    /// How commands reach an ACP agent's environment (its exec command), or nil when it has
-    /// none. The one place an ACP tab's runner is made — hooks, probes and branch refresh all
-    /// take it from here. Swappable so tests never spawn `docker exec`.
+    /// How commands reach an ACP agent's files: on this Mac directly (with the agent's launch
+    /// environment, bounded like an exec), elsewhere through its exec command, or nil when it
+    /// has none. The one place an ACP tab's runner is made — hooks, probes and branch refresh
+    /// all take it from here. Swappable so tests never spawn `docker exec`.
     public var acpRunnerFactory: (AcpAgentConfig) -> CommandRunner? = { agent in
-        agent.effectiveExec.map { ExecCommandRunner(exec: $0, configuredPath: agent.env["PATH"]) }
+        switch agent.workspace {
+        case .thisMac:
+            LocalCommandRunner(
+                environment: LaunchEnvironment.make(
+                    base: ProcessInfo.processInfo.environment,
+                    overrides: agent.env,
+                    loginPath: { LoginShellPath.shared.current() }),
+                defaultTimeout: 5)
+        case let .elsewhere(exec):
+            exec.map { ExecCommandRunner(exec: $0, configuredPath: agent.env["PATH"]) }
+        }
     }
     /// Whether Admiral's session bridge listener (`/mcp/session`) is up, read at each ACP
     /// launch: true = the tab's agent is offered it (`AcpMCPServer.sessionBridge`); false = no

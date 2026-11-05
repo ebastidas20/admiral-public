@@ -84,6 +84,8 @@ final class AcpEndToEndTests: XCTestCase {
                 "exec", "-i", "-w", "/workspace", Self.container, "npx", "-y", Self.package,
             ]),
             cwd: cwd,
+            workspace: .elsewhere(exec: AcpCommand(command: "docker", args: ["exec", "-w", "/workspace", Self.container])),
+            defaultConfigOptions: ["mode": "bypassPermissions"],
             mcpCallbackURL: "http://host.docker.internal:\(callbackPort)")
     }
 
@@ -333,7 +335,7 @@ final class AcpEndToEndTests: XCTestCase {
                 + "error=\(session(tab.id)?.connectError ?? "nil")\n\(log)")
         }
         let caps = ready.acpCapabilities
-        let setMode = Self.lines(logURL(ready)).filter { $0.contains("session/set_mode") }
+        let setMode = Self.lines(logURL(ready)).filter { $0.contains("session/set_config_option") }
         record("Open tab", ready.acpSessionID != nil,
                "acpSessionID=\(ready.acpSessionID ?? "nil") bridgeTools=\(caps?.isEnabled(.bridgeTools) == true) "
                + "steering=\(caps?.isEnabled(.steering) == true)")
@@ -362,7 +364,7 @@ final class AcpEndToEndTests: XCTestCase {
         record("Mode bypassPermissions (Bash runs, no permission card)",
                modeOK && ranBash && bashInput.contains("bash-ok")
                    && t2.permissionRequests == 0 && t1.permissionRequests == 0,
-               "set_mode lines=\(setMode.count) bash=\(ranBash) bash input in mirror=\(bashInput) permissionRequests=\(t2.permissionRequests) "
+               "set_config_option lines=\(setMode.count) bash=\(ranBash) bash input in mirror=\(bashInput) permissionRequests=\(t2.permissionRequests) "
                + "tools=\(t2.tools.map(\.name))")
         let goals = GoalsStore(base: base).goals(forSession: sid)
         let goalTool = t2.tools.contains { $0.name.contains("set_goal_self") }

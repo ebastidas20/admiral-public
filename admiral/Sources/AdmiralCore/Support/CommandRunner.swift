@@ -42,9 +42,12 @@ extension CommandRunner {
 public struct LocalCommandRunner: CommandRunner {
     /// The child's whole environment; nil = inherit Admiral's, as every local caller does.
     public let environment: [String: String]?
+    /// Unbounded by default; an ACP agent on this Mac gets a bound like an exec's.
+    public let defaultTimeout: TimeInterval
 
-    public init(environment: [String: String]? = nil) {
+    public init(environment: [String: String]? = nil, defaultTimeout: TimeInterval = .infinity) {
         self.environment = environment
+        self.defaultTimeout = defaultTimeout
     }
 
     public func run(_ argv: [String], cwd: String?, timeout: TimeInterval) -> (code: Int32, stdout: String)? {

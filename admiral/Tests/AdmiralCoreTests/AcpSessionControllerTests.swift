@@ -123,13 +123,12 @@ final class AcpSessionControllerTests: XCTestCase {
 
     private func make(
         _ agent: ScriptedAgent,
-        defaultMode: String? = "bypassPermissions",
         options: [String: String] = [:],
         hooks: AcpTurnHooks? = nil
     ) -> AcpSessionController {
         let config = AcpAgentConfig(
             name: "PPT", launch: AcpCommand(command: "docker"), cwd: "/workspace",
-            defaultMode: defaultMode, defaultConfigOptions: options)
+            defaultConfigOptions: options)
         let connection = JSONRPCConnection(transport: agent, log: { _ in })
         let mirror = TranscriptMirror(
             url: TranscriptMirror.url(base: dir, session: "adm"), sessionID: "adm", cwd: "/workspace")
@@ -179,15 +178,12 @@ final class AcpSessionControllerTests: XCTestCase {
         let agent = ScriptedAgent(capabilities: .object(["mcpCapabilities": .object(["http": .bool(true)])]))
         let c = make(agent)
         await c.start(.new)
-        XCTAssertEqual(agent.methods, ["initialize", "session/new", "session/set_mode"])
+        XCTAssertEqual(agent.methods, ["initialize", "session/new"], "no starting mode unless configured")
         let new = agent.params(of: "session/new").first
         XCTAssertEqual(new?["cwd"]?.stringValue, "/workspace")
         let server = new?["mcpServers"]?.arrayValue?.first
         XCTAssertEqual(server?["name"]?.stringValue, "admiral")
         XCTAssertEqual(server?["type"]?.stringValue, "http")
-        let mode = agent.params(of: "session/set_mode").first
-        XCTAssertEqual(mode?["modeId"]?.stringValue, "bypassPermissions")
-        XCTAssertEqual(mode?["sessionId"]?.stringValue, "s1")
         XCTAssertEqual(phases, [.ready])
         XCTAssertEqual(started?.id, "s1")
         XCTAssertEqual(statuses.last, .idle)
@@ -202,24 +198,25 @@ final class AcpSessionControllerTests: XCTestCase {
         XCTAssertTrue(c.offersBridge, "the bridge was offered; the agent just cannot use it")
     }
 
-    func testDefaultConfigOptionsAreAppliedAfterMode() async {
+    func testDefaultConfigOptionsAreAppliedAfterNew() async {
         let agent = ScriptedAgent()
         let c = make(agent, options: ["model": "opus"])
         await c.start(.new)
-        XCTAssertEqual(agent.methods, ["initialize", "session/new", "session/set_mode", "session/set_config_option"])
+        XCTAssertEqual(agent.methods, ["initialize", "session/new", "session/set_config_option"])
         let opt = agent.params(of: "session/set_config_option").first
         XCTAssertEqual(opt?["configId"]?.stringValue, "model")
         XCTAssertEqual(opt?["value"]?.stringValue, "opus")
     }
 
-    func testRefusedBypassModeFailsTheTab() async {
+    func testRefusedStartingOptionFailsTheTab() async {
         let agent = ScriptedAgent()
-        agent.on("session/set_mode") { _ in .error(-32603, "root needs IS_SANDBOX=1") }
-        let c = make(agent, options: ["model": "opus"])
+        agent.on("session/set_config_option") { _ in .error(-32603, "root needs IS_SANDBOX=1") }
+        let c = make(agent, options: ["mode": "bypassPermissions", "model": "opus"])
         await c.start(.new)
         guard case let .failed(message)? = phases.last else { return XCTFail("not failed: \(phases)") }
         XCTAssertTrue(message.contains("root needs IS_SANDBOX=1"), message)
-        XCTAssertFalse(agent.methods.contains("session/set_config_option"), "must not continue past a refused mode")
+        XCTAssertEqual(agent.methods.filter { $0 == "session/set_config_option" }.count, 1,
+                       "must not continue past a refused option")
         XCTAssertFalse(c.deliver("hi"))
     }
 

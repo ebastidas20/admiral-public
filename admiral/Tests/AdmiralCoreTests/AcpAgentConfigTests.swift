@@ -11,31 +11,133 @@ extension AcpAgentConfig {
 }
 
 final class AcpAgentConfigTests: XCTestCase {
-    func testDerivedExecKeepsContainerAndFlagsDropsInteractiveAndAgentBinary() {
-        let launch = AcpCommand(command: "docker", args: ["exec", "-i", "-w", "/workspace", "-e", "HOME=/home/node",
-            "ppt-claude-1", "npx", "-y", "@agentclientprotocol/claude-agent-acp", "--dangerously-skip-permissions"])
-        XCTAssertEqual(AcpAgentConfig.derivedExec(from: launch),
-            AcpCommand(command: "docker", args: ["exec", "-w", "/workspace", "-e", "HOME=/home/node", "ppt-claude-1"]))
+    private let id = UUID()
+
+    private func decode(_ json: String) throws -> AcpAgentConfig {
+        try JSONDecoder().decode(AcpAgentConfig.self, from: Data(json.utf8))
     }
 
-    func testDerivedExecHandlesUserFlagAndCombinedIT() {
-        let launch = AcpCommand(command: "docker", args: ["exec", "-it", "-u", "node", "box", "claude-agent-acp"])
-        XCTAssertEqual(
-            AcpAgentConfig.derivedExec(from: launch),
-            AcpCommand(command: "docker", args: ["exec", "-u", "node", "box"]))
+    /// The previous version's shape: no `workspace`, an optional `exec`, a `defaultMode`.
+    private func legacyJSON(
+        launch: String = #"{"command":"docker","args":["exec","-i","-w","/w","box","npx","x"]}"#,
+        exec: String? = nil, defaultMode: String? = #""bypassPermissions""#, options: String = "{}",
+        callback: String? = #""http://host.docker.internal:4142""#
+    ) -> String {
+        var fields = [#""id":"\#(id.uuidString)""#, #""name":"a""#, #""launch":\#(launch)"#, #""env":{}"#,
+                      #""cwd":"/w""#, #""defaultConfigOptions":\#(options)"#]
+        if let exec { fields.append(#""exec":\#(exec)"#) }
+        if let defaultMode { fields.append(#""defaultMode":\#(defaultMode)"#) }
+        if let callback { fields.append(#""mcpCallbackURL":\#(callback)"#) }
+        return "{" + fields.joined(separator: ",") + "}"
     }
 
-    func testNonDockerLaunchHasNoDerivedExec() {
-        XCTAssertNil(AcpAgentConfig.derivedExec(from: AcpCommand(command: "ssh", args: ["host", "claude-agent-acp"])))
-        XCTAssertNil(AcpAgentConfig.derivedExec(from: AcpCommand(command: "docker", args: ["run", "-i", "img"])))
+    func testLegacyJSONWithoutWorkspaceDerivesExecOnce() throws {
+        let c = try decode(legacyJSON())
+        XCTAssertEqual(c.workspace, .elsewhere(exec: AcpCommand(command: "docker", args: ["exec", "-w", "/w", "box"])))
+        XCTAssertEqual(c.execRunnerCommand, AcpCommand(command: "docker", args: ["exec", "-w", "/w", "box"]))
+        XCTAssertEqual(c.defaultConfigOptions, ["mode": "bypassPermissions"])
+        XCTAssertEqual(c.mcpCallbackURL, "http://host.docker.internal:4142")
+        XCTAssertEqual(c.id, id)
     }
 
-    func testExplicitExecWinsOverDerived() {
-        var c = AcpAgentConfig.sample
-        XCTAssertEqual(c.effectiveExec, AcpCommand(command: "docker", args: ["exec", "box"]))
-        let explicit = AcpCommand(command: "docker", args: ["exec", "-u", "root", "other"])
-        c.exec = explicit
-        XCTAssertEqual(c.effectiveExec, explicit)
+    func testLegacyDerivationHandlesUserFlagAndCombinedIT() throws {
+        let c = try decode(legacyJSON(launch: #"{"command":"docker","args":["exec","-it","-u","node","box","a"]}"#))
+        XCTAssertEqual(c.workspace, .elsewhere(exec: AcpCommand(command: "docker", args: ["exec", "-u", "node", "box"])))
+    }
+
+    func testLegacyNonDockerLaunchHasNoExec() throws {
+        let c = try decode(legacyJSON(launch: #"{"command":"ssh","args":["host","agent"]}"#))
+        XCTAssertEqual(c.workspace, .elsewhere(exec: nil))
+        XCTAssertNil(c.execRunnerCommand)
+    }
+
+    func testLegacyExplicitExecWins() throws {
+        let c = try decode(legacyJSON(exec: #"{"command":"ssh","args":["h"]}"#))
+        XCTAssertEqual(c.workspace, .elsewhere(exec: AcpCommand(command: "ssh", args: ["h"])))
+    }
+
+    func testLegacyModeDoesNotOverrideOption() throws {
+        let c = try decode(legacyJSON(defaultMode: #""plan""#, options: #"{"mode":"default"}"#))
+        XCTAssertEqual(c.defaultConfigOptions, ["mode": "default"])
+        let none = try decode(legacyJSON(defaultMode: "null", options: #"{"model":"opus"}"#))
+        XCTAssertEqual(none.defaultConfigOptions, ["model": "opus"], "a null mode adds nothing")
+    }
+
+    func testLegacyMissingCallbackKeepsOldDefault() throws {
+        let c = try decode(legacyJSON(callback: nil))
+        XCTAssertEqual(c.mcpCallbackURL, "http://host.docker.internal:4142")
+    }
+
+    func testEncodeRoundTripWritesNewShape() throws {
+        let configs = [
+            try decode(legacyJSON()),
+            AcpAgentConfig(name: "m", launch: AcpCommand(command: "npx", args: ["-y", "p@1"]), cwd: "/p"),
+            AcpAgentConfig(name: "s", launch: AcpCommand(command: "ssh"), cwd: "/p", workspace: .elsewhere(exec: nil),
+                           mcpCallbackURL: "http://127.0.0.1:4142"),
+        ]
+        for config in configs {
+            let data = try JSONEncoder().encode(config)
+            let object = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+            XCTAssertNotNil(object["workspace"])
+            XCTAssertNil(object["exec"])
+            XCTAssertNil(object["defaultMode"])
+            XCTAssertEqual(try JSONDecoder().decode(AcpAgentConfig.self, from: data), config)
+        }
+    }
+
+    func testWorkspaceJSONShape() throws {
+        func json(_ w: AcpWorkspace) throws -> String {
+            let e = JSONEncoder()
+            e.outputFormatting = .sortedKeys
+            return String(decoding: try e.encode(w), as: UTF8.self)
+        }
+        XCTAssertEqual(try json(.thisMac), #"{"kind":"thisMac"}"#)
+        XCTAssertEqual(try json(.elsewhere(exec: nil)), #"{"kind":"elsewhere"}"#)
+        XCTAssertEqual(try json(.elsewhere(exec: AcpCommand(command: "ssh", args: ["h"]))),
+                       #"{"exec":{"args":["h"],"command":"ssh"},"kind":"elsewhere"}"#)
+        XCTAssertThrowsError(try JSONDecoder().decode(AcpWorkspace.self, from: Data(#"{"kind":"moon"}"#.utf8)))
+    }
+
+    func testThisMacDefaults() {
+        let c = AcpAgentConfig(name: "a", launch: AcpCommand(command: "npx"), cwd: "/p")
+        XCTAssertEqual(c.workspace, .thisMac)
+        XCTAssertEqual(c.mcpCallbackURL, "http://127.0.0.1:4142")
+        XCTAssertTrue(c.defaultConfigOptions.isEmpty)
+        XCTAssertTrue(c.env.isEmpty)
+        XCTAssertNil(c.execRunnerCommand)
+        XCTAssertEqual(c.validationErrors, [])
+    }
+
+    func testElsewhereRequiresBridgeURL() {
+        var c = AcpAgentConfig(name: "a", launch: AcpCommand(command: "ssh"), cwd: "/p", workspace: .elsewhere(exec: nil))
+        XCTAssertEqual(c.mcpCallbackURL, "")
+        XCTAssertEqual(c.validationErrors, ["bridge URL is required when the agent runs elsewhere"])
+        c.mcpCallbackURL = "http://host.docker.internal:4142"
+        XCTAssertEqual(c.validationErrors, [])
+    }
+
+    func testBridgeURLMustBeHTTP() {
+        var c = AcpAgentConfig(name: "a", launch: AcpCommand(command: "ssh"), cwd: "/p", workspace: .elsewhere(exec: nil))
+        for bad in ["host.docker.internal:4142", "ftp://h:4142", "http://", "http://h:4142/mcp", "nonsense"] {
+            c.mcpCallbackURL = bad
+            XCTAssertEqual(c.validationErrors, ["bridge URL must be an http:// URL"], bad)
+        }
+        for good in ["http://h:4142", "https://h", "http://10.0.0.2:4142/"] {
+            c.mcpCallbackURL = good
+            XCTAssertEqual(c.validationErrors, [], good)
+        }
+        var mac = AcpAgentConfig(name: "a", launch: AcpCommand(command: "npx"), cwd: "/p")
+        mac.mcpCallbackURL = "nonsense"
+        XCTAssertEqual(mac.validationErrors, ["bridge URL must be an http:// URL"])
+    }
+
+    func testNonDockerLaunchIsNotParsed() {
+        let c = AcpAgentConfig(
+            name: "a", launch: AcpCommand(command: "docker", args: ["exec", "-i", "box", "agent"]), cwd: "/w",
+            workspace: .elsewhere(exec: nil), mcpCallbackURL: "http://h:4142")
+        XCTAssertNil(c.execRunnerCommand, "a new config never guesses an exec from its launch")
+        let decoded = try? JSONDecoder().decode(AcpAgentConfig.self, from: JSONEncoder().encode(c))
+        XCTAssertEqual(decoded?.workspace, .elsewhere(exec: nil), "nor does decoding the new shape")
     }
 
     func testValidationRequiresNameCommandAndAbsoluteCwd() {
@@ -69,15 +171,6 @@ final class AcpAgentConfigTests: XCTestCase {
         XCTAssertEqual(store.load(), saved)
         XCTAssertEqual(store.agent(named: "OTHER")?.id, second.id)
         XCTAssertNil(store.agent(named: "missing"))
-    }
-
-    func testDefaults() {
-        let c = AcpAgentConfig(name: "a", launch: AcpCommand(command: "x", args: []), cwd: "/w")
-        XCTAssertEqual(c.defaultMode, "bypassPermissions")
-        XCTAssertEqual(c.mcpCallbackURL, "http://host.docker.internal:4142")
-        XCTAssertNil(c.exec)
-        XCTAssertTrue(c.env.isEmpty)
-        XCTAssertTrue(c.defaultConfigOptions.isEmpty)
     }
 
     /// R5: a name already used by another agent (any case) is refused; the agent's own saved
@@ -131,17 +224,52 @@ final class AcpAgentConfigTests: XCTestCase {
     }
 
     func testDraftRoundTripsAConfig() {
-        let config = AcpAgentConfig(
+        let elsewhere = AcpAgentConfig(
             name: "PPT", launch: AcpCommand(command: "docker", args: ["exec", "-i", "-e", "A=b c", "box", "agent"]),
-            env: ["PATH": "/opt/bin:/usr/bin", "TOKEN": "x=y"], cwd: "/workspace", defaultMode: nil,
-            defaultConfigOptions: ["model": "opus"], exec: AcpCommand(command: "docker", args: ["exec", "box"]))
-        XCTAssertEqual(AcpAgentDraft(config).config, config)
+            env: ["PATH": "/opt/bin:/usr/bin", "TOKEN": "x=y"], cwd: "/workspace",
+            workspace: .elsewhere(exec: AcpCommand(command: "docker", args: ["exec", "box"])),
+            defaultConfigOptions: ["model": "opus"], mcpCallbackURL: "http://host.docker.internal:4142")
+        XCTAssertEqual(AcpAgentDraft(elsewhere).config, elsewhere)
+        var none = elsewhere
+        none.workspace = .elsewhere(exec: nil)
+        XCTAssertEqual(AcpAgentDraft(none).config, none)
+        let mac = AcpAgentConfig(name: "m", launch: AcpCommand(command: "npx", args: ["-y", "p@1"]), cwd: "/p")
+        XCTAssertEqual(AcpAgentDraft(mac).config, mac)
     }
 
-    func testDraftNormalizesRowsAndEmptyExecMeansDerived() {
+    func testDraftNewIsThisMacWithEmptyFields() {
+        let draft = AcpAgentDraft.new()
+        XCTAssertEqual(draft.workspace, .thisMac)
+        XCTAssertEqual(draft.cwd, "", "no path pre-filled")
+        XCTAssertEqual(draft.name, "")
+        XCTAssertEqual(draft.command, "")
+        XCTAssertEqual(draft.exec.values, [])
+        XCTAssertEqual(draft.configOptions.map, [:])
+        XCTAssertEqual(draft.config.workspace, .thisMac)
+        XCTAssertEqual(draft.config.mcpCallbackURL, "http://127.0.0.1:4142")
+    }
+
+    func testDraftSwitchingWorkspaceUpdatesTheBridgeURL() {
         var draft = AcpAgentDraft.new()
-        XCTAssertEqual(draft.defaultMode, "bypassPermissions")
-        XCTAssertEqual(draft.cwd, "", "no container path pre-filled")
+        draft.workspace = .elsewhere
+        XCTAssertEqual(draft.mcpCallbackURL, "", "This Mac's URL would not reach this Mac from elsewhere")
+        XCTAssertEqual(draft.config.validationErrors(among: []).contains(AcpAgentConfig.bridgeURLRequired), true)
+        draft.mcpCallbackURL = "http://host.docker.internal:4142"
+        draft.exec = AcpArgList(["docker", "exec", "my-container"])
+        XCTAssertEqual(draft.config.workspace,
+                       .elsewhere(exec: AcpCommand(command: "docker", args: ["exec", "my-container"])))
+        draft.workspace = .thisMac
+        XCTAssertEqual(draft.mcpCallbackURL, "http://127.0.0.1:4142")
+        XCTAssertEqual(draft.config.workspace, .thisMac, "the exec rows do not apply on this Mac")
+        draft.workspace = .elsewhere
+        XCTAssertEqual(draft.mcpCallbackURL, "")
+        draft.mcpCallbackURL = "http://10.0.0.2:4142"
+        draft.workspace = .elsewhere
+        XCTAssertEqual(draft.mcpCallbackURL, "http://10.0.0.2:4142", "re-choosing Elsewhere keeps a typed URL")
+    }
+
+    func testDraftNormalizesRows() {
+        var draft = AcpAgentDraft.new()
         XCTAssertEqual(draft.args.rows.count, 1, "an empty list shows one empty row")
         XCTAssertEqual(draft.env.rows.count, 1)
         draft.name = " PPT "
@@ -149,15 +277,13 @@ final class AcpAgentConfigTests: XCTestCase {
         draft.args = AcpArgList(["exec", "  -i", "", "   ", "box", "npx -y pkg@1.2.3", ""])
         draft.env = AcpRowList([AcpPair(key: "FOO", value: "bar=baz"), AcpPair(key: "", value: "nokey"),
                                 AcpPair(key: " BAR ", value: " 1")], blank: AcpPair())
-        draft.defaultMode = "  "
+        draft.workspace = .elsewhere
         let config = draft.config
         XCTAssertEqual(config.name, "PPT")
         XCTAssertEqual(config.launch.args, ["exec", "-i", "box", "npx -y pkg@1.2.3"],
                        "blank rows dropped, inner spaces kept: one row is one arg")
         XCTAssertEqual(config.env, ["FOO": "bar=baz", "BAR": " 1"], "empty key dropped, value as typed")
-        XCTAssertNil(config.defaultMode, "blank = no mode set")
-        XCTAssertNil(config.exec)
-        XCTAssertEqual(config.effectiveExec, AcpCommand(command: "docker", args: ["exec", "box"]))
+        XCTAssertEqual(config.workspace, .elsewhere(exec: nil), "empty exec rows = none, never derived")
         XCTAssertEqual(draft.validationErrors, [])
     }
 

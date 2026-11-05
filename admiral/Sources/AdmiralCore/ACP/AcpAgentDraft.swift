@@ -1,5 +1,11 @@
 import Foundation
 
+/// Settings → Agents' "Runs on" choice: the case of `AcpWorkspace` without its exec, which the
+/// form keeps in its own rows.
+public enum AcpWorkspaceKind: String, CaseIterable, Sendable {
+    case thisMac, elsewhere
+}
+
 /// Settings → Agents' form: one field per editable value; lists as rows (`args`, and `exec` as
 /// its command then its args, one argument per row; `env` and `configOptions` as key/value
 /// rows). Converts to and from `AcpAgentConfig` here, so the normalizing is under `swift test`,
@@ -11,10 +17,23 @@ public struct AcpAgentDraft: Equatable, Sendable {
     public var args: AcpArgList
     public var env: AcpPairList
     public var cwd: String
-    public var defaultMode: String
+    /// Where the agent runs. Switching to This Mac sets the bridge URL to This Mac's; switching
+    /// to Elsewhere clears that URL (it would not reach this Mac from there) but keeps any other.
+    public var workspace: AcpWorkspaceKind {
+        didSet {
+            guard workspace != oldValue else { return }
+            let thisMacURL = AcpAgentConfig.defaultCallbackURL(for: .thisMac)
+            switch workspace {
+            case .thisMac: mcpCallbackURL = thisMacURL
+            case .elsewhere:
+                if mcpCallbackURL.trimmingCharacters(in: .whitespaces) == thisMacURL { mcpCallbackURL = "" }
+            }
+        }
+    }
     public var configOptions: AcpPairList
+    /// Used only Elsewhere; on This Mac the config takes This Mac's URL.
     public var mcpCallbackURL: String
-    /// Empty = use the exec derived from the launch command (`AcpAgentConfig.derivedExec`).
+    /// Elsewhere only: the exec prefix, command then args. Empty = none.
     public var exec: AcpArgList
 
     public init(_ config: AcpAgentConfig) {
@@ -24,31 +43,42 @@ public struct AcpAgentDraft: Equatable, Sendable {
         args = AcpArgList(config.launch.args)
         env = AcpPairList(config.env)
         cwd = config.cwd
-        defaultMode = config.defaultMode ?? ""
+        switch config.workspace {
+        case .thisMac: workspace = .thisMac
+        case .elsewhere: workspace = .elsewhere
+        }
         configOptions = AcpPairList(config.defaultConfigOptions)
         mcpCallbackURL = config.mcpCallbackURL
-        exec = AcpArgList(config.exec.map { [$0.command] + $0.args } ?? [])
+        exec = AcpArgList(config.execRunnerCommand.map { [$0.command] + $0.args } ?? [])
     }
 
-    /// A new agent's starting point: the config's defaults, every field empty — the form's
-    /// placeholders show the shape, and no one's container path is pre-filled as a value.
+    /// A new agent's starting point: the config's defaults (This Mac), every field empty — the
+    /// form's placeholders show the shape, and no one's path is pre-filled as a value.
     public static func new() -> AcpAgentDraft {
         AcpAgentDraft(AcpAgentConfig(name: "", launch: AcpCommand(command: ""), cwd: ""))
     }
 
     public var config: AcpAgentConfig {
         let execValues = exec.values
-        let mode = defaultMode.trimmingCharacters(in: .whitespaces)
+        let workspace: AcpWorkspace = switch self.workspace {
+        case .thisMac: .thisMac
+        case .elsewhere: .elsewhere(exec: execValues.first.map {
+            AcpCommand(command: $0, args: Array(execValues.dropFirst()))
+        })
+        }
+        let url: String = switch workspace {
+        case .thisMac: AcpAgentConfig.defaultCallbackURL(for: .thisMac)
+        case .elsewhere: mcpCallbackURL.trimmingCharacters(in: .whitespaces)
+        }
         return AcpAgentConfig(
             id: id,
             name: name.trimmingCharacters(in: .whitespaces),
             launch: AcpCommand(command: command.trimmingCharacters(in: .whitespaces), args: args.values),
             env: env.map,
             cwd: cwd.trimmingCharacters(in: .whitespaces),
-            defaultMode: mode.isEmpty ? nil : mode,
+            workspace: workspace,
             defaultConfigOptions: configOptions.map,
-            mcpCallbackURL: mcpCallbackURL.trimmingCharacters(in: .whitespaces),
-            exec: execValues.first.map { AcpCommand(command: $0, args: Array(execValues.dropFirst())) })
+            mcpCallbackURL: url)
     }
 
     /// What the rows say that the config cannot: a key given twice (the config is a map, so it

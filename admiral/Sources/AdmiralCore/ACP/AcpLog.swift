@@ -30,8 +30,8 @@ public enum AcpLog {
     public static let maxLineLength = 300
 
     /// How `JSONRPCConnection` logs a stdout line that is not JSON-RPC. That line is the agent's
-    /// own words too: `docker exec` writes an OCI failure ("executable file not found in $PATH")
-    /// to stdout, not stderr, so `lastAgentLine` counts it.
+    /// own words too: a launch command that enters another environment may write its failure there
+    /// ("executable file not found in $PATH") to stdout, not stderr, so `lastAgentLine` counts it.
     public static let nonJSONPrefix = "acp: non-JSON line: "
 
     /// The line `ProcessAcpTransport` logs when the agent's process ends.
@@ -61,8 +61,9 @@ public enum AcpLog {
     ) -> String {
         let line = lastAgentLine(url, after: offset)
         var text = line.map { "\(reason): \($0)" } ?? reason
-        // A 127 from inside a container (`docker exec` of a missing binary) is not about the
-        // Mac's PATH: only `env`'s own complaint, or no word at all, gets the hint.
+        // A 127 can come from inside the environment the launch command enters (its own missing
+        // binary), which is not about this Mac's PATH: only `env`'s own complaint, or no word
+        // at all, gets the hint — the command exists on this Mac's PATH, or inside that environment.
         if exitStatus(url, after: offset) == 127, line.map({ $0.hasPrefix("env:") }) ?? true {
             let name = (command as NSString).lastPathComponent
             text += " \u{2014} is `\(command)` on your PATH? Use its full path (e.g. /usr/local/bin/\(name))"

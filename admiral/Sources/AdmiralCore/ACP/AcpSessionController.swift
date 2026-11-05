@@ -272,14 +272,6 @@ public final class AcpSessionController: SessionDriver {
         }
         acpSessionID = sessionID
 
-        if let mode = config.defaultMode {
-            do {
-                _ = try await connection.request(
-                    "session/set_mode", params: AcpClient.setModeParams(sessionID: sessionID, modeID: mode))
-            } catch {
-                throw HandshakeFailure(message: "agent refused mode \(mode): \(Self.message(error))")
-            }
-        }
         var options = AcpConfigOption.decodeAll(result)
         if start == .new {
             for (id, value) in config.defaultConfigOptions.sorted(by: { $0.key < $1.key }) {

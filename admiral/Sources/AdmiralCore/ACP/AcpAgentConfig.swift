@@ -11,6 +11,39 @@ public struct AcpCommand: Codable, Hashable, Sendable {
     }
 }
 
+/// Where the agent's files are — decides how git/gh reach them and the bridge URL default.
+public enum AcpWorkspace: Codable, Hashable, Sendable {
+    /// The agent runs on this Mac: git/gh run directly, `cwd` is a Mac path.
+    case thisMac
+    /// Somewhere else (a container, a VM, an SSH host). `exec` is the non-interactive prefix that
+    /// runs one command there (`docker exec my-container`, `ssh my-host`); nil = none, so git,
+    /// branch, touched repos and PR watch stay off.
+    case elsewhere(exec: AcpCommand?)
+
+    /// Stored as `{"kind":"thisMac"}` or `{"kind":"elsewhere","exec":{…}}` (`exec` omitted when none).
+    private enum CodingKeys: String, CodingKey { case kind, exec }
+    private enum Kind: String, Codable { case thisMac, elsewhere }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        switch try c.decode(Kind.self, forKey: .kind) {
+        case .thisMac: self = .thisMac
+        case .elsewhere: self = .elsewhere(exec: try c.decodeIfPresent(AcpCommand.self, forKey: .exec))
+        }
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        switch self {
+        case .thisMac:
+            try c.encode(Kind.thisMac, forKey: .kind)
+        case let .elsewhere(exec):
+            try c.encode(Kind.elsewhere, forKey: .kind)
+            try c.encodeIfPresent(exec, forKey: .exec)
+        }
+    }
+}
+
 /// One configured ACP (Agent Client Protocol) agent.
 public struct AcpAgentConfig: Codable, Hashable, Sendable, Identifiable {
     public var id: UUID
@@ -21,12 +54,11 @@ public struct AcpAgentConfig: Codable, Hashable, Sendable, Identifiable {
     public var env: [String: String]
     /// Absolute working directory, as the agent sees it.
     public var cwd: String
-    public var defaultMode: String?
+    /// Where the agent runs: how git/gh reach its files (`execRunnerCommand`).
+    public var workspace: AcpWorkspace
     public var defaultConfigOptions: [String: String]
+    /// How the agent reaches Admiral's session bridge (:4142).
     public var mcpCallbackURL: String
-    /// Non-interactive command prefix for running a one-off command next to the agent
-    /// (e.g. `docker exec <container>`). nil = none; see `effectiveExec`.
-    public var exec: AcpCommand?
 
     public init(
         id: UUID = UUID(),
@@ -34,28 +66,89 @@ public struct AcpAgentConfig: Codable, Hashable, Sendable, Identifiable {
         launch: AcpCommand,
         env: [String: String] = [:],
         cwd: String,
-        defaultMode: String? = "bypassPermissions",
+        workspace: AcpWorkspace = .thisMac,
         defaultConfigOptions: [String: String] = [:],
-        mcpCallbackURL: String = "http://host.docker.internal:4142",
-        exec: AcpCommand? = nil
+        mcpCallbackURL: String? = nil
     ) {
         self.id = id
         self.name = name
         self.launch = launch
         self.env = env
         self.cwd = cwd
-        self.defaultMode = defaultMode
+        self.workspace = workspace
         self.defaultConfigOptions = defaultConfigOptions
-        self.mcpCallbackURL = mcpCallbackURL
-        self.exec = exec
+        self.mcpCallbackURL = mcpCallbackURL ?? Self.defaultCallbackURL(for: workspace)
+    }
+
+    /// The bridge URL a new agent starts with: on this Mac the listener's own loopback address;
+    /// elsewhere none — the user must say how that environment reaches this Mac.
+    public static func defaultCallbackURL(for workspace: AcpWorkspace) -> String {
+        switch workspace {
+        case .thisMac: "http://127.0.0.1:4142"
+        case .elsewhere: ""
+        }
+    }
+
+    /// The prefix that runs a command next to the agent: nil on this Mac (run directly), and
+    /// elsewhere the configured exec, if any.
+    public var execRunnerCommand: AcpCommand? {
+        switch workspace {
+        case .thisMac: nil
+        case let .elsewhere(exec): exec
+        }
+    }
+
+    // MARK: - Codable (with the one-time migration of the previous shape)
+
+    private enum CodingKeys: String, CodingKey {
+        case id, name, launch, env, cwd, workspace, defaultConfigOptions, mcpCallbackURL
+        /// Previous version only; read once by the migration, never written.
+        case exec, defaultMode
+    }
+
+    /// The bridge URL every agent saved before `workspace` existed was given by default.
+    static let legacyCallbackURL = "http://host.docker.internal:4142"
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(UUID.self, forKey: .id)
+        name = try c.decode(String.self, forKey: .name)
+        launch = try c.decode(AcpCommand.self, forKey: .launch)
+        env = try c.decodeIfPresent([String: String].self, forKey: .env) ?? [:]
+        cwd = try c.decode(String.self, forKey: .cwd)
+        var options = try c.decodeIfPresent([String: String].self, forKey: .defaultConfigOptions) ?? [:]
+        if let workspace = try c.decodeIfPresent(AcpWorkspace.self, forKey: .workspace) {
+            self.workspace = workspace
+        } else {
+            let exec = try c.decodeIfPresent(AcpCommand.self, forKey: .exec)
+            workspace = .elsewhere(exec: exec ?? Self.legacyDerivedExec(launch))
+        }
+        if let mode = try c.decodeIfPresent(String.self, forKey: .defaultMode), options["mode"] == nil {
+            options["mode"] = mode
+        }
+        defaultConfigOptions = options
+        mcpCallbackURL = try c.decodeIfPresent(String.self, forKey: .mcpCallbackURL) ?? Self.legacyCallbackURL
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(id, forKey: .id)
+        try c.encode(name, forKey: .name)
+        try c.encode(launch, forKey: .launch)
+        try c.encode(env, forKey: .env)
+        try c.encode(cwd, forKey: .cwd)
+        try c.encode(workspace, forKey: .workspace)
+        try c.encode(defaultConfigOptions, forKey: .defaultConfigOptions)
+        try c.encode(mcpCallbackURL, forKey: .mcpCallbackURL)
     }
 
     private static let flagsDropped: Set<String> = ["-i", "--interactive", "-t", "--tty", "-it", "-ti"]
     private static let flagsWithValue: Set<String> = ["-w", "--workdir", "-e", "--env", "-u", "--user", "--env-file"]
 
-    /// `docker exec [flags] <container> <agent…>` -> `docker exec [flags minus -i/-t] <container>`.
-    /// nil unless `launch` is a `docker exec`.
-    public static func derivedExec(from launch: AcpCommand) -> AcpCommand? {
+    /// MIGRATION ONLY: how the previous version guessed an exec from a `docker exec [flags]
+    /// <container> <agent…>` launch (-> `docker exec [flags minus -i/-t] <container>`), so an
+    /// agent saved then keeps its git. Nothing else parses launch lines.
+    private static func legacyDerivedExec(_ launch: AcpCommand) -> AcpCommand? {
         let base = (launch.command as NSString).lastPathComponent
         guard base == "docker", launch.args.first == "exec" else { return nil }
         var kept = ["exec"]
@@ -79,7 +172,8 @@ public struct AcpAgentConfig: Codable, Hashable, Sendable, Identifiable {
         return nil  // no container found
     }
 
-    public var effectiveExec: AcpCommand? { exec ?? Self.derivedExec(from: launch) }
+    public static let bridgeURLRequired = "bridge URL is required when the agent runs elsewhere"
+    public static let bridgeURLNotHTTP = "bridge URL must be an http:// URL"
 
     /// Human-readable problems; empty = valid.
     public var validationErrors: [String] {
@@ -87,7 +181,22 @@ public struct AcpAgentConfig: Codable, Hashable, Sendable, Identifiable {
         if name.trimmingCharacters(in: .whitespaces).isEmpty { errors.append("name is required") }
         if launch.command.trimmingCharacters(in: .whitespaces).isEmpty { errors.append("launch command is required") }
         if !cwd.hasPrefix("/") { errors.append("cwd must be an absolute path as the agent sees it") }
+        let url = mcpCallbackURL.trimmingCharacters(in: .whitespaces)
+        if url.isEmpty {
+            if case .elsewhere = workspace { errors.append(Self.bridgeURLRequired) }
+        } else if !Self.isHostURL(url) {
+            errors.append(Self.bridgeURLNotHTTP)
+        }
         return errors
+    }
+
+    /// `http(s)://host[:port]`, an optional trailing `/`, nothing more.
+    static func isHostURL(_ text: String) -> Bool {
+        guard let c = URLComponents(string: text), let scheme = c.scheme?.lowercased(),
+              scheme == "http" || scheme == "https", let host = c.host, !host.isEmpty,
+              c.path.isEmpty || c.path == "/", c.query == nil, c.fragment == nil, c.user == nil
+        else { return false }
+        return true
     }
 
     /// `validationErrors`, plus the name's uniqueness among `agents` (case-insensitive, like
@@ -127,7 +236,10 @@ public struct AcpAgentConfig: Codable, Hashable, Sendable, Identifiable {
             == .orderedSame
     }
 
-    /// The agent ignores `--dangerously-skip-permissions`; permissions are set via `defaultMode`.
+    /// The agent ignores `--dangerously-skip-permissions`; a starting mode is set instead.
+    public static let ignoredSkipPermissionsNote =
+        "This agent ignores --dangerously-skip-permissions. Choose a starting mode below instead."
+
     public var passesIgnoredSkipPermissionsFlag: Bool {
         launch.args.contains("--dangerously-skip-permissions")
     }

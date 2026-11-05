@@ -45,10 +45,10 @@ struct AgentsSettingsView: View {
             VStack(alignment: .leading, spacing: 20) {
                 SettingsCard("Agents",
                         "Agents Admiral talks to over ACP (the Agent Client Protocol) instead of "
-                            + "running claude in a terminal — for instance claude-agent-acp inside a "
-                            + "container, through `docker exec -i`. Their tabs are Chat only. Pin the "
-                            + "agent's version (`npx -y @agentclientprotocol/claude-agent-acp@<version>`) "
-                            + "rather than an unpinned `npx -y`, so a relaunch never brings a different "
+                            + "running claude in a terminal. The launch command can start the agent on "
+                            + "this Mac (`npx -y <agent-package>@<version>`) or enter another environment "
+                            + "first (`docker exec -i my-container …`, `ssh my-host …`). Their tabs are "
+                            + "Chat only. Pin the agent's version so a relaunch never brings a different "
                             + "agent.") {
                     list
                 }
@@ -120,10 +120,10 @@ struct AgentsSettingsView: View {
 
     // MARK: - Form
 
-    /// The form that works: `npx` fetches the adapter in the container (a bare
-    /// `claude-agent-acp` is usually not installed there). Generic names, nobody's setup.
-    static let argumentsHint = "One argument per row, e.g. `exec`, `-i`, `my-container`, `npx`, `-y`, "
-        + "`@agentclientprotocol/claude-agent-acp@<version>`."
+    /// Generic names, nobody's setup: an agent started on this Mac, or a launch that enters
+    /// another environment first.
+    static let argumentsHint = "One argument per row, e.g. `-y`, `<agent-package>@<version>` — or `exec`, "
+        + "`-i`, `my-container`, then the agent's command."
 
     private func form(_ current: AcpAgentDraft) -> some View {
         let config = current.config
@@ -132,28 +132,30 @@ struct AgentsSettingsView: View {
         return SettingsCard(draftIsNew ? "New agent" : "Edit \u{201C}\(config.name)\u{201D}",
                             "Launched directly — no shell — with one literal argument per row.") {
             VStack(alignment: .leading, spacing: 12) {
-                field("Name", \.name, placeholder: "Claude Code (container)", id: "agent-name")
-                field("Command", \.command, placeholder: "docker", id: "agent-command", mono: true)
-                argList("Arguments", \.args, current.args, placeholders: ["exec"], id: "agent-args")
+                field("Name", \.name, placeholder: "My agent", id: "agent-name")
+                field("Command", \.command, placeholder: "npx", id: "agent-command", mono: true)
+                argList("Arguments", \.args, current.args, placeholders: ["-y"], id: "agent-args")
                 caption(Self.argumentsHint)
                 if config.passesIgnoredSkipPermissionsFlag {
-                    note("exclamationmark.triangle.fill",
-                         "claude-agent-acp ignores --dangerously-skip-permissions. "
-                             + "Admiral sets the mode below instead.")
+                    note("exclamationmark.triangle.fill", AcpAgentConfig.ignoredSkipPermissionsNote)
                         .accessibilityIdentifier("agent-ignored-flag")
                 }
                 pairList("Environment", \.env, current.env, placeholder: ("NAME", "value"),
                          add: "Add variable", id: "agent-env")
-                caption("Applies to the command on this Mac, not inside a container. "
-                        + "Use `docker exec -e` for the agent's environment.")
-                field("Folder", \.cwd, placeholder: "/path/in/container", id: "agent-cwd", mono: true)
-                caption("Absolute, as the agent sees it (inside the container).")
-                field("Mode", \.defaultMode, placeholder: "none", id: "agent-mode", mono: true)
+                caption("Applies to the launch command on this Mac. For an agent elsewhere, set its "
+                        + "environment there (e.g. `docker exec -e NAME=value`).")
+                workspacePicker
+                field("Folder", \.cwd, placeholder: "/path/to/project", id: "agent-cwd", mono: true)
+                caption(current.workspace == .thisMac ? "Absolute path on this Mac." : "Absolute, as the agent sees it.")
+                if current.workspace == .elsewhere {
+                    execField(current)
+                    field("Bridge URL", \.mcpCallbackURL, placeholder: "http://host.docker.internal:4142",
+                          id: "agent-callback", mono: true)
+                    caption("How that environment reaches this Mac's port 4142 — `host.docker.internal` "
+                            + "from Docker, or a reverse tunnel (`ssh -R 4142:127.0.0.1:4142`) for an SSH host.")
+                }
                 pairList("Config options", \.configOptions, current.configOptions, placeholder: ("model", "opus"),
                          add: "Add option", id: "agent-options")
-                field("Bridge URL", \.mcpCallbackURL, placeholder: "http://host.docker.internal:4142",
-                      id: "agent-callback", mono: true)
-                execField(current)
                 if !errors.isEmpty {
                     VStack(alignment: .leading, spacing: 3) {
                         ForEach(errors, id: \.self) { error in
@@ -181,25 +183,34 @@ struct AgentsSettingsView: View {
         }
     }
 
-    /// The exec prefix: empty = the one derived from the launch command, shown under it, and
-    /// one click away from being edited.
+    /// Runs on: This Mac or Elsewhere. The draft moves the bridge URL with it.
+    private var workspacePicker: some View {
+        HStack(spacing: 10) {
+            label("Runs on")
+            Picker("Runs on", selection: Binding(
+                get: { draft?.workspace ?? .thisMac }, set: { draft?.workspace = $0 })) {
+                Text("This Mac").tag(AcpWorkspaceKind.thisMac)
+                Text("Elsewhere").tag(AcpWorkspaceKind.elsewhere)
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .fixedSize()
+            .accessibilityIdentifier("agent-workspace")
+            Spacer()
+        }
+    }
+
+    /// Elsewhere only: the prefix that runs one command next to the agent. Empty = none.
     @ViewBuilder private func execField(_ current: AcpAgentDraft) -> some View {
-        let config = current.config
-        let derived = AcpAgentConfig.derivedExec(from: config.launch)
-        argList("Exec", \.exec, current.exec,
-                placeholders: derived.map { [$0.command] } ?? ["docker"], id: "agent-exec")
-        HStack(spacing: 6) {
-            if config.exec == nil, let derived {
-                caption("Empty: derived from the launch command — `\(Self.oneLine(derived))`.")
-                Button("Edit") { draft?.exec = AcpArgList([derived.command] + derived.args) }
-                    .controlSize(.small).buttonStyle(.link)
-            } else if config.exec == nil {
-                caption("None: git, branch, touched repos and PR watch stay off for this agent's tabs.")
+        argList("Exec", \.exec, current.exec, placeholders: ["docker", "exec", "my-container"], id: "agent-exec")
+        Group {
+            if let exec = current.config.execRunnerCommand {
+                caption("Runs `git` and `gh` next to the agent: `\(Self.oneLine(exec)) git --version`.")
             } else {
-                caption("Runs `git` and `gh` next to the agent: `\(Self.oneLine(config.exec!)) git --version`.")
+                caption("None: git, branch, touched repos and PR watch stay off for this agent's tabs.")
             }
         }
-        .accessibilityIdentifier("agent-exec-derived")
+        .accessibilityIdentifier("agent-exec-caption")
     }
 
     /// What the last Test connection on this agent found.

@@ -58,7 +58,8 @@ final class SessionManagerAcpTests: XCTestCase {
             openSessionsStore: OpenSessionsStore(defaults: defaults), supportDir: base,
             touchedReposStore: TouchedReposStore(defaults: defaults))
         ppt = AcpAgentConfig(name: "PPT", launch: AcpCommand(command: "docker", args: ["exec", "-i", "c", "agent"]),
-                             cwd: agentCwd)
+                             cwd: agentCwd, workspace: .elsewhere(exec: AcpCommand(command: "docker", args: ["exec", "c"])),
+                             mcpCallbackURL: "http://host.docker.internal:4142")
         scripted = []
         launched = []
         launchedConfigs = []
@@ -249,7 +250,8 @@ final class SessionManagerAcpTests: XCTestCase {
 
     func testFailedHandshakeStrandsNothingSilently() async throws {
         let agent = ScriptedAgent()
-        agent.on("session/set_mode") { _ in .error(-32603, "root needs IS_SANDBOX=1") }
+        ppt.defaultConfigOptions = ["mode": "bypassPermissions"]
+        agent.on("session/set_config_option") { _ in .error(-32603, "root needs IS_SANDBOX=1") }
         scripted.append(agent)
         let s = manager.commissionACP(agent: ppt, callsign: "x")
         let sid = try XCTUnwrap(s.claudeSessionID)
@@ -356,13 +358,38 @@ final class SessionManagerAcpTests: XCTestCase {
         XCTAssertEqual(launched.last?.params(of: "session/resume").first?["sessionId"]?.stringValue, "s1")
     }
 
-    func testRefusedModeIsTheRecordedReason() async {
+    func testRefusedStartingOptionIsTheRecordedReason() async {
         let agent = ScriptedAgent()
-        agent.on("session/set_mode") { _ in .error(-32603, "root needs IS_SANDBOX=1") }
+        ppt.defaultConfigOptions = ["mode": "bypassPermissions"]
+        agent.on("session/set_config_option") { _ in .error(-32603, "root needs IS_SANDBOX=1") }
         scripted.append(agent)
         let s = manager.commissionACP(agent: ppt, callsign: "x")
         await until("reason") { session(s.id)?.connectError != nil }
-        XCTAssertEqual(session(s.id)?.connectError, "agent refused mode bypassPermissions: root needs IS_SANDBOX=1")
+        XCTAssertEqual(session(s.id)?.connectError, "agent refused mode=bypassPermissions: root needs IS_SANDBOX=1")
+    }
+
+    // MARK: - Runner factory
+
+    /// The default factory (not the fake): on this Mac git runs directly, bounded like an exec;
+    /// elsewhere with no exec there is no runner at all.
+    func testDefaultRunnerFactoryFollowsTheWorkspace() throws {
+        let fresh = SessionManager(
+            host: FakeTerminalHost(), claudeHome: base, executablePath: "/bin/echo",
+            appearanceStore: SessionAppearanceStore(defaults: defaults),
+            openSessionsStore: OpenSessionsStore(defaults: defaults), supportDir: base,
+            touchedReposStore: TouchedReposStore(defaults: defaults))
+        let mac = AcpAgentConfig(name: "m", launch: AcpCommand(command: "npx"), env: ["PATH": "/opt/x"], cwd: "/p")
+        let local = try XCTUnwrap(fresh.acpRunnerFactory(mac) as? LocalCommandRunner)
+        XCTAssertEqual(local.defaultTimeout, 5)
+        XCTAssertEqual(local.environment?["PATH"], "/opt/x", "the agent's own PATH wins, as for its launch")
+        var none = mac
+        none.workspace = .elsewhere(exec: nil)
+        XCTAssertNil(fresh.acpRunnerFactory(none))
+        var exec = mac
+        exec.workspace = .elsewhere(exec: AcpCommand(command: "ssh", args: ["h"]))
+        let remote = try XCTUnwrap(fresh.acpRunnerFactory(exec) as? ExecCommandRunner)
+        XCTAssertEqual(remote.exec, AcpCommand(command: "ssh", args: ["h"]))
+        fresh.terminateAll()
     }
 
     // MARK: - Restore / reload
