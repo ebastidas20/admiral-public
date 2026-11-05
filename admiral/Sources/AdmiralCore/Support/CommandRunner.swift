@@ -7,41 +7,88 @@ public protocol CommandRunner: Sendable {
     /// `nil` = the command could not be launched, or ran past `timeout` (and was terminated).
     /// `timeout: .infinity` waits as long as the command runs.
     func run(_ argv: [String], cwd: String?, timeout: TimeInterval) -> (code: Int32, stdout: String)?
+    /// The same run, with stderr kept — for a caller that reads it (gh's rate-limit and merge
+    /// errors). A runner that cannot capture it hands back `""`.
+    func runCapturingStderr(_ argv: [String], cwd: String?, timeout: TimeInterval) -> CommandOutput?
     /// The bound a caller with no opinion of its own (`Git`) uses for this runner.
     var defaultTimeout: TimeInterval { get }
+}
+
+/// One finished command: exit code, stdout and stderr, both read in full.
+public struct CommandOutput: Sendable, Equatable {
+    public let code: Int32
+    public let stdout: String
+    public let stderr: String
+
+    public init(code: Int32, stdout: String, stderr: String) {
+        self.code = code
+        self.stdout = stdout
+        self.stderr = stderr
+    }
 }
 
 extension CommandRunner {
     /// Unbounded: a local command has always been waited out.
     public var defaultTimeout: TimeInterval { .infinity }
+
+    public func runCapturingStderr(_ argv: [String], cwd: String?, timeout: TimeInterval) -> CommandOutput? {
+        run(argv, cwd: cwd, timeout: timeout).map { CommandOutput(code: $0.code, stdout: $0.stdout, stderr: "") }
+    }
 }
 
-/// `argv` through `/usr/bin/env` on this Mac — no shell, PATH lookup by `env`, stderr
-/// discarded, stdout read once the process exits. This is what `Git` always did.
+/// `argv` through `/usr/bin/env` on this Mac — no shell, PATH lookup by `env`. Both pipes are
+/// drained WHILE the process runs: a command that writes more than a pipe buffer (a `gh pr list`
+/// with checks) would otherwise block on write, never exit, and run into the timeout.
 public struct LocalCommandRunner: CommandRunner {
     public init() {}
 
     public func run(_ argv: [String], cwd: String?, timeout: TimeInterval) -> (code: Int32, stdout: String)? {
+        runCapturingStderr(argv, cwd: cwd, timeout: timeout).map { ($0.code, $0.stdout) }
+    }
+
+    public func runCapturingStderr(_ argv: [String], cwd: String?, timeout: TimeInterval) -> CommandOutput? {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
         process.arguments = argv
         if let cwd { process.currentDirectoryURL = URL(fileURLWithPath: cwd) }
-        let out = Pipe()
+        let out = Pipe(), err = Pipe()
         process.standardOutput = out
-        process.standardError = Pipe()
+        process.standardError = err
         let exited = DispatchSemaphore(value: 0)
         process.terminationHandler = { _ in exited.signal() }
         do { try process.run() } catch { return nil }
-        if timeout.isFinite {
-            guard exited.wait(timeout: .now() + timeout) == .success else {
-                process.terminate()
-                return nil
-            }
-        } else {
-            exited.wait()
+        let stdout = PipeDrain(out), stderr = PipeDrain(err)
+        let deadline: DispatchTime = timeout.isFinite ? .now() + timeout : .distantFuture
+        guard exited.wait(timeout: deadline) == .success else {
+            process.terminate()
+            return nil
         }
-        let data = out.fileHandleForReading.readDataToEndOfFile()
-        return (process.terminationStatus, String(data: data, encoding: .utf8) ?? "")
+        // A grandchild still holding a pipe open past the exit is bounded by the same deadline.
+        guard let outData = stdout.wait(until: deadline), let errData = stderr.wait(until: deadline) else {
+            return nil
+        }
+        return CommandOutput(code: process.terminationStatus,
+                             stdout: String(data: outData, encoding: .utf8) ?? "",
+                             stderr: String(decoding: errData, as: UTF8.self))
+    }
+}
+
+/// Reads one pipe to EOF on its own thread, so the writer never blocks on a full buffer.
+private final class PipeDrain: @unchecked Sendable {
+    private let done = DispatchSemaphore(value: 0)
+    private var data = Data()
+
+    init(_ pipe: Pipe) {
+        let handle = pipe.fileHandleForReading
+        DispatchQueue.global(qos: .utility).async {
+            self.data = handle.readDataToEndOfFile()
+            self.done.signal()
+        }
+    }
+
+    /// The pipe's bytes once it hits EOF; nil if `deadline` passes first.
+    func wait(until deadline: DispatchTime) -> Data? {
+        done.wait(timeout: deadline) == .success ? data : nil
     }
 }
 
@@ -67,5 +114,9 @@ public struct ExecCommandRunner: CommandRunner {
 
     public func run(_ argv: [String], cwd: String?, timeout: TimeInterval) -> (code: Int32, stdout: String)? {
         LocalCommandRunner().run(self.argv(for: argv, cwd: cwd), cwd: nil, timeout: timeout)
+    }
+
+    public func runCapturingStderr(_ argv: [String], cwd: String?, timeout: TimeInterval) -> CommandOutput? {
+        LocalCommandRunner().runCapturingStderr(self.argv(for: argv, cwd: cwd), cwd: nil, timeout: timeout)
     }
 }

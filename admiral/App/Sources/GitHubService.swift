@@ -75,12 +75,12 @@ final class GitHubService: @unchecked Sendable {
     private func runResult(_ args: [String], cwd: String) async -> (code: Int32, stdout: Data, stderr: String) {
         await limiter.acquire()
         if let remote {
-            // The runner hands back no stderr, so a rate limit here is not seen to penalize;
-            // the shared per-second cap above still holds for these calls too.
-            guard let r = remote.run(["gh"] + args, cwd: cwd, timeout: Self.remoteTimeout) else {
+            // Same rate-limit back-off and error text as the local path: the runner keeps stderr.
+            guard let r = remote.runCapturingStderr(["gh"] + args, cwd: cwd, timeout: Self.remoteTimeout) else {
                 return (1, Data(), "gh did not run in the agent's environment")
             }
-            return (r.code, Data(r.stdout.utf8), "")
+            if r.code != 0, Self.looksRateLimited(r.stderr) { await limiter.penalize() }
+            return (r.code, Data(r.stdout.utf8), r.stderr)
         }
         let p = Process()
         p.executableURL = URL(fileURLWithPath: ghPath)
