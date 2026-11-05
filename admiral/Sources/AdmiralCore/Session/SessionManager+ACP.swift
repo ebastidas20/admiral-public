@@ -129,7 +129,12 @@ extension SessionManager {
             question: { [weak self] questions in self?.acpNeedsUser(id, .question(questions)) },
             requestResolved: { [weak self] in self?.acpRequestsResolved(id) },
             queueChanged: { [weak self] queued in self?.update(id) { $0.acpQueued = queued } },
-            update: { [weak self] _ in self?.update(id) { $0.lastActivityAt = Date() } },
+            update: { [weak self] event in
+                self?.update(id) {
+                    $0.lastActivityAt = Date()
+                    if case .availableCommands(let commands) = event { $0.acpCommands = commands }
+                }
+            },
             configOptionsChanged: { [weak self] options in self?.update(id) { $0.acpConfigOptions = options } },
             log: { AcpLog.append($0, to: logURL) })
     }

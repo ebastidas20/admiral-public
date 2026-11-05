@@ -94,7 +94,7 @@ final class AcpMessagesTests: XCTestCase {
             .plan([AcpPlanEntry(content: "a", status: "pending", priority: "high")]))
         XCTAssertEqual(
             decode(#"{"sessionUpdate":"available_commands_update","availableCommands":[{"name":"init"}]}"#),
-            .availableCommands(["init"]))
+            .availableCommands([AcpCommandInfo(name: "init")]))
         XCTAssertEqual(
             decode(#"{"sessionUpdate":"current_mode_update","currentModeId":"plan"}"#), .currentMode("plan"))
         XCTAssertEqual(decode(#"{"sessionUpdate":"compaction_update"}"#), .compaction)

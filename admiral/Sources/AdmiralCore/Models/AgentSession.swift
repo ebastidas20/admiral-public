@@ -64,6 +64,9 @@ public struct AgentSession: Identifiable, Sendable, Hashable {
     /// An ACP tab's config options (mode, model, effort, …) as the agent last reported them —
     /// what the composer's pickers show. Always empty on a PTY tab.
     public var acpConfigOptions: [AcpConfigOption] = []
+    /// An ACP tab's slash commands as the agent last reported them (replaced wholesale on each
+    /// update) — what the composer's `/` menu offers. Always empty on a PTY tab.
+    public var acpCommands: [AcpCommandInfo] = []
     /// Distinct git repos this session has written to, aggregated from its hook log.
     /// Ephemeral (rebuilt from the on-disk log); not part of the initializer.
     public var touchedRepos: [TouchedRepo] = []

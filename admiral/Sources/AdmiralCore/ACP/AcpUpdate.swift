@@ -24,7 +24,7 @@ public enum AcpUpdate: Sendable, Equatable {
     case toolCallUpdate(
         id: String, status: String?, content: String?, locations: [String], rawInput: JSONValue? = nil)
     case plan([AcpPlanEntry])
-    case availableCommands([String])
+    case availableCommands([AcpCommandInfo])
     case currentMode(String)
     /// `config_option_update`: the agent's FULL option list.
     case configOptions([AcpConfigOption])
@@ -74,7 +74,11 @@ public enum AcpUpdate: Sendable, Equatable {
             })
         case "available_commands_update":
             return .availableCommands((u["availableCommands"]?.arrayValue ?? []).compactMap {
-                $0["name"]?.stringValue
+                guard let name = $0["name"]?.stringValue else { return nil }
+                return AcpCommandInfo(
+                    name: name.hasPrefix("/") ? String(name.dropFirst()) : name,
+                    description: $0["description"]?.stringValue ?? "",
+                    hint: $0["input"]?["hint"]?.stringValue)
             })
         case "current_mode_update": return .currentMode(u["currentModeId"]?.stringValue ?? "")
         case "config_option_update": return .configOptions(AcpConfigOption.decodeAll(u))

@@ -845,10 +845,27 @@ struct ChatComposer: View {
     @State private var attachments: [String] = []
     /// An ACP option the agent refused, until the next pick.
     @State private var optionError: String?
+    @State private var slashSelection = 0
+    /// The text Esc closed the `/` menu on; it stays closed until the text changes.
+    @State private var slashDismissedText: String?
     @FocusState private var focused: Bool
 
     private var hasContent: Bool {
         !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !attachments.isEmpty
+    }
+
+    private var slashCandidates: [AcpCommandInfo] {
+        guard session.backend != .pty, text != slashDismissedText,
+              let partial = SlashCommandPicker.query(in: text) else { return [] }
+        return SlashCommandPicker.candidates(partial, commands: session.acpCommands)
+    }
+
+    private var slashOpen: Bool { !slashCandidates.isEmpty }
+
+    /// The hint of the command whose "/name " is the whole text, shown after it.
+    private var slashHint: String? {
+        guard session.backend != .pty else { return nil }
+        return session.acpCommands.first { $0.hint != nil && text == SlashCommandPicker.insert($0) }?.hint
     }
 
     var body: some View {
@@ -861,6 +878,11 @@ struct ChatComposer: View {
                         .font(.system(size: 14)).foregroundStyle(Theme.secondaryText)
                         .padding(.top, 1).padding(.leading, 5)
                         .allowsHitTesting(false)
+                } else if let slashHint {
+                    (Text(text).foregroundColor(.clear) + Text(slashHint).foregroundColor(Theme.secondaryText))
+                        .font(.system(size: 14))
+                        .padding(.top, 1).padding(.leading, 5)
+                        .allowsHitTesting(false)
                 }
                 TextEditor(text: $text)
                     .font(.system(size: 14))
@@ -869,11 +891,16 @@ struct ChatComposer: View {
                     .fixedSize(horizontal: false, vertical: true)
                     .focused($focused)
                     .onKeyPress(.return, phases: .down) { press in
+                        if slashOpen { acceptSlash(); return .handled }
                         if press.modifiers.contains(.shift) || press.modifiers.contains(.option) { return .ignored }
                         send()
                         return .handled
                     }
+                    .onKeyPress(.tab) { slashOpen ? { acceptSlash(); return .handled }() : .ignored }
+                    .onKeyPress(.upArrow) { moveSlash(-1) }
+                    .onKeyPress(.downArrow) { moveSlash(1) }
                     .onKeyPress(.escape) {
+                        if slashOpen { slashDismissedText = text; return .handled }
                         guard text.isEmpty, isWorking else { return .ignored }
                         model.interrupt(session)
                         return .handled
@@ -893,14 +920,42 @@ struct ChatComposer: View {
                                    onStop: { model.interrupt(session) }, onSend: send)
             }
         }
-        .composerChrome(focused: focused)
+        .composerBox(focused: focused || slashOpen)
+        // Anchored above the box: a zero-height strip on its top edge, the list hanging up from it.
+        .overlay(alignment: .top) {
+            if slashOpen {
+                Color.clear.frame(maxWidth: .infinity).frame(height: 0)
+                    .overlay(alignment: .bottom) {
+                        AcpSlashMenu(candidates: slashCandidates,
+                                     selection: min(slashSelection, slashCandidates.count - 1)) { acceptSlash($0) }
+                            .fixedSize(horizontal: false, vertical: true)
+                            .padding(.bottom, 6)
+                    }
+            }
+        }
+        .composerColumn()
         .dropDestination(for: URL.self) { urls, _ in
             let files = urls.filter(\.isFileURL).map(\.path)
             attachments.append(contentsOf: files)
             return !files.isEmpty
         }
         .onAppear { focused = true }
-        .onChange(of: session.id) { text = ""; attachments = []; optionError = nil; focused = true }
+        .onChange(of: text) { slashSelection = 0 }
+        .onChange(of: session.id) {
+            text = ""; attachments = []; optionError = nil; slashDismissedText = nil; focused = true
+        }
+    }
+
+    private func moveSlash(_ delta: Int) -> KeyPress.Result {
+        guard slashOpen else { return .ignored }
+        slashSelection = GroupMentionPicker.move(
+            min(slashSelection, slashCandidates.count - 1), by: delta, count: slashCandidates.count)
+        return .handled
+    }
+
+    private func acceptSlash(_ index: Int? = nil) {
+        guard slashOpen else { return }
+        text = SlashCommandPicker.insert(slashCandidates[min(index ?? slashSelection, slashCandidates.count - 1)])
     }
 
     private var chips: some View {

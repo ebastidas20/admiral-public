@@ -96,3 +96,38 @@ struct AcpOptionErrorCaption: View {
             .accessibilityIdentifier("acp-option-error")
     }
 }
+
+/// The `/` menu above an ACP tab's composer: `/name` in mono, the description beside it.
+/// Same look as the group `@` picker.
+struct AcpSlashMenu: View {
+    let candidates: [AcpCommandInfo]
+    let selection: Int
+    let pick: (Int) -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            ForEach(candidates.indices, id: \.self) { i in row(i) }
+        }
+        .padding(4)
+        .background(RoundedRectangle(cornerRadius: 10).fill(Theme.bubbleBackground))
+        .overlay(RoundedRectangle(cornerRadius: 10).stroke(Theme.bubbleBorder))
+        .shadow(color: .black.opacity(0.2), radius: 15, y: 8)
+        .accessibilityIdentifier("acp-slash-menu")
+    }
+
+    private func row(_ i: Int) -> some View {
+        let command = candidates[i]
+        return HStack(spacing: 10) {
+            Text("/\(command.name)")
+                .font(.system(size: 13, design: .monospaced)).foregroundStyle(Theme.primaryText)
+            Text(command.description)
+                .font(.system(size: 11.5)).foregroundStyle(Theme.secondaryText).lineLimit(1)
+            Spacer(minLength: 8)
+        }
+        .padding(.horizontal, 9).padding(.vertical, 6)
+        .background(RoundedRectangle(cornerRadius: 6).fill(i == selection ? Theme.rowSelection : Color.clear))
+        .contentShape(Rectangle())
+        .onTapGesture { pick(i) }
+        .accessibilityIdentifier("acp-slash-\(command.name)")
+    }
+}
