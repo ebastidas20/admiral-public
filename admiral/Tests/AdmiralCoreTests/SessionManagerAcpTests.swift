@@ -528,6 +528,18 @@ final class SessionManagerAcpTests: XCTestCase {
         XCTAssertEqual(launched.last?.params(of: "session/set_config_option").last?["configId"]?.stringValue, "model")
     }
 
+    func testSessionStartWithoutOptionsKeepsTheSavedCatalog() async {
+        let store = AcpOptionCatalogStore(defaults: defaults)
+        manager.acpOptionCatalog = store
+        _ = await readyTab(advertisingAgent())
+        let saved = store.load(agentID: ppt.id)
+        XCTAssertFalse(saved.isEmpty)
+        let bare = ScriptedAgent()
+        bare.on("session/new") { _ in .result(.object(["sessionId": .string("s9")])) }
+        _ = await readyTab(bare)
+        XCTAssertEqual(store.load(agentID: ppt.id), saved, "an answer with no options never wipes the catalog")
+    }
+
     func testRefusedPickIsTheOptionNameAndTheAgentsMessage() async {
         let agent = advertisingAgent()
         agent.on("session/set_config_option") { _ in .error(-32602, "unknown model") }

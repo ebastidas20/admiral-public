@@ -290,6 +290,16 @@ final class AcpSessionControllerTests: XCTestCase {
         XCTAssertEqual(c.configOptions.first?.currentValue, "default", "the agent's restored mode stands")
     }
 
+    func testForkAppliesStartingOptions() async {
+        let agent = optionsAgent(.object(["sessionCapabilities": .object(["fork": .object([:])])]))
+        agent.on("session/fork") { _ in .result(Self.advertised) }
+        let c = make(agent, options: ["mode": "plan"])
+        await c.start(.fork(acpSessionID: "s1"))
+        XCTAssertEqual(phases.last, .ready)
+        XCTAssertEqual(agent.params(of: "session/set_config_option").first?["configId"]?.stringValue, "mode")
+        XCTAssertEqual(agent.params(of: "session/set_config_option").first?["value"]?.stringValue, "plan")
+    }
+
     func testConfigOptionUpdateAndCurrentModeUpdateReachTheTab() async {
         let agent = optionsAgent()
         let c = await ready(agent)

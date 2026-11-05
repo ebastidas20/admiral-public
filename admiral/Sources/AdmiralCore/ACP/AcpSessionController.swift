@@ -293,8 +293,9 @@ public final class AcpSessionController: SessionDriver {
         acpSessionID = sessionID
 
         configOptions = AcpConfigOption.decodeAll(result)
-        // Only a new session: a restored or forked one keeps its own mode, which the agent restores.
-        if start == .new { try await applyStartingOptions(sessionID: sessionID) }
+        // A new or forked session is a new agent session and gets the starting options; a restore
+        // keeps its own mode, which the agent resumes from the session.
+        if case .restore = start {} else { try await applyStartingOptions(sessionID: sessionID) }
 
         guard phase == .connecting else { return }
         setPhase(.ready)

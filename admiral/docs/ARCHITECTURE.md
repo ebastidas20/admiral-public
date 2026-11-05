@@ -111,7 +111,7 @@ agent ◀─stdio─▶ JSONRPCConnection ─▶ AcpSessionController ─▶ Tra
 - **Starting options.** The agent's own config options (mode, model, …; a deprecated `modes`
   object reads as one `mode` option), saved per agent as `defaultConfigOptions` and picked in
   Settings from `AcpOptionCatalogStore` (what the agent last advertised). No separate default
-  mode. Applied only to a new session; an option or value the agent no longer offers is
+  mode. Applied to a new or forked session, never a restore; an option or value the agent no longer offers is
   skipped and logged, never sent.
 - **Composer and Chat (ACP tabs only).** Option chips set an option live (a refusal shows
   above the text); `/` lists the agent's `available_commands`; `@` lists the agent's files

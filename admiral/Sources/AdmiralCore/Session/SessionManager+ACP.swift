@@ -124,7 +124,8 @@ extension SessionManager {
                     id, phase, controller: controller.value, logURL: logURL, logStart: logStart, command: command)
             },
             sessionStarted: { [weak self] acpSessionID, caps, options in
-                self?.acpOptionCatalog?.save(options, agentID: agentID)
+                // An answer without options (resume/load may omit them) must not wipe the catalog.
+                if !options.isEmpty { self?.acpOptionCatalog?.save(options, agentID: agentID) }
                 self?.acpSessionStarted(id, acpSessionID, capabilities: caps)
             },
             settledIdle: { [weak self] in self?.acpSettledIdle(id) },
@@ -348,7 +349,7 @@ extension SessionManager {
     /// exec, every 5 s (each call is a `docker exec`), and only once the probe found git there.
     /// Nil = no git to ask; the branch is left alone rather than read from the wrong machine.
     func gitAccess(for session: AgentSession) -> (runner: CommandRunner, interval: TimeInterval)? {
-        guard session.backend != .pty else { return (LocalCommandRunner(), 2) }
+        guard session.backend.isACP else { return (LocalCommandRunner(), 2) }
         guard session.acpCapabilities?.isEnabled(.branch) == true,
               let runner = acpRunner(for: session) else { return nil }
         return (runner, 5)

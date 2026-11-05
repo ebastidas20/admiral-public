@@ -149,7 +149,7 @@ final class AppModel: ObservableObject {
     /// exec) for an ACP tab whose record enables PR watch; nil otherwise.
     func github(for session: AgentSession) -> GitHubService? {
         guard session.canQueryPRs else { return nil }
-        guard session.backend != .pty else { return github }
+        guard session.backend.isACP else { return github }
         if let made = acpGitHub[session.id] { return made }
         guard let runner = sessions.acpRunner(for: session) else { return nil }
         let made = GitHubService(runner: runner)
@@ -1607,7 +1607,7 @@ final class AppModel: ObservableObject {
     /// When `config.features.chatView` is off, every session is forced to Terminal.
     func viewMode(for session: AgentSession) -> ChatLedger.Mode {
         // An ACP tab has no terminal: Chat is all there is, whatever the Chat flag says.
-        guard session.backend == .pty else { return .chat }
+        guard !session.backend.isACP else { return .chat }
         guard config.features.chatView else { return .terminal }
         guard session.agentType.isManaged, let sid = session.claudeSessionID else { return .terminal }
         if let cached = viewModeCache[sid] { return cached }
@@ -1626,14 +1626,14 @@ final class AppModel: ObservableObject {
 
     /// ⌘J has something to switch to: a PTY tab with a chat. An ACP tab is Chat only.
     var selectedCanToggleView: Bool {
-        selectedHasChat && sessions.selectedSession?.backend == .pty
+        selectedHasChat && sessions.selectedSession?.backend.isACP == false
     }
 
     /// ⌘J / the toolbar switch. Written through to the file, so the next AskUserQuestion
     /// the session makes is routed by the mode it is in now.
     /// No-op when `config.features.chatView` is off (chat stays unavailable).
     func setViewMode(_ mode: ChatLedger.Mode, for session: AgentSession) {
-        guard config.features.chatView, session.backend == .pty else { return }
+        guard config.features.chatView, !session.backend.isACP else { return }
         guard session.agentType.isManaged, let sid = session.claudeSessionID else { return }
         ChatLedger.setMode(mode, base: sessions.supportDir, session: sid)
         objectWillChange.send()
@@ -1654,7 +1654,7 @@ final class AppModel: ObservableObject {
             message += (message.isEmpty ? "" : " ") + paths.trimmingCharacters(in: .whitespaces)
         }
         guard !message.isEmpty else { return }
-        if session.backend == .pty {
+        if !session.backend.isACP {
             sessions.sendTyped(session.id, text: message)
         } else {
             sessions.sendACP(session.id, text: message, mentions: mentions)

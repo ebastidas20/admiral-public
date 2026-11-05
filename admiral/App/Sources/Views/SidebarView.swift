@@ -477,7 +477,7 @@ struct SessionRow: View {
             } else {
                 Button("Fork Session") { model.fork(session.id) }
             }
-            if session.backend != .pty {
+            if session.backend.isACP {
                 Button("Show ACP Log") { model.showACPLog(session) }
             }
             // Managed (claude) sessions only — reload resumes the transcript, which a plain

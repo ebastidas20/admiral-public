@@ -95,6 +95,6 @@ extension AgentSession {
     /// ACP tab only once its record says PR watch is on — gh present and logged in where the
     /// agent's files are. The one answer PR watch and the app's PR chips both read.
     public var canQueryPRs: Bool {
-        backend == .pty || acpCapabilities?.isEnabled(.prWatch) == true
+        !backend.isACP || acpCapabilities?.isEnabled(.prWatch) == true
     }
 }

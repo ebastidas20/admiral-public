@@ -59,7 +59,7 @@ extension AppModel {
     /// Why Fork is off for `session`, or nil when it can fork. A PTY tab always can; an ACP tab
     /// by its capability record — the same answer `SessionManager.forkACP` gates on.
     func forkDisabledReason(_ session: AgentSession) -> String? {
-        guard session.backend != .pty else { return nil }
+        guard session.backend.isACP else { return nil }
         guard let record = session.acpCapabilities else {
             return session.connectError == nil ? "The agent is still connecting" : "The agent is not running"
         }

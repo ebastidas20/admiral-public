@@ -77,7 +77,7 @@ extension SessionManager {
     /// its claude reaches the bridge over the Unix-socket relay instead.
     public func acpTokenIsLive(_ token: String) -> Bool {
         var found = false
-        for session in sessions where session.backend != .pty {
+        for session in sessions where session.backend.isACP {
             if SessionMCPEndpoint.constantTimeEquals(session.token, token) { found = true }
         }
         return found

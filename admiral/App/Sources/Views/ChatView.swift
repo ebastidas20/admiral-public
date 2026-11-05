@@ -124,7 +124,7 @@ struct ChatView: View {
             })
             .accessibilityIdentifier("chat-content")
 
-            if session.backend != .pty { AcpTabStrip(session: session) }
+            if session.backend.isACP { AcpTabStrip(session: session) }
             ChatComposer(session: session, isWorking: session.status == .busy, onSend: jumpToBottom)
         }
         .paneBackground(Theme.contentBackground)
@@ -830,7 +830,7 @@ private struct NeedsCard: View {
                         .buttonStyle(.borderedProminent).tint(Theme.accent)
                     Button("Deny") { model.interrupt(session) }
                     // An ACP tab has no terminal to open.
-                    if session.backend == .pty {
+                    if !session.backend.isACP {
                         Button("Open in terminal") { model.setViewMode(.terminal, for: session) }
                             .buttonStyle(.link)
                     }
@@ -897,7 +897,7 @@ struct ChatComposer: View {
     }
 
     private var slashCandidates: [AcpCommandInfo] {
-        guard session.backend != .pty, text != menuDismissedText,
+        guard session.backend.isACP, text != menuDismissedText,
               let partial = SlashCommandPicker.query(in: text) else { return [] }
         return SlashCommandPicker.candidates(partial, commands: session.acpCommands)
     }
@@ -906,7 +906,7 @@ struct ChatComposer: View {
 
     /// The `@` query, on an ACP tab, when the `/` menu's text shape is not the one typed.
     private var fileQuery: FileMentionPicker.Query? {
-        guard session.backend != .pty, SlashCommandPicker.query(in: text) == nil else { return nil }
+        guard session.backend.isACP, SlashCommandPicker.query(in: text) == nil else { return nil }
         return FileMentionPicker.query(in: text)
     }
 
@@ -936,7 +936,7 @@ struct ChatComposer: View {
 
     /// The hint of the command whose "/name " is the whole text, shown after it.
     private var slashHint: String? {
-        guard session.backend != .pty else { return nil }
+        guard session.backend.isACP else { return nil }
         return session.acpCommands.first { $0.hint != nil && text == SlashCommandPicker.insert($0) }?.hint
     }
 
@@ -987,7 +987,7 @@ struct ChatComposer: View {
                 Button(action: attach) { Image(systemName: "plus") }
                     .buttonStyle(.plain).foregroundStyle(Theme.secondaryText)
                     .help("Attach files")
-                if session.backend != .pty {
+                if session.backend.isACP {
                     AcpOptionChips(session: session) { optionError = $0 }
                 }
                 ComposerHint(isWorking: isWorking)
@@ -1094,7 +1094,7 @@ struct ChatComposer: View {
 
     private func send() {
         guard hasContent else { return }
-        let mentions = session.backend == .pty ? [] : FileMentionPicker.mentions(in: text, files: knownFiles)
+        let mentions = session.backend.isACP ? FileMentionPicker.mentions(in: text, files: knownFiles) : []
         model.sendChat(text, attachments: attachments, mentions: mentions, to: session)
         text = ""
         attachments = []

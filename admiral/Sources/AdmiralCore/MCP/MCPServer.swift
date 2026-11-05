@@ -483,7 +483,7 @@ public struct MCPServer {
         }
         // A schedule's run is a claude tab on this Mac; an ACP caller's would have to be on its
         // agent, which the scheduler cannot launch yet.
-        if name.hasPrefix("schedule_"), me.backend != .pty {
+        if name.hasPrefix("schedule_"), me.backend.isACP {
             return .failure("schedules can't target ACP agents yet")
         }
         // An unknown target falls through, so the tool itself answers "no station".
