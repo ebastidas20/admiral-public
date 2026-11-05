@@ -40,6 +40,8 @@ public struct ChatEvent: Codable, Equatable, Sendable {
     public var id: Int?
     /// The call a `.tool` event shows. Never written to disk.
     public var tool: ChatTool?
+    /// This notice is a clear marker: nothing older is shown (`ChatHistory`). Never written to disk.
+    public var cleared = false
 
     enum CodingKeys: String, CodingKey { case ts, kind, text, source, questions }
 

@@ -165,7 +165,10 @@ final class AcpMessagesTests: XCTestCase {
             .availableCommands([AcpCommandInfo(name: "init")]))
         XCTAssertEqual(
             decode(#"{"sessionUpdate":"current_mode_update","currentModeId":"plan"}"#), .currentMode("plan"))
-        XCTAssertEqual(decode(#"{"sessionUpdate":"compaction_update"}"#), .compaction)
+        XCTAssertEqual(decode(#"{"sessionUpdate":"compaction_update"}"#), .compaction(status: nil, error: nil))
+        XCTAssertEqual(
+            decode(#"{"sessionUpdate":"compaction_update","compactionId":"c1","status":"failed","error":"Too short."}"#),
+            .compaction(status: "failed", error: "Too short."))
         XCTAssertEqual(decode(#"{"sessionUpdate":"weird"}"#), .unknown("weird"))
         XCTAssertEqual(AcpUpdate.decode(json(#"{"sessionId":"S","update":{"sessionUpdate":"plan"}}"#))?.sessionID, "S")
         XCTAssertNil(AcpUpdate.decode(json("{}")))

@@ -335,7 +335,10 @@ exactly what `commission` injected, then remove it. Use a scratch dir under your
   **mirror** at `<base>/acp/<sid>.jsonl` (traffic log beside it, `<sid>.log`, bearer masked);
   Chat, TabRun and the Anthropic endpoint read that like any transcript. A tool result there
   carries a claude-shaped `toolUseResult` (an edit's `filePath/oldString/newString/type`, a
-  command's `stdout`). The composer pieces are **ACP tabs only**: option chips
+  command's `stdout`). A `/command` prompt (`AcpSlashCommand`) goes out bare — no goals
+  reminder, never as a steer — and is mirrored as claude writes one, so Chat shows it as a
+  command; a `/clear` that ended normally writes a marker (`ChatHistory.clearedField`) and Chat
+  shows nothing older; a compaction shows when it completes or fails. The composer pieces are **ACP tabs only**: option chips
   (`acpConfigOptions` — mode, model, … — set on the agent, a refusal shown above the text), the
   `/` menu (`acpCommands`, `SlashCommandPicker`; a command's `input.hint` after it), and the `@`
   menu (`FileMentionPicker` over `SessionManager.acpFiles` — `git ls-files -z` through the tab's

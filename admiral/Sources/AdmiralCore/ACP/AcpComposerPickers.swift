@@ -14,6 +14,29 @@ public struct AcpCommandInfo: Hashable, Sendable, Codable {
     }
 }
 
+/// A prompt that is a slash command: `/name` (letters, digits, `-`, `_`, `:`) then optional
+/// arguments. "/path/to/file is broken" is not one — its name would hold a "/".
+public struct AcpSlashCommand: Equatable, Sendable {
+    public var name: String
+    public var args: String
+
+    public init?(_ prompt: String) {
+        let text = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard text.hasPrefix("/") else { return nil }
+        let body = text.dropFirst()
+        let name = body.prefix { !$0.isWhitespace }
+        guard !name.isEmpty, name.allSatisfy({ $0.isLetter || $0.isNumber || "-_:".contains($0) }) else { return nil }
+        self.name = String(name)
+        self.args = body.dropFirst(name.count).trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// The command as claude's own transcript records one (what Chat shows as a command line).
+    public var transcriptText: String {
+        "<command-name>/\(name)</command-name>\n<command-message>\(name)</command-message>\n"
+            + "<command-args>\(args)</command-args>"
+    }
+}
+
 /// The composer's `/` menu: pure text logic, no UI.
 public enum SlashCommandPicker {
     /// Open only while the WHOLE text is "/" + name characters (no whitespace yet): the partial after "/".

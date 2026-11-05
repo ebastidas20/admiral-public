@@ -225,6 +225,63 @@ final class TranscriptMirrorTests: XCTestCase {
         XCTAssertEqual(r, "Hello")
     }
 
+    /// What Chat draws for the mirror: each item as "kind: text".
+    private func chat(_ url: URL) -> [String] {
+        ChatHistory.live(base: dir, session: "s1", transcriptPath: url.path).items.map { item in
+            switch item {
+            case let .prompt(_, text, _, _): "prompt: \(text)"
+            case let .reply(_, text, _): "reply: \(text)"
+            case let .notice(_, text, _): "notice: \(text)"
+            default: "other"
+            }
+        }
+    }
+
+    /// A slash command shows as a command, as in a claude tab; a path is still a prompt.
+    func testSlashCommandIsWrittenAsACommand() {
+        let (m, url) = make()
+        m.userPrompt("/compact keep the plan")
+        m.endTurn()
+        m.commandFinished(succeeded: true)
+        m.userPrompt("/path/to/file is broken")
+        m.endTurn()
+        XCTAssertEqual(chat(url), ["notice: /compact keep the plan", "prompt: /path/to/file is broken"])
+    }
+
+    /// A `/clear` the agent ended normally hides everything older; one that failed hides nothing.
+    func testClearHidesTheConversationBeforeIt() {
+        let (m, url) = make()
+        m.userPrompt("hi")
+        m.apply(.agentMessage("Hello"))
+        m.endTurn()
+        m.userPrompt("/clear")
+        m.endTurn()
+        m.commandFinished(succeeded: false)
+        XCTAssertEqual(chat(url), ["prompt: hi", "reply: Hello", "notice: /clear"])
+
+        m.userPrompt("/clear")
+        m.endTurn()
+        m.commandFinished(succeeded: true)
+        m.userPrompt("again")
+        m.endTurn()
+        m.commandFinished(succeeded: true)
+        XCTAssertEqual(chat(url), ["notice: Conversation cleared", "prompt: again"])
+        let page = ChatHistory.page(base: dir, session: "s1", transcriptPath: url.path, before: nil)
+        XCTAssertFalse(page.hasMore, "no older page loads past a clear")
+        XCTAssertEqual(page.items.count, 2)
+    }
+
+    /// A finished compaction and a failed one each say so; one in progress says nothing.
+    func testCompactionOutcomesAreNotices() {
+        let (m, url) = make()
+        m.apply(.compaction(status: "in_progress", error: nil))
+        m.apply(.compaction(status: "failed", error: "Not enough messages to compact."))
+        m.apply(.compaction(status: "completed", error: nil))
+        XCTAssertEqual(chat(url), [
+            "notice: Compaction failed: Not enough messages to compact.", "notice: Conversation compacted",
+        ])
+    }
+
     func testReplayedUserMessageIsAUserLine() throws {
         let (m, url) = make()
         m.apply(.userMessage("old"))

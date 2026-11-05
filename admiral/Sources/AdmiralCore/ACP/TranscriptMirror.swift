@@ -22,6 +22,11 @@ import Foundation
 /// claude-agent-acp sends the snippet first and the whole file last), and a call that ran in a
 /// terminal gets `{stdout}` — the output streamed for it (the last 64 KB), else its text.
 ///
+/// A prompt that is a slash command (`AcpSlashCommand`) is written as claude writes one, so Chat
+/// shows it as a command. A `/clear` the agent ended normally (`commandFinished`) writes the
+/// clear marker (`ChatHistory.clearedField`): Chat shows nothing older than it. A compaction
+/// that completed writes claude's compact-summary line; one that failed, its error.
+///
 /// Contract: call `endTurn()` on EVERY turn exit (any stop reason, error, cancel, transport close).
 /// It is idempotent (a second call writes nothing). `deinit` flushes pending text as a last resort.
 /// Write errors are swallowed: a mirror that cannot write must never take the session down.
@@ -42,6 +47,8 @@ public final class TranscriptMirror {
     static let terminalOutputCap = 64 * 1024
     /// Tool calls waiting for their input, in arrival order (see the type's note).
     private var heldTools: [(id: String, name: String, input: JSONValue)] = []
+    /// The command the open turn runs (`clear` for "/clear"); nil for a plain prompt.
+    private var runningCommand: String?
 
     public static func url(base: URL, session: String) -> URL {
         base.appendingPathComponent("acp", isDirectory: true).appendingPathComponent("\(session).jsonl")
@@ -55,7 +62,21 @@ public final class TranscriptMirror {
 
     public func userPrompt(_ prompt: String) {
         flush()
-        writeUser(.string(prompt))
+        let command = AcpSlashCommand(prompt)
+        runningCommand = command?.name
+        writeUser(.string(command?.transcriptText ?? prompt))
+    }
+
+    /// The prompt's turn is over (`succeeded` = it ended with `end_turn`): a `/clear` that
+    /// succeeded writes the clear marker.
+    public func commandFinished(succeeded: Bool) {
+        defer { runningCommand = nil }
+        guard succeeded, runningCommand == "clear" else { return }
+        flush()
+        write(type: "user", message: .object([
+            "role": .string("user"),
+            "content": .string("<local-command-stdout>\(ChatHistory.clearedNotice)</local-command-stdout>"),
+        ]), extra: [ChatHistory.clearedField: .bool(true)])
     }
 
     public func endTurn() { flush() }
@@ -107,7 +128,20 @@ public final class TranscriptMirror {
             }
             writeAssistant([toolUse(
                 id: "plan-" + UUID().uuidString, name: "TodoWrite", input: .object(["todos": .array(todos)]))])
-        case .terminalExit, .availableCommands, .currentMode, .configOptions, .compaction, .unknown:
+        case let .compaction(status, error):
+            switch status {
+            case "completed":
+                flush()
+                write(type: "user", message: .object([
+                    "role": .string("user"), "content": .string("Conversation compacted."),
+                ]), extra: ["isCompactSummary": .bool(true)])
+            case "failed":
+                flush()
+                writeUser(.string("<local-command-stderr>Compaction failed: \(error ?? "no reason given")</local-command-stderr>"))
+            default:
+                break
+            }
+        case .terminalExit, .availableCommands, .currentMode, .configOptions, .unknown:
             break
         }
     }
@@ -214,7 +248,8 @@ public final class TranscriptMirror {
         return f
     }()
 
-    private func write(type: String, message: JSONValue, toolUseResult: JSONValue? = nil) {
+    private func write(type: String, message: JSONValue, toolUseResult: JSONValue? = nil,
+                       extra: [String: JSONValue] = [:]) {
         let uuid = UUID().uuidString
         var fields: [String: JSONValue] = [
             "type": .string(type),
@@ -226,6 +261,7 @@ public final class TranscriptMirror {
             "message": message,
         ]
         if let toolUseResult { fields["toolUseResult"] = toolUseResult }
+        fields.merge(extra) { old, _ in old }
         lastUUID = uuid
         append(.object(fields))
     }

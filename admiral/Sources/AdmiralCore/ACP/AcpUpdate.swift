@@ -44,7 +44,8 @@ public enum AcpUpdate: Sendable, Equatable {
     case currentMode(String)
     /// `config_option_update`: the agent's FULL option list.
     case configOptions([AcpConfigOption])
-    case compaction
+    /// `compaction_update`: `status` in_progress | completed | failed | cancelled; `error` why it failed.
+    case compaction(status: String?, error: String?)
     case unknown(String)
 
     /// The notification's updates: the primary one first, then what rode on its `_meta`
@@ -135,7 +136,8 @@ public enum AcpUpdate: Sendable, Equatable {
             })
         case "current_mode_update": return .currentMode(u["currentModeId"]?.stringValue ?? "")
         case "config_option_update": return .configOptions(AcpConfigOption.decodeAll(u))
-        case "compaction_update": return .compaction
+        case "compaction_update":
+            return .compaction(status: u["status"]?.stringValue, error: u["error"]?.stringValue)
         default: return .unknown(kind)
         }
     }

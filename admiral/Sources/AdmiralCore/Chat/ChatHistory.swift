@@ -13,8 +13,14 @@ import Foundation
 /// **Tool calls** show only when asked for (`tools: true`, an ACP tab's Chat): each `tool_use`
 /// opens a `.tool` event, `.running`, and its `tool_result` completes it in place. The PTY Chat
 /// never asks, so it never shows them.
+///
+/// **A clear** (an ACP tab's `/clear`, marked by the mirror with `clearedField`) ends the history:
+/// nothing older than the last one is shown, from either source, and no older page loads.
 public enum ChatHistory {
     public static let pageSize = 30
+    /// The transcript field that marks a user line as the clear marker, and what Chat shows for it.
+    public static let clearedField = "admiralCleared"
+    public static let clearedNotice = "Conversation cleared"
     /// How much of the transcript the live window parses each refresh.
     public static let liveTailLines = 800
 
@@ -28,8 +34,7 @@ public enum ChatHistory {
     public static func live(base: URL, session: String, transcriptPath: String?,
                             limit: Int = pageSize, tools: Bool = false) -> ChatTranscript {
         let transcript = transcriptPath.map { transcriptEvents(path: $0, tail: liveTailLines, tools: tools) } ?? []
-        let events = timeline(transcript: transcript,
-                              ledger: ChatLedger.read(base: base, session: session))
+        let events = timeline(sinceClear: transcript, ledger: ChatLedger.read(base: base, session: session))
         return ChatTranscript(items: Array(ChatFolder.fold(events).items.suffix(limit)))
     }
 
@@ -40,12 +45,21 @@ public enum ChatHistory {
     public static func page(base: URL, session: String, transcriptPath: String?,
                             before cursor: String?, limit: Int = pageSize, tools: Bool = false) -> Page {
         let transcript = transcriptPath.map { transcriptEvents(path: $0, tail: nil, tools: tools) } ?? []
-        let events = timeline(transcript: transcript,
+        let events = timeline(sinceClear: transcript,
                               ledger: ChatLedger.read(base: base, session: session, tail: nil))
         let all = ChatFolder.fold(events).items
         let cutoff = cursor.flatMap(date)
         let older = cutoff.map { cut in all.filter { (date($0.ts) ?? .distantPast) < cut } } ?? all
         return Page(items: Array(older.suffix(limit)), hasMore: older.count > limit)
+    }
+
+    /// `timeline` of what follows the transcript's last clear marker (itself kept, as the notice):
+    /// older transcript events and ledger events from before it are dropped.
+    static func timeline(sinceClear transcript: [ChatEvent], ledger: [ChatEvent]) -> [ChatEvent] {
+        guard let i = transcript.lastIndex(where: { $0.kind == .notice && $0.cleared }),
+              let cut = date(transcript[i].ts) else { return timeline(transcript: transcript, ledger: ledger) }
+        return timeline(transcript: Array(transcript[i...]),
+                        ledger: ledger.filter { (date($0.ts) ?? .distantPast) >= cut })
     }
 
     /// Merge the two sources into one time-ordered stream (see the type's comment for who
@@ -180,6 +194,11 @@ public enum ChatHistory {
 
         // user
         if obj["isCompactSummary"] as? Bool == true { return notice("Conversation compacted") }
+        if obj[clearedField] as? Bool == true {
+            var event = notice(clearedNotice)
+            event.cleared = true
+            return event
+        }
         guard let text = userText(message["content"]) else { return nil }
         if obj["isMeta"] as? Bool == true {
             // Meta lines are the harness talking to the model. Hook feedback is the one worth

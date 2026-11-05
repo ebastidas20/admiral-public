@@ -141,7 +141,7 @@ public final class AcpSessionController: SessionDriver {
 
         /// A slash command (`/clear`, `/compact args`): the agent runs it only when the prompt
         /// starts with it, so it goes out bare and never as a steer.
-        var isCommand: Bool { raw.hasPrefix("/") }
+        var isCommand: Bool { AcpSlashCommand(raw) != nil }
 
         /// Through `beforePrompt` once; an already-hooked item, or a command, passes as it is.
         func hooked(by hooks: AcpTurnHooks?) async -> Outgoing {
@@ -592,6 +592,8 @@ public final class AcpSessionController: SessionDriver {
 
     private func promptFinished(_ result: Result<JSONValue, Error>) {
         mirror.endTurn()
+        let ended = (try? result.get()).map { ($0["stopReason"]?.stringValue ?? "end_turn") == "end_turn" } ?? false
+        mirror.commandFinished(succeeded: ended)
         guard turn == .prompting, phase == .ready else { return }
         let reply = turnReply
         turnReply = ""
