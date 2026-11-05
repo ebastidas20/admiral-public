@@ -19,7 +19,10 @@ public enum AcpUpdate: Sendable, Equatable {
     case userMessage(String)
     case toolCall(
         id: String, title: String, kind: String?, status: String?, rawInput: JSONValue?, locations: [String])
-    case toolCallUpdate(id: String, status: String?, content: String?, locations: [String])
+    /// `rawInput`: the call's input when this update carries it — claude-agent-acp opens every
+    /// call with `{}` and sends the real input on its first update.
+    case toolCallUpdate(
+        id: String, status: String?, content: String?, locations: [String], rawInput: JSONValue? = nil)
     case plan([AcpPlanEntry])
     case availableCommands([String])
     case currentMode(String)
@@ -58,7 +61,8 @@ public enum AcpUpdate: Sendable, Equatable {
                 id: u["toolCallId"]?.stringValue ?? "",
                 status: u["status"]?.stringValue,
                 content: parts.isEmpty ? nil : parts.joined(separator: "\n"),
-                locations: locations)
+                locations: locations,
+                rawInput: u["rawInput"])
         case "plan":
             return .plan((u["entries"]?.arrayValue ?? []).map {
                 AcpPlanEntry(

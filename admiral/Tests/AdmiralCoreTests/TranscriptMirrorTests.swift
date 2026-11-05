@@ -54,6 +54,38 @@ final class TranscriptMirrorTests: XCTestCase {
         XCTAssertEqual(state, .success)
     }
 
+    /// claude-agent-acp opens every tool call with `rawInput: {}` and sends the input on the
+    /// first `tool_call_update` (probed on 0.100.0 in Task 12): the Chat's card must show the
+    /// command, and show it while the call still runs — not `{}` for the whole session.
+    func testToolInputArrivingOnAnUpdateReachesTheToolUse() {
+        let (m, url) = make()
+        m.apply(.toolCall(id: "t1", title: "Terminal", kind: "execute", status: "pending",
+                          rawInput: .object([:]), locations: []))
+        m.apply(.toolCallUpdate(id: "t1", status: nil, content: nil, locations: [],
+                                rawInput: .object(["command": .string("echo bash-ok")])))
+        XCTAssertEqual(lines(url).count, 1, "the running call is shown once its input is known")
+        m.apply(.toolCallUpdate(id: "t1", status: "completed", content: "bash-ok", locations: []))
+        guard case let .tool(id, name, params, result, _) = TranscriptParser.parse(lines: lines(url)).turns.first
+        else { return XCTFail("\(lines(url))") }
+        XCTAssertEqual(id, "t1")
+        XCTAssertEqual(name, "Bash")
+        XCTAssertTrue(params.contains("echo bash-ok"), params)
+        XCTAssertEqual(result, "bash-ok")
+    }
+
+    /// A call whose input never comes still lands — with what it has, ahead of what followed it.
+    func testToolCallWithoutInputStillLandsInOrder() {
+        let (m, url) = make()
+        m.apply(.toolCall(id: "t1", title: "x", kind: "execute", status: "pending",
+                          rawInput: .object([:]), locations: []))
+        m.apply(.agentMessage("after"))
+        m.endTurn()
+        let turns = TranscriptParser.parse(lines: lines(url)).turns
+        XCTAssertEqual(turns.count, 2, "\(turns)")
+        guard case .tool = turns.first, case let .assistant(_, md, _) = turns.last else { return XCTFail("\(turns)") }
+        XCTAssertEqual(md, "after")
+    }
+
     func testFailedToolCallIsError() {
         let (m, url) = make()
         m.apply(.toolCall(id: "t1", title: "Run", kind: "execute", status: nil, rawInput: nil, locations: []))

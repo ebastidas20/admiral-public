@@ -11,6 +11,11 @@ import Foundation
 /// Message and thought chunks buffer until a boundary (tool call, plan, user line, `endTurn`) and
 /// then land as ONE assistant line, so a chunk after a tool call starts a new line.
 ///
+/// A tool call that opens with no input (`rawInput` absent or `{}` — claude-agent-acp opens every
+/// call that way and sends the input on its first update) is held until the input arrives, and
+/// lands then; anything written before that (its result, a later line, `endTurn`) lands it first,
+/// with what it has, so the order is the agent's.
+///
 /// Contract: call `endTurn()` on EVERY turn exit (any stop reason, error, cancel, transport close).
 /// It is idempotent (a second call writes nothing). `deinit` flushes pending text as a last resort.
 /// Write errors are swallowed: a mirror that cannot write must never take the session down.
@@ -25,6 +30,8 @@ public final class TranscriptMirror {
     private var toolNames: [String: String] = [:]
     private var pendingResults: [String: String] = [:]
     private var closedTools: Set<String> = []
+    /// Tool calls waiting for their input, in arrival order (see the type's note).
+    private var heldTools: [(id: String, name: String, input: JSONValue)] = []
 
     public static func url(base: URL, session: String) -> URL {
         base.appendingPathComponent("acp", isDirectory: true).appendingPathComponent("\(session).jsonl")
@@ -52,10 +59,20 @@ public final class TranscriptMirror {
             writeUser(.string(chunk))
         case let .toolCall(id, title, kind, status, rawInput, _):
             flush()
-            toolNames[id] = Self.toolName(kind: kind, title: title)
-            writeAssistant([toolUse(id: id, name: toolNames[id] ?? title, input: rawInput ?? .object([:]))])
+            let name = Self.toolName(kind: kind, title: title)
+            toolNames[id] = name
+            let input = rawInput ?? .object([:])
+            if Self.isEmpty(input) {
+                heldTools.append((id, name, input))
+            } else {
+                writeAssistant([toolUse(id: id, name: name, input: input)])
+            }
             if let status { finish(id: id, status: status) }
-        case let .toolCallUpdate(id, status, content, _):
+        case let .toolCallUpdate(id, status, content, _, rawInput):
+            if let rawInput, !Self.isEmpty(rawInput), let i = heldTools.firstIndex(where: { $0.id == id }) {
+                heldTools[i].input = rawInput
+                writeHeldTools(through: i)
+            }
             if let content { pendingResults[id] = content }
             if let status { finish(id: id, status: status) }
         case let .plan(entries):
@@ -87,6 +104,22 @@ public final class TranscriptMirror {
         }
     }
 
+    private static func isEmpty(_ input: JSONValue) -> Bool {
+        switch input {
+        case .null: true
+        case let .object(o): o.isEmpty
+        default: false
+        }
+    }
+
+    /// Lands the held calls up to and including `index` (all of them when nil), in order.
+    private func writeHeldTools(through index: Int? = nil) {
+        guard !heldTools.isEmpty else { return }
+        let end = min(index ?? heldTools.count - 1, heldTools.count - 1)
+        for held in heldTools[...end] { writeAssistant([toolUse(id: held.id, name: held.name, input: held.input)]) }
+        heldTools.removeFirst(end + 1)
+    }
+
     private func toolUse(id: String, name: String, input: JSONValue) -> JSONValue {
         .object(["type": .string("tool_use"), "id": .string(id), "name": .string(name), "input": input])
     }
@@ -113,6 +146,8 @@ public final class TranscriptMirror {
     }
 
     private func flush() {
+        // Held calls came before any text buffered since (a tool call flushes the text first).
+        writeHeldTools()
         let blocks: [JSONValue] = runs.filter { !$0.text.isEmpty }.map {
             $0.isThought
                 ? .object(["type": .string("thinking"), "thinking": .string($0.text)])

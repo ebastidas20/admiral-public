@@ -94,6 +94,11 @@ final class AcpMessagesTests: XCTestCase {
              "content":[{"type":"content","content":{"type":"text","text":"ok"}}],"locations":[{"path":"/b"}]}
             """),
             .toolCallUpdate(id: "t1", status: "completed", content: "ok", locations: ["/b"]))
+        // claude-agent-acp sends a tool call's input on an update, not on the call (0.100.0).
+        XCTAssertEqual(
+            decode(#"{"sessionUpdate":"tool_call_update","toolCallId":"t1","rawInput":{"command":"ls"}}"#),
+            .toolCallUpdate(id: "t1", status: nil, content: nil, locations: [],
+                            rawInput: .object(["command": .string("ls")])))
         XCTAssertEqual(
             decode(#"{"sessionUpdate":"plan","entries":[{"content":"a","status":"pending","priority":"high"}]}"#),
             .plan([AcpPlanEntry(content: "a", status: "pending", priority: "high")]))
