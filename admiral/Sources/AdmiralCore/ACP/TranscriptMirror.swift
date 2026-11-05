@@ -86,7 +86,7 @@ public final class TranscriptMirror {
             }
             writeAssistant([toolUse(
                 id: "plan-" + UUID().uuidString, name: "TodoWrite", input: .object(["todos": .array(todos)]))])
-        case .availableCommands, .currentMode, .compaction, .unknown:
+        case .availableCommands, .currentMode, .configOptions, .compaction, .unknown:
             break
         }
     }

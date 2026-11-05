@@ -30,7 +30,7 @@ struct AgentsSettingsView: View {
 
     /// Opens with `editing` in the form (the probe draws a filled form).
     init(editing: AcpAgentConfig? = nil, apiServerOn: Bool? = nil) {
-        self.init(draft: editing.map(AcpAgentDraft.init), isNew: false, apiServerOn: apiServerOn)
+        self.init(draft: editing.map { AcpAgentDraft($0) }, isNew: false, apiServerOn: apiServerOn)
     }
 
     /// Opens with `draft` in the form as typed — rows the config cannot hold, like a duplicate key.
@@ -105,7 +105,7 @@ struct AgentsSettingsView: View {
                     .lineLimit(1).truncationMode(.middle)
             }
             Spacer(minLength: 8)
-            Button("Edit") { edit(AcpAgentDraft(agent), isNew: false) }
+            Button("Edit") { edit(AcpAgentDraft(agent, catalog: catalog(agent.id)), isNew: false) }
             Button("Duplicate") { duplicate(agent) }
             Button { requestDelete(agent) } label: { Image(systemName: "trash") }
                 .help("Delete \(agent.name)")
@@ -154,8 +154,7 @@ struct AgentsSettingsView: View {
                     caption("How that environment reaches this Mac's port 4142 — `host.docker.internal` "
                             + "from Docker, or a reverse tunnel (`ssh -R 4142:127.0.0.1:4142`) for an SSH host.")
                 }
-                pairList("Config options", \.configOptions, current.configOptions, placeholder: ("model", "opus"),
-                         add: "Add option", id: "agent-options")
+                startingOptions(current)
                 if !errors.isEmpty {
                     VStack(alignment: .leading, spacing: 3) {
                         ForEach(errors, id: \.self) { error in
@@ -181,6 +180,56 @@ struct AgentsSettingsView: View {
                 }
             }
         }
+    }
+
+    /// Starting options, applied to every new tab on this agent: a picker per option the agent
+    /// last advertised (its catalog), and every other key as a typed row under "Other options".
+    /// With no catalog yet, only the rows.
+    @ViewBuilder private func startingOptions(_ current: AcpAgentDraft) -> some View {
+        if current.catalog.isEmpty {
+            pairList("Starting options", \.configOptions, current.configOptions, placeholder: ("model", "opus"),
+                     add: "Add option", id: "agent-options")
+            caption("Open a tab on this agent once and its modes and models are listed here.")
+                .accessibilityIdentifier("agent-options-empty")
+        } else {
+            HStack(alignment: .top, spacing: 10) {
+                label("Starting options").padding(.top, 4)
+                VStack(alignment: .leading, spacing: 6) {
+                    ForEach(current.catalog) { option in startingOptionPicker(option) }
+                }
+                .accessibilityElement(children: .contain)
+                .accessibilityIdentifier("agent-starting-options")
+            }
+            pairList("Other options", \.configOptions, current.configOptions, placeholder: ("key", "value"),
+                     add: "Add option", id: "agent-options")
+        }
+    }
+
+    /// One advertised option: "Agent's default" (no key) or one of its values. A saved value the
+    /// agent no longer offers stays listed, so opening the form never changes it.
+    private func startingOptionPicker(_ option: AcpConfigOption) -> some View {
+        let saved = draft?.startingOptions[option.id]
+        let stale = saved.flatMap { v in option.values.contains { $0.value == v } ? nil : v }
+        return HStack(spacing: 8) {
+            Text(option.name).font(.system(size: 12)).foregroundStyle(Theme.primaryText)
+                .frame(width: 110, alignment: .leading)
+            Picker(option.name, selection: Binding(
+                get: { draft?.startingOptions[option.id] ?? "" },
+                set: { draft?.startingOptions[option.id] = $0.isEmpty ? nil : $0 })) {
+                Text("Agent's default").tag("")
+                ForEach(option.values, id: \.value) { value in Text(value.name).tag(value.value) }
+                if let stale { Text("\(stale) (not offered)").tag(stale) }
+            }
+            .labelsHidden()
+            .fixedSize()
+            .help(option.description ?? option.name)
+            .accessibilityIdentifier("agent-option-\(option.id)")
+            Spacer(minLength: 0)
+        }
+    }
+
+    private func catalog(_ agentID: UUID) -> [AcpConfigOption] {
+        model.acpOptionCatalogStore.load(agentID: agentID)
     }
 
     /// Runs on: This Mac or Elsewhere. The draft moves the bridge URL with it.
@@ -271,7 +320,7 @@ struct AgentsSettingsView: View {
             n += 1
         }
         copy.name = name
-        edit(AcpAgentDraft(copy), isNew: true)
+        edit(AcpAgentDraft(copy, catalog: catalog(agent.id)), isNew: true)
     }
 
     private func save(_ config: AcpAgentConfig) {

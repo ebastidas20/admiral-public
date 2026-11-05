@@ -39,6 +39,8 @@ final class AppModel: ObservableObject {
     private var acpAgentsObserver: NSObjectProtocol?
     /// Settings → Agents: the configured ACP agents (profile-aware, like the tab stores).
     let acpAgentStore: AcpAgentStore
+    /// What each agent last advertised (mode, model, …) — Settings → Agents' "Starting options".
+    let acpOptionCatalogStore: AcpOptionCatalogStore
     /// The ACP tab whose log sheet (`AcpLogView`) is up.
     @Published var acpLogSession: AgentSession?
     /// What Test connection last found per agent (by id) — also how the New-session form knows
@@ -810,6 +812,9 @@ final class AppModel: ObservableObject {
         let acpAgentStore = AcpAgentStore(defaults: storeDefaults)
         manager.acpAgents = { acpAgentStore.load() }
         self.acpAgentStore = acpAgentStore
+        let acpOptionCatalogStore = AcpOptionCatalogStore(defaults: storeDefaults)
+        manager.acpOptionCatalog = acpOptionCatalogStore
+        self.acpOptionCatalogStore = acpOptionCatalogStore
         // Goals live in the support dir, not defaults: the hook helper reads them too.
         let goals = GoalsStore(base: manager.supportDir)
         self.goalsStore = goals

@@ -103,6 +103,9 @@ public final class SessionManager: ObservableObject {
     /// The configured ACP agents (Settings → Agents), re-read per call so restore, reload and
     /// fork find an agent edited since launch. None unless the app wires it.
     public var acpAgents: () -> [AcpAgentConfig] = { [] }
+    /// Where each agent's advertised config options are kept for Settings → Agents' "Starting
+    /// options" — saved on every session start. None unless the app wires it.
+    public var acpOptionCatalog: AcpOptionCatalogStore?
     /// How commands reach an ACP agent's files: on this Mac directly (with the agent's launch
     /// environment, bounded like an exec), elsewhere through its exec command, or nil when it
     /// has none. The one place an ACP tab's runner is made — hooks, probes and branch refresh

@@ -83,6 +83,14 @@ final class ScriptedAgent: AcpTransport, @unchecked Sendable {
         ])
     }
 
+    /// A `session/update` notification carrying `update` (its `sessionUpdate` and fields).
+    func notify(update: JSONValue, session: String = "s1") {
+        feed([
+            "jsonrpc": .string("2.0"), "method": .string("session/update"),
+            "params": .object(["sessionId": .string(session), "update": update]),
+        ])
+    }
+
     func ask(id: String, method: String, params: JSONValue) {
         feed(["jsonrpc": .string("2.0"), "id": .string(id), "method": .string(method), "params": params])
     }

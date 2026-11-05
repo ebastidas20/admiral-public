@@ -57,6 +57,11 @@ public final class AcpSessionController: SessionDriver {
         /// `queued` changed.
         var queueChanged: ([String]) -> Void
         var update: (AcpUpdate) -> Void
+        /// The agent's config options changed: fired right after `sessionStarted`, after every
+        /// `setConfigOption`, and on `config_option_update` / `current_mode_update`.
+        var configOptionsChanged: ([AcpConfigOption]) -> Void
+        /// Admiral's own note for the tab's ACP log (an `acp:` line).
+        var log: (String) -> Void
 
         public init(
             status: @escaping (SessionStatus) -> Void = { _ in },
@@ -69,7 +74,9 @@ public final class AcpSessionController: SessionDriver {
             question: @escaping ([AskQuestion]) -> Void = { _ in },
             requestResolved: @escaping () -> Void = {},
             queueChanged: @escaping ([String]) -> Void = { _ in },
-            update: @escaping (AcpUpdate) -> Void = { _ in }
+            update: @escaping (AcpUpdate) -> Void = { _ in },
+            configOptionsChanged: @escaping ([AcpConfigOption]) -> Void = { _ in },
+            log: @escaping (String) -> Void = { _ in }
         ) {
             self.status = status
             self.phase = phase
@@ -82,6 +89,8 @@ public final class AcpSessionController: SessionDriver {
             self.requestResolved = requestResolved
             self.queueChanged = queueChanged
             self.update = update
+            self.configOptionsChanged = configOptionsChanged
+            self.log = log
         }
     }
 
@@ -96,6 +105,8 @@ public final class AcpSessionController: SessionDriver {
     public private(set) var phase: Phase = .connecting
     public private(set) var acpSessionID: String?
     public private(set) var capabilities: AcpCapabilities?
+    /// What the agent offers now (mode, model, effort, …), as it last said.
+    public private(set) var configOptions: [AcpConfigOption] = []
     /// The agent process's pid, when the launcher knows it.
     public var pid: Int32?
     /// `accept` queues: whatever it took goes out once the agent can take it.
@@ -272,26 +283,77 @@ public final class AcpSessionController: SessionDriver {
         }
         acpSessionID = sessionID
 
-        var options = AcpConfigOption.decodeAll(result)
-        if start == .new {
-            for (id, value) in config.defaultConfigOptions.sorted(by: { $0.key < $1.key }) {
-                do {
-                    result = try await connection.request(
-                        "session/set_config_option",
-                        params: AcpClient.setConfigOptionParams(sessionID: sessionID, configID: id, value: value))
-                } catch {
-                    throw HandshakeFailure(message: "agent refused \(id)=\(value): \(Self.message(error))")
-                }
-                if result["configOptions"] != nil { options = AcpConfigOption.decodeAll(result) }
-            }
-        }
+        configOptions = AcpConfigOption.decodeAll(result)
+        // Only a new session: a restored or forked one keeps its own mode, which the agent restores.
+        if start == .new { try await applyStartingOptions(sessionID: sessionID) }
 
         guard phase == .connecting else { return }
         setPhase(.ready)
-        events.sessionStarted(sessionID, caps, options)
+        events.sessionStarted(sessionID, caps, configOptions)
+        events.configOptionsChanged(configOptions)
         advance()
         publishStatus()
     }
+
+    /// The agent's starting options, in id order, each through the option's own setter. The
+    /// catalog behind them may be stale (`bypassPermissions` is not offered to a root user), so
+    /// an option or value the agent does not offer is skipped and logged; a value it refuses
+    /// fails the handshake.
+    private func applyStartingOptions(sessionID: String) async throws {
+        for (id, value) in config.defaultConfigOptions.sorted(by: { $0.key < $1.key }) {
+            guard let option = configOptions.first(where: { $0.id == id }) else {
+                events.log("acp: starting option \(id) not offered by the agent \u{2014} skipped")
+                continue
+            }
+            guard option.values.contains(where: { $0.value == value }) else {
+                events.log("acp: starting option \(id)=\(value) not offered by the agent \u{2014} skipped")
+                continue
+            }
+            do {
+                try await set(option, to: value, sessionID: sessionID)
+            } catch {
+                throw HandshakeFailure(message: "agent refused \(id)=\(value): \(Self.message(error))")
+            }
+        }
+    }
+
+    /// One option to `value`, by its setter. `set_config_option` answers with the full list,
+    /// which replaces ours; `set_mode` answers nothing, so the mode is updated here.
+    private func set(_ option: AcpConfigOption, to value: String, sessionID: String) async throws {
+        switch option.setter {
+        case .configOption:
+            let result = try await connection.request(
+                "session/set_config_option",
+                params: AcpClient.setConfigOptionParams(sessionID: sessionID, configID: option.id, value: value))
+            if result["configOptions"]?.arrayValue != nil {
+                configOptions = AcpConfigOption.decodeAll(result)
+            } else {
+                configOptions = configOptions.map { o in
+                    guard o.id == option.id else { return o }
+                    var changed = o
+                    changed.currentValue = value
+                    return changed
+                }
+            }
+        case .legacyMode:
+            _ = try await connection.request(
+                "session/set_mode", params: AcpClient.setModeParams(sessionID: sessionID, modeID: value))
+            configOptions = configOptions.applyingCurrentMode(value)
+        }
+    }
+
+    /// The composer's picker: one option to `value`. Throws the agent's refusal as it came
+    /// (`JSONRPCError`), or `NotSettable` when there is no session or no such option.
+    public func setConfigOption(id: String, value: String) async throws {
+        guard phase == .ready, let sid = acpSessionID else { throw NotSettable(message: "the agent is not running") }
+        guard let option = configOptions.first(where: { $0.id == id }) else {
+            throw NotSettable(message: "the agent does not offer it")
+        }
+        try await set(option, to: value, sessionID: sid)
+        events.configOptionsChanged(configOptions)
+    }
+
+    struct NotSettable: Error { let message: String }
 
     // MARK: - SessionDriver
 
@@ -466,6 +528,15 @@ public final class AcpSessionController: SessionDriver {
         }
         mirror.apply(update)
         if case let .agentMessage(text) = update, turn == .prompting { turnReply += text }
+        switch update {
+        case let .configOptions(options):
+            configOptions = options
+            events.configOptionsChanged(options)
+        case let .currentMode(mode):
+            configOptions = configOptions.applyingCurrentMode(mode)
+            events.configOptionsChanged(configOptions)
+        default: break
+        }
         events.update(update)
         guard let hooks else { return }
         switch update {
@@ -629,9 +700,10 @@ public final class AcpSessionController: SessionDriver {
         return ["outcome", "status", "result", "stopReason"].contains { result[$0]?.stringValue == marker }
     }
 
-    private static func message(_ error: Error) -> String {
+    static func message(_ error: Error) -> String {
         switch error {
         case let e as HandshakeFailure: e.message
+        case let e as NotSettable: e.message
         case let e as JSONRPCError: e.message
         default: "\(error)"
         }

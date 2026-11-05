@@ -843,6 +843,8 @@ struct ChatComposer: View {
 
     @State private var text = ""
     @State private var attachments: [String] = []
+    /// An ACP option the agent refused, until the next pick.
+    @State private var optionError: String?
     @FocusState private var focused: Bool
 
     private var hasContent: Bool {
@@ -851,6 +853,7 @@ struct ChatComposer: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
+            if let optionError { AcpOptionErrorCaption(text: optionError) }
             if !attachments.isEmpty { chips }
             ZStack(alignment: .topLeading) {
                 if text.isEmpty {
@@ -881,6 +884,9 @@ struct ChatComposer: View {
                 Button(action: attach) { Image(systemName: "plus") }
                     .buttonStyle(.plain).foregroundStyle(Theme.secondaryText)
                     .help("Attach files")
+                if session.backend != .pty {
+                    AcpOptionChips(session: session) { optionError = $0 }
+                }
                 ComposerHint(isWorking: isWorking)
                 Spacer()
                 ComposerSendButton(stop: isWorking && !hasContent, hasContent: hasContent, isWorking: isWorking,
@@ -894,7 +900,7 @@ struct ChatComposer: View {
             return !files.isEmpty
         }
         .onAppear { focused = true }
-        .onChange(of: session.id) { text = ""; attachments = []; focused = true }
+        .onChange(of: session.id) { text = ""; attachments = []; optionError = nil; focused = true }
     }
 
     private var chips: some View {

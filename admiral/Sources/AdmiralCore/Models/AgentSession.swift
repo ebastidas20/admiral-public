@@ -61,6 +61,9 @@ public struct AgentSession: Identifiable, Sendable, Hashable {
     /// An ACP tab's client-side queue (`AcpSessionController.queued`): input that waits for the
     /// agent's turn to end, oldest first. Always empty on a PTY tab (claude queues its own).
     public var acpQueued: [String] = []
+    /// An ACP tab's config options (mode, model, effort, …) as the agent last reported them —
+    /// what the composer's pickers show. Always empty on a PTY tab.
+    public var acpConfigOptions: [AcpConfigOption] = []
     /// Distinct git repos this session has written to, aggregated from its hook log.
     /// Ephemeral (rebuilt from the on-disk log); not part of the initializer.
     public var touchedRepos: [TouchedRepo] = []

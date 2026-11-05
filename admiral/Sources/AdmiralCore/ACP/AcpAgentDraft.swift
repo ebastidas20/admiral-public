@@ -8,8 +8,9 @@ public enum AcpWorkspaceKind: String, CaseIterable, Sendable {
 
 /// Settings → Agents' form: one field per editable value; lists as rows (`args`, and `exec` as
 /// its command then its args, one argument per row; `env` and `configOptions` as key/value
-/// rows). Converts to and from `AcpAgentConfig` here, so the normalizing is under `swift test`,
-/// not in a view.
+/// rows). Starting options the agent's catalog knows are picks (`startingOptions`); the rest
+/// stay key/value rows (`configOptions`, "Other options"). Converts to and from
+/// `AcpAgentConfig` here, so the normalizing is under `swift test`, not in a view.
 public struct AcpAgentDraft: Equatable, Sendable {
     public var id: UUID
     public var name: String
@@ -30,13 +31,18 @@ public struct AcpAgentDraft: Equatable, Sendable {
             }
         }
     }
+    /// The options the agent last advertised (`AcpOptionCatalogStore`); empty = never seen.
+    public let catalog: [AcpConfigOption]
+    /// Starting values for options in `catalog`, by id. A missing key = the agent's default.
+    public var startingOptions: [String: String]
+    /// Every other starting option, as typed rows.
     public var configOptions: AcpPairList
     /// Used only Elsewhere; on This Mac the config takes This Mac's URL.
     public var mcpCallbackURL: String
     /// Elsewhere only: the exec prefix, command then args. Empty = none.
     public var exec: AcpArgList
 
-    public init(_ config: AcpAgentConfig) {
+    public init(_ config: AcpAgentConfig, catalog: [AcpConfigOption] = []) {
         id = config.id
         name = config.name
         command = config.launch.command
@@ -47,7 +53,10 @@ public struct AcpAgentDraft: Equatable, Sendable {
         case .thisMac: workspace = .thisMac
         case .elsewhere: workspace = .elsewhere
         }
-        configOptions = AcpPairList(config.defaultConfigOptions)
+        self.catalog = catalog
+        let known = Set(catalog.map(\.id))
+        startingOptions = config.defaultConfigOptions.filter { known.contains($0.key) }
+        configOptions = AcpPairList(config.defaultConfigOptions.filter { !known.contains($0.key) })
         mcpCallbackURL = config.mcpCallbackURL
         exec = AcpArgList(config.execRunnerCommand.map { [$0.command] + $0.args } ?? [])
     }
@@ -77,7 +86,7 @@ public struct AcpAgentDraft: Equatable, Sendable {
             env: env.map,
             cwd: cwd.trimmingCharacters(in: .whitespaces),
             workspace: workspace,
-            defaultConfigOptions: configOptions.map,
+            defaultConfigOptions: configOptions.map.merging(startingOptions) { row, _ in row },
             mcpCallbackURL: url)
     }
 
@@ -85,7 +94,8 @@ public struct AcpAgentDraft: Equatable, Sendable {
     /// would silently keep one). Shown with the config's own errors; Save stays off while any.
     public var validationErrors: [String] {
         Self.duplicates("environment variable", env.duplicateKeys)
-            + Self.duplicates("config option", configOptions.duplicateKeys)
+            + Self.duplicates("config option", configOptions.duplicateKeys
+                + configOptions.pairs.map(\.key).filter { startingOptions[$0] != nil })
     }
 
     static func duplicates(_ what: String, _ keys: [String]) -> [String] {

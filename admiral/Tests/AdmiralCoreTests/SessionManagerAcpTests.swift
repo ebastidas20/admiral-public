@@ -107,6 +107,15 @@ final class SessionManagerAcpTests: XCTestCase {
         return session(s.id) ?? s
     }
 
+    /// An agent whose `session/new` advertises claude-agent-acp's `mode` and `model` options.
+    private func advertisingAgent() -> ScriptedAgent {
+        let agent = ScriptedAgent()
+        let result = (try? JSONDecoder().decode(
+            JSONValue.self, from: Data(AcpConfigOptionsTests.claudeAgentACP.utf8))) ?? .null
+        agent.on("session/new") { _ in .result(result) }
+        return agent
+    }
+
     private func lines(_ url: URL) -> [String] {
         ((try? String(contentsOf: url, encoding: .utf8)) ?? "").split(separator: "\n").map(String.init)
     }
@@ -249,7 +258,7 @@ final class SessionManagerAcpTests: XCTestCase {
     }
 
     func testFailedHandshakeStrandsNothingSilently() async throws {
-        let agent = ScriptedAgent()
+        let agent = advertisingAgent()
         ppt.defaultConfigOptions = ["mode": "bypassPermissions"]
         agent.on("session/set_config_option") { _ in .error(-32603, "root needs IS_SANDBOX=1") }
         scripted.append(agent)
@@ -358,8 +367,29 @@ final class SessionManagerAcpTests: XCTestCase {
         XCTAssertEqual(launched.last?.params(of: "session/resume").first?["sessionId"]?.stringValue, "s1")
     }
 
+    func testSessionStartSavesTheCatalogAndShowsTheOptionsOnTheTab() async {
+        let store = AcpOptionCatalogStore(defaults: defaults)
+        manager.acpOptionCatalog = store
+        let s = await readyTab(advertisingAgent())
+        XCTAssertEqual(store.load(agentID: ppt.id).map(\.id), ["mode", "model"])
+        XCTAssertEqual(session(s.id)?.acpConfigOptions.map(\.currentValue), ["default", "claude-sonnet-4-6"])
+
+        let error = await manager.setACPConfigOption(s.id, id: "model", value: "claude-opus-4-6")
+        XCTAssertNil(error)
+        XCTAssertEqual(session(s.id)?.acpConfigOptions.last?.currentValue, "claude-opus-4-6")
+        XCTAssertEqual(launched.last?.params(of: "session/set_config_option").last?["configId"]?.stringValue, "model")
+    }
+
+    func testRefusedPickIsTheOptionNameAndTheAgentsMessage() async {
+        let agent = advertisingAgent()
+        agent.on("session/set_config_option") { _ in .error(-32602, "unknown model") }
+        let s = await readyTab(agent)
+        let error = await manager.setACPConfigOption(s.id, id: "model", value: "nope")
+        XCTAssertEqual(error, "Could not set Model: unknown model")
+    }
+
     func testRefusedStartingOptionIsTheRecordedReason() async {
-        let agent = ScriptedAgent()
+        let agent = advertisingAgent()
         ppt.defaultConfigOptions = ["mode": "bypassPermissions"]
         agent.on("session/set_config_option") { _ in .error(-32603, "root needs IS_SANDBOX=1") }
         scripted.append(agent)

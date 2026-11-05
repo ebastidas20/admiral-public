@@ -26,6 +26,8 @@ public enum AcpUpdate: Sendable, Equatable {
     case plan([AcpPlanEntry])
     case availableCommands([String])
     case currentMode(String)
+    /// `config_option_update`: the agent's FULL option list.
+    case configOptions([AcpConfigOption])
     case compaction
     case unknown(String)
 
@@ -75,6 +77,7 @@ public enum AcpUpdate: Sendable, Equatable {
                 $0["name"]?.stringValue
             })
         case "current_mode_update": return .currentMode(u["currentModeId"]?.stringValue ?? "")
+        case "config_option_update": return .configOptions(AcpConfigOption.decodeAll(u))
         case "compaction_update": return .compaction
         default: return .unknown(kind)
         }

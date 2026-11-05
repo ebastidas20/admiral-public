@@ -139,27 +139,6 @@ public struct AcpCapabilities: Sendable, Hashable {
     }
 }
 
-public struct AcpConfigOption: Sendable, Equatable {
-    public var id: String
-    public var currentValue: String?
-    public var values: [String]
-
-    public init(id: String, currentValue: String?, values: [String]) {
-        self.id = id
-        self.currentValue = currentValue
-        self.values = values
-    }
-
-    /// Reads `configOptions` from a `session/new` (or load/resume) result; tolerant of absence.
-    public static func decodeAll(_ result: JSONValue) -> [AcpConfigOption] {
-        (result["configOptions"]?.arrayValue ?? []).compactMap { o in
-            guard let id = o["id"]?.stringValue else { return nil }
-            let values = (o["options"]?.arrayValue ?? []).compactMap { $0["value"]?.stringValue }
-            return AcpConfigOption(id: id, currentValue: o["currentValue"]?.stringValue, values: values)
-        }
-    }
-}
-
 public enum AcpStopReason: String, Sendable {
     case endTurn = "end_turn"
     case maxTokens = "max_tokens"

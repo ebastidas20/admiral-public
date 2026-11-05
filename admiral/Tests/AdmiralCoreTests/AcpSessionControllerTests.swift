@@ -102,6 +102,8 @@ final class AcpSessionControllerTests: XCTestCase {
     private var requestLog: [String] = []
     private var queues: [[String]] = []
     private var started: (id: String, caps: AcpCapabilities)?
+    private var optionChanges: [[AcpConfigOption]] = []
+    private var logLines: [String] = []
 
     override func setUp() async throws {
         try await super.setUp()
@@ -115,6 +117,8 @@ final class AcpSessionControllerTests: XCTestCase {
         requestLog = []
         queues = []
         started = nil
+        optionChanges = []
+        logLines = []
     }
 
     override func tearDown() { try? FileManager.default.removeItem(at: dir) }
@@ -145,7 +149,9 @@ final class AcpSessionControllerTests: XCTestCase {
             question: { [unowned self] in questions.append($0) },
             requestResolved: { [unowned self] in requestLog.append("resolved") },
             queueChanged: { [unowned self] in queues.append($0) },
-            update: { _ in })
+            update: { _ in },
+            configOptionsChanged: { [unowned self] in optionChanges.append($0) },
+            log: { [unowned self] in logLines.append($0) })
         return AcpSessionController(
             config: config, connection: connection, mirror: mirror,
             mcpServer: AcpMCPServer(name: "admiral", url: "http://host.docker.internal:4142/mcp", bearer: "t"),
@@ -198,18 +204,137 @@ final class AcpSessionControllerTests: XCTestCase {
         XCTAssertTrue(c.offersBridge, "the bridge was offered; the agent just cannot use it")
     }
 
-    func testDefaultConfigOptionsAreAppliedAfterNew() async {
-        let agent = ScriptedAgent()
-        let c = make(agent, options: ["model": "opus"])
+    private static func json(_ s: String) -> JSONValue {
+        (try? JSONDecoder().decode(JSONValue.self, from: Data(s.utf8))) ?? .null
+    }
+
+    /// claude-agent-acp's `session/new` result: `mode` and `model` as select config options.
+    private static let advertised = json(AcpConfigOptionsTests.claudeAgentACP)
+
+    private static let legacyNew = json("""
+        {"sessionId":"s1","modes":{"currentModeId":"a",
+         "availableModes":[{"id":"a","name":"Ask"},{"id":"b","name":"Code"}]}}
+        """)
+
+    /// An agent whose `session/new` advertises claude-agent-acp's options, and whose
+    /// `set_config_option` answers with the full list, the chosen value current.
+    private func optionsAgent(_ capabilities: JSONValue = .object([:])) -> ScriptedAgent {
+        let agent = ScriptedAgent(capabilities: capabilities)
+        agent.on("session/new") { _ in .result(Self.advertised) }
+        var current = Self.advertised
+        agent.on("session/set_config_option") { p in
+            guard case var .object(o) = current, case var .array(list)? = o["configOptions"] else {
+                return .result(.null)
+            }
+            for i in list.indices where list[i]["id"] == p["configId"] {
+                guard case var .object(option) = list[i] else { continue }
+                option["currentValue"] = p["value"]
+                list[i] = .object(option)
+            }
+            o["configOptions"] = .array(list)
+            current = .object(o)
+            return .result(.object(["configOptions": .array(list)]))
+        }
+        return agent
+    }
+
+    func testStartingOptionsOnNewSetAdvertisedIDsInIDOrder() async {
+        let agent = optionsAgent()
+        let c = make(agent, options: ["model": "claude-opus-4-6", "mode": "plan"])
         await c.start(.new)
-        XCTAssertEqual(agent.methods, ["initialize", "session/new", "session/set_config_option"])
-        let opt = agent.params(of: "session/set_config_option").first
-        XCTAssertEqual(opt?["configId"]?.stringValue, "model")
-        XCTAssertEqual(opt?["value"]?.stringValue, "opus")
+        XCTAssertEqual(phases.last, .ready)
+        XCTAssertEqual(agent.methods, [
+            "initialize", "session/new", "session/set_config_option", "session/set_config_option",
+        ])
+        XCTAssertEqual(agent.params(of: "session/set_config_option").map { $0["configId"]?.stringValue },
+                       ["mode", "model"])
+        XCTAssertEqual(agent.params(of: "session/set_config_option").map { $0["value"]?.stringValue },
+                       ["plan", "claude-opus-4-6"])
+        XCTAssertEqual(c.configOptions.map(\.currentValue), ["plan", "claude-opus-4-6"],
+                       "the response list replaces")
+        XCTAssertEqual(optionChanges, [c.configOptions], "fired once, after sessionStarted")
+    }
+
+    func testUnadvertisedStartingOptionIsSkippedAndLogged() async {
+        let agent = optionsAgent()
+        let c = make(agent, options: ["effort": "high", "mode": "dontAsk"])
+        await c.start(.new)
+        XCTAssertEqual(phases.last, .ready, "a stale catalog never fails the tab")
+        XCTAssertEqual(agent.methods, ["initialize", "session/new"])
+        XCTAssertEqual(logLines, [
+            "acp: starting option effort not offered by the agent \u{2014} skipped",
+            "acp: starting option mode=dontAsk not offered by the agent \u{2014} skipped",
+        ])
+        XCTAssertEqual(c.configOptions.map(\.id), ["mode", "model"])
+    }
+
+    func testLegacyAgentModeGoesThroughSetMode() async {
+        let agent = ScriptedAgent()
+        agent.on("session/new") { _ in .result(Self.legacyNew) }
+        let c = make(agent, options: ["mode": "b"])
+        await c.start(.new)
+        XCTAssertEqual(agent.methods, ["initialize", "session/new", "session/set_mode"])
+        XCTAssertEqual(agent.params(of: "session/set_mode").first?["modeId"]?.stringValue, "b")
+        XCTAssertEqual(c.configOptions.first?.currentValue, "b")
+        XCTAssertEqual(c.configOptions.first?.setter, .legacyMode)
+    }
+
+    func testRestoreAppliesNoStartingOptions() async {
+        let agent = optionsAgent(.object(["sessionCapabilities": .object(["resume": .object([:])])]))
+        agent.on("session/resume") { _ in .result(Self.advertised) }
+        let c = make(agent, options: ["mode": "plan", "model": "claude-opus-4-6"])
+        await c.start(.restore(acpSessionID: "s1"))
+        XCTAssertEqual(phases.last, .ready)
+        XCTAssertFalse(agent.methods.contains("session/set_config_option"))
+        XCTAssertFalse(agent.methods.contains("session/set_mode"))
+        XCTAssertEqual(c.configOptions.first?.currentValue, "default", "the agent's restored mode stands")
+    }
+
+    func testConfigOptionUpdateAndCurrentModeUpdateReachTheTab() async {
+        let agent = optionsAgent()
+        let c = await ready(agent)
+        agent.notify(update: Self.json("""
+            {"sessionUpdate":"config_option_update","configOptions":[
+             {"id":"model","name":"Model","type":"select","currentValue":"x","options":[{"value":"x","name":"X"}]}]}
+            """))
+        await until("config update") { optionChanges.last?.map(\.id) == ["model"] }
+        XCTAssertEqual(c.configOptions.map(\.currentValue), ["x"])
+
+        let full = optionsAgent()
+        let d = await ready(full)
+        full.notify(update: Self.json(#"{"sessionUpdate":"current_mode_update","currentModeId":"plan"}"#))
+        await until("mode update") { d.configOptions.first?.currentValue == "plan" }
+        XCTAssertEqual(optionChanges.last?.first?.currentValue, "plan")
+    }
+
+    func testSetConfigOptionUsesTheOptionsSetter() async throws {
+        let agent = optionsAgent()
+        let c = await ready(agent)
+        optionChanges = []
+        try await c.setConfigOption(id: "model", value: "claude-opus-4-6")
+        XCTAssertEqual(agent.params(of: "session/set_config_option").last?["configId"]?.stringValue, "model")
+        XCTAssertEqual(c.configOptions[1].currentValue, "claude-opus-4-6")
+        XCTAssertEqual(optionChanges, [c.configOptions])
+
+        let legacy = ScriptedAgent()
+        legacy.on("session/new") { _ in .result(Self.legacyNew) }
+        let l = await ready(legacy)
+        try await l.setConfigOption(id: "mode", value: "b")
+        XCTAssertEqual(legacy.params(of: "session/set_mode").first?["modeId"]?.stringValue, "b")
+        XCTAssertFalse(legacy.methods.contains("session/set_config_option"))
+        XCTAssertEqual(l.configOptions.first?.currentValue, "b")
+
+        agent.on("session/set_config_option") { _ in .error(-32602, "unknown model") }
+        do {
+            try await c.setConfigOption(id: "model", value: "nope")
+            XCTFail("a refusal throws")
+        } catch {
+            XCTAssertEqual(error as? JSONRPCError, JSONRPCError(code: -32602, message: "unknown model"))
+        }
     }
 
     func testRefusedStartingOptionFailsTheTab() async {
-        let agent = ScriptedAgent()
+        let agent = optionsAgent()
         agent.on("session/set_config_option") { _ in .error(-32603, "root needs IS_SANDBOX=1") }
         let c = make(agent, options: ["mode": "bypassPermissions", "model": "opus"])
         await c.start(.new)

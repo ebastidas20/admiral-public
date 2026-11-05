@@ -89,7 +89,8 @@ extension SessionManager {
                     ? AcpMCPServer.sessionBridge(agent: agent, token: session.token) : nil,
                 hooks: hooks,
                 events: acpEvents(
-                    id, controller: box, logURL: logURL, logStart: logStart, command: config.launch.command),
+                    id, agentID: agent.id, controller: box, logURL: logURL, logStart: logStart,
+                    command: config.launch.command),
                 // `session/load` replays the whole history. The mirror already holds it (same
                 // local id, same file), so the replay is dropped — unless the file is gone, in
                 // which case the replay is what rebuilds the Chat history.
@@ -110,7 +111,7 @@ extension SessionManager {
     /// The controller's events, into this tab. Weak both ways: the manager owns the controller
     /// (through `drivers`), and the controller owns these closures.
     private func acpEvents(
-        _ id: UUID, controller: WeakController, logURL: URL, logStart: UInt64, command: String
+        _ id: UUID, agentID: UUID, controller: WeakController, logURL: URL, logStart: UInt64, command: String
     ) -> AcpSessionController.Events {
         AcpSessionController.Events(
             status: { [weak self] in self?.applyStatus($0, to: id) },
@@ -118,7 +119,8 @@ extension SessionManager {
                 self?.acpPhaseChanged(
                     id, phase, controller: controller.value, logURL: logURL, logStart: logStart, command: command)
             },
-            sessionStarted: { [weak self] acpSessionID, caps, _ in
+            sessionStarted: { [weak self] acpSessionID, caps, options in
+                self?.acpOptionCatalog?.save(options, agentID: agentID)
                 self?.acpSessionStarted(id, acpSessionID, capabilities: caps)
             },
             settledIdle: { [weak self] in self?.acpSettledIdle(id) },
@@ -127,7 +129,22 @@ extension SessionManager {
             question: { [weak self] questions in self?.acpNeedsUser(id, .question(questions)) },
             requestResolved: { [weak self] in self?.acpRequestsResolved(id) },
             queueChanged: { [weak self] queued in self?.update(id) { $0.acpQueued = queued } },
-            update: { [weak self] _ in self?.update(id) { $0.lastActivityAt = Date() } })
+            update: { [weak self] _ in self?.update(id) { $0.lastActivityAt = Date() } },
+            configOptionsChanged: { [weak self] options in self?.update(id) { $0.acpConfigOptions = options } },
+            log: { AcpLog.append($0, to: logURL) })
+    }
+
+    /// The composer's picker: one of an ACP tab's config options to `value`. Nil = done (the tab's
+    /// `acpConfigOptions` already shows it); otherwise the text to show, "Could not set <name>: …".
+    public func setACPConfigOption(_ tab: UUID, id: String, value: String) async -> String? {
+        let name = sessions.first(where: { $0.id == tab })?.acpConfigOptions.first { $0.id == id }?.name ?? id
+        guard let controller = acpController(for: tab) else { return "Could not set \(name): the agent is not running" }
+        do {
+            try await controller.setConfigOption(id: id, value: value)
+            return nil
+        } catch {
+            return "Could not set \(name): \(AcpSessionController.message(error))"
+        }
     }
 
     /// What an ACP agent is blocked on: a permission request or an elicitation.

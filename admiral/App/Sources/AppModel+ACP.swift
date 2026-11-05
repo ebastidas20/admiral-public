@@ -40,6 +40,11 @@ extension AppModel {
         return nil
     }
 
+    /// The composer's option picker. Nil = done; otherwise the text to show under the composer.
+    func setACPConfigOption(_ session: AgentSession, id: String, value: String) async -> String? {
+        await sessions.setACPConfigOption(session.id, id: id, value: value)
+    }
+
     /// The tab menu's Show ACP log.
     func showACPLog(_ session: AgentSession) { acpLogSession = session }
 

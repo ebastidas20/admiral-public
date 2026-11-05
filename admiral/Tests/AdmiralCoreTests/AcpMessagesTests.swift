@@ -62,16 +62,6 @@ final class AcpMessagesTests: XCTestCase {
         XCTAssertEqual(st["prompt"], p["prompt"])
     }
 
-    func testConfigOptionsDecode() {
-        let r = json("""
-        {"configOptions":[{"id":"model","currentValue":"opus","options":[{"value":"opus"},{"value":"sonnet"}]}]}
-        """)
-        XCTAssertEqual(
-            AcpConfigOption.decodeAll(r),
-            [AcpConfigOption(id: "model", currentValue: "opus", values: ["opus", "sonnet"])])
-        XCTAssertEqual(AcpConfigOption.decodeAll(json("{}")), [])
-    }
-
     private func decode(_ update: String) -> AcpUpdate? {
         AcpUpdate.decode(json(#"{"sessionId":"S","update":\#(update)}"#))?.update
     }
