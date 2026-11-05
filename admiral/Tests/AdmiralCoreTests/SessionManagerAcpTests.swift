@@ -643,6 +643,27 @@ final class SessionManagerAcpTests: XCTestCase {
         XCTAssertEqual(session(s.id)?.acpQueued, ["do the thing"])
     }
 
+    /// A Stop block's follow-up (here the goal review) goes out as the next prompt, but Admiral
+    /// wrote it: Chat shows it as Admiral's, not the user's — while the user's own prompt stays theirs.
+    func testAStopFollowUpShowsInChatAsAdmirals() async throws {
+        let agent = ScriptedAgent()
+        let s = await readyTab(agent)
+        let sid = try XCTUnwrap(s.claudeSessionID)
+        guard case let .success(goals) = SessionGoals.make(from: ["ship it"]) else { return XCTFail("fixture") }
+        GoalsStore(base: base).set(goals, forSession: sid)
+        XCTAssertTrue(manager.send(s.id, text: "go"))
+        await until("prompt sent") { agent.heldPrompts == 1 }
+        agent.endPrompt()
+        await until("follow-up sent") { agent.prompts().count == 2 && agent.heldPrompts == 1 }
+        let followUp = try XCTUnwrap(agent.prompts().last)
+        let prompts = chatItems(s).compactMap { item -> (String, String?)? in
+            if case let .prompt(_, text, source, _) = item { return (text, source) }
+            return nil
+        }
+        XCTAssertEqual(prompts.map(\.0), ["go", followUp])
+        XCTAssertEqual(prompts.map(\.1), [nil, "admiral"])
+    }
+
     /// Deny is the card's interrupt: the request is cancelled and the card closes.
     func testDenyCancelsThePermissionAndClosesTheCard() async {
         let agent = ScriptedAgent()

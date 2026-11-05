@@ -15,9 +15,13 @@ public protocol AcpTurnHooks: Sendable {
 /// agent's held requests (permission, elicitation). The second `SessionDriver`, beside the PTY.
 ///
 /// Everything the connection hands over — notifications, agent→client requests, close, and
-/// the results of the prompts and steers this controller sent — goes through ONE ordered
-/// inbox consumed on the main actor. That is what keeps a turn's last `session/update` chunks
-/// ahead of the `session/prompt` result that ends it (the actor delivers both in line order).
+/// the results of the prompts and steers this controller sent — goes through ONE inbox
+/// consumed on the main actor. Notifications and close are yielded in line order from the
+/// connection's read loop, which is what keeps a turn's last `session/update` chunks ahead of
+/// the `session/prompt` result that ends it. Agent→client requests are NOT in line: the
+/// connection hands each to its own Task (`dispatchRequest`), so a permission request or an
+/// elicitation can reach the inbox after updates the agent sent later. Nothing here depends on
+/// their order relative to updates — they are held until answered, one card at a time.
 ///
 /// Turn state: `idle` → `prompting` (the hook ran or `session/prompt` is in flight) →
 /// `settling` (the result is in; `afterTurn` is deciding the follow-up) → `prompting` again
@@ -37,6 +41,8 @@ public final class AcpSessionController: SessionDriver {
             _ acpSessionID: String, _ capabilities: AcpCapabilities, _ configOptions: [AcpConfigOption]
         ) -> Void
         var turnEnded: (AcpStopReason) -> Void
+        /// A Stop block's follow-up is about to go out as the next prompt — Admiral's, not the user's.
+        var followUpSent: (String) -> Void
         /// The agent's oldest open permission request / elicitation, one at a time: the next
         /// is surfaced only once the one before it is answered (after `requestResolved`).
         var permissionRequested: (_ title: String) -> Void
@@ -53,6 +59,7 @@ public final class AcpSessionController: SessionDriver {
             phase: @escaping (Phase) -> Void = { _ in },
             sessionStarted: @escaping (String, AcpCapabilities, [AcpConfigOption]) -> Void = { _, _, _ in },
             turnEnded: @escaping (AcpStopReason) -> Void = { _ in },
+            followUpSent: @escaping (String) -> Void = { _ in },
             permissionRequested: @escaping (String) -> Void = { _ in },
             question: @escaping ([AskQuestion]) -> Void = { _ in },
             requestResolved: @escaping () -> Void = {},
@@ -63,6 +70,7 @@ public final class AcpSessionController: SessionDriver {
             self.phase = phase
             self.sessionStarted = sessionStarted
             self.turnEnded = turnEnded
+            self.followUpSent = followUpSent
             self.permissionRequested = permissionRequested
             self.question = question
             self.requestResolved = requestResolved
@@ -518,6 +526,7 @@ public final class AcpSessionController: SessionDriver {
             // Already hooked: a Stop block's continuation is not a user prompt (claude fires no
             // UserPromptSubmit for it). Through `beforePrompt` it would reset the goal-review and
             // watchdog budgets the block just spent, and the turn would loop forever.
+            events.followUpSent(followUp)
             send(Outgoing(raw: followUp, hookedText: followUp))
         } else {
             turn = .idle

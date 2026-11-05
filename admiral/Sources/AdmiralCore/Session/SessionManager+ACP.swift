@@ -120,6 +120,7 @@ extension SessionManager {
                 self?.acpSessionStarted(id, acpSessionID, capabilities: caps)
             },
             turnEnded: { [weak self] reason in self?.acpTurnEnded(id, reason) },
+            followUpSent: { [weak self] text in self?.acpFollowUpSent(id, text) },
             permissionRequested: { [weak self] title in self?.acpNeedsUser(id, .permission(title)) },
             question: { [weak self] questions in self?.acpNeedsUser(id, .question(questions)) },
             requestResolved: { [weak self] in self?.acpRequestsResolved(id) },
@@ -161,6 +162,16 @@ extension SessionManager {
     private func acpTurnEnded(_ id: UUID, _ reason: AcpStopReason) {
         guard reason == .endTurn, let session = sessions.first(where: { $0.id == id }) else { return }
         postNotification(id, .needsInput, "@\(session.displayTitle) needs you", "The agent is waiting for you")
+    }
+
+    /// A Stop follow-up is Admiral's prompt. An injected prompt is attributed through a marker
+    /// (`ChatLedger.markInjected`) that the `UserPromptSubmit` hook turns into a tagged ledger
+    /// prompt; a follow-up deliberately skips that hook (it is not a user prompt), so the tagged
+    /// prompt that marker would have become is written here directly.
+    private func acpFollowUpSent(_ id: UUID, _ text: String) {
+        guard let sid = sessions.first(where: { $0.id == id })?.claudeSessionID else { return }
+        ChatLedger.append(ChatEvent(ts: Self.acpChatTimestamp(), kind: .prompt, text: text, source: "admiral"),
+                          base: supportDir, session: sid)
     }
 
     /// A chat-ledger timestamp for an ACP event, to the millisecond like the mirror's lines.
