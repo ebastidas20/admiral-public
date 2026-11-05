@@ -14,7 +14,8 @@ public struct AcpTransportError: Error, Equatable, CustomStringConvertible {
 }
 
 /// Launches an agent command directly (no shell) and speaks ndjson over its stdio.
-/// The agent's stderr is appended to `logURL`.
+/// The agent's stderr is appended to `logURL`. `/usr/bin/env` looks the command up on the
+/// `PATH` `LaunchEnvironment` decides (the login shell's, not launchd's), set in the child env.
 public final class ProcessAcpTransport: AcpTransport, @unchecked Sendable {
     public let lines: AsyncStream<String>
     private let process = Process()
@@ -24,7 +25,13 @@ public final class ProcessAcpTransport: AcpTransport, @unchecked Sendable {
     private let writeLock = NSLock()
     private var stdinClosed = false
 
-    public init(command: AcpCommand, env: [String: String], logURL: URL) throws {
+    public init(
+        command: AcpCommand,
+        env: [String: String],
+        logURL: URL,
+        baseEnvironment: [String: String] = ProcessInfo.processInfo.environment,
+        loginPath: () -> String? = LoginShellPath.shared.current
+    ) throws {
         // O_APPEND: Admiral appends its own lines to the same file (`AcpLog`), and a plain
         // offset would let the agent's next stderr write land on top of them.
         let logFD = AcpLog.openAppending(logURL)
@@ -37,7 +44,7 @@ public final class ProcessAcpTransport: AcpTransport, @unchecked Sendable {
 
         process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
         process.arguments = [command.command] + command.args
-        process.environment = ProcessInfo.processInfo.environment.merging(env) { _, new in new }
+        process.environment = LaunchEnvironment.make(base: baseEnvironment, overrides: env, loginPath: loginPath)
         process.standardInput = stdinPipe
         process.standardOutput = stdoutPipe
         process.standardError = stderrHandle
@@ -49,10 +56,15 @@ public final class ProcessAcpTransport: AcpTransport, @unchecked Sendable {
         _ = fcntl(stdinPipe.fileHandleForWriting.fileDescriptor, F_SETNOSIGPIPE, 1)
 
         let reader = LineBuffer()
+        // Signalled once the exit is logged. EOF usually beats the termination handler, so it
+        // waits (briefly: an agent may close stdout and live on) — when `lines` finishes, the
+        // log already says how the agent exited, for the failure reason (`AcpLog.exitStatus`).
+        let exitLogged = DispatchSemaphore(value: 0)
         stdoutPipe.fileHandleForReading.readabilityHandler = { fh in
             let data = fh.availableData
             if data.isEmpty {
                 fh.readabilityHandler = nil
+                _ = exitLogged.wait(timeout: .now() + 1)
                 if reader.markFinished() {
                     if let rest = reader.flush() { cont.yield(rest) }
                     cont.finish()
@@ -67,6 +79,7 @@ public final class ProcessAcpTransport: AcpTransport, @unchecked Sendable {
             stdoutPipe.fileHandleForReading.readabilityHandler = nil
             Self.drain(fd: readFD, into: reader, cont: cont)
             Self.logExit(proc, to: logURL)
+            exitLogged.signal()
             if reader.markFinished() {
                 if let rest = reader.flush() { cont.yield(rest) }
                 cont.finish()
@@ -116,8 +129,8 @@ public final class ProcessAcpTransport: AcpTransport, @unchecked Sendable {
     }
 
     private static func logExit(_ proc: Process, to logURL: URL) {
-        let reason = proc.terminationReason == .uncaughtSignal ? "signal" : "exit"
-        AcpLog.append("acp: agent \(reason) status \(proc.terminationStatus)", to: logURL)
+        AcpLog.append(AcpLog.exitLine(
+            signal: proc.terminationReason == .uncaughtSignal, status: proc.terminationStatus), to: logURL)
     }
 
     public func terminate() {

@@ -40,7 +40,12 @@ extension CommandRunner {
 /// drained WHILE the process runs: a command that writes more than a pipe buffer (a `gh pr list`
 /// with checks) would otherwise block on write, never exit, and run into the timeout.
 public struct LocalCommandRunner: CommandRunner {
-    public init() {}
+    /// The child's whole environment; nil = inherit Admiral's, as every local caller does.
+    public let environment: [String: String]?
+
+    public init(environment: [String: String]? = nil) {
+        self.environment = environment
+    }
 
     public func run(_ argv: [String], cwd: String?, timeout: TimeInterval) -> (code: Int32, stdout: String)? {
         runCapturingStderr(argv, cwd: cwd, timeout: timeout).map { ($0.code, $0.stdout) }
@@ -50,6 +55,7 @@ public struct LocalCommandRunner: CommandRunner {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
         process.arguments = argv
+        if let environment { process.environment = environment }
         if let cwd { process.currentDirectoryURL = URL(fileURLWithPath: cwd) }
         let out = Pipe(), err = Pipe()
         process.standardOutput = out
@@ -96,15 +102,39 @@ private final class PipeDrain: @unchecked Sendable {
 /// `docker exec -w /workspace box git …`), launched on the Mac with no shell. A `cwd` is a path
 /// in THAT environment, so it is applied there, by a `sh` the prefix runs:
 /// `sh -c 'cd <cwd> && exec "$@"' sh argv…` — the cwd single-quoted, the argv untouched.
+///
+/// The prefix is found on the same `PATH` the agent is launched with (`LaunchEnvironment`),
+/// decided per run so a login-shell `PATH` that resolves after the tab opened is picked up.
 public struct ExecCommandRunner: CommandRunner {
     public let exec: AcpCommand
     /// A hung `docker exec` (a stopped container, a wedged daemon) must not pin a thread forever.
     public let defaultTimeout: TimeInterval
+    /// The agent config's own `PATH`, which wins over the login shell's.
+    public let configuredPath: String?
+    private let baseEnvironment: [String: String]
+    private let loginPath: @Sendable () -> String?
 
-    public init(exec: AcpCommand, defaultTimeout: TimeInterval = 5) {
+    public init(
+        exec: AcpCommand,
+        defaultTimeout: TimeInterval = 5,
+        configuredPath: String? = nil,
+        baseEnvironment: [String: String] = ProcessInfo.processInfo.environment,
+        loginPath: @escaping @Sendable () -> String? = { LoginShellPath.shared.current() }
+    ) {
         self.exec = exec
         self.defaultTimeout = defaultTimeout
+        self.configuredPath = configuredPath
+        self.baseEnvironment = baseEnvironment
+        self.loginPath = loginPath
     }
+
+    /// The environment `exec` is launched with.
+    public var environment: [String: String] {
+        LaunchEnvironment.make(
+            base: baseEnvironment, overrides: configuredPath.map { ["PATH": $0] } ?? [:], loginPath: loginPath)
+    }
+
+    private var local: LocalCommandRunner { LocalCommandRunner(environment: environment) }
 
     public func argv(for argv: [String], cwd: String?) -> [String] {
         let prefix = [exec.command] + exec.args
@@ -113,10 +143,10 @@ public struct ExecCommandRunner: CommandRunner {
     }
 
     public func run(_ argv: [String], cwd: String?, timeout: TimeInterval) -> (code: Int32, stdout: String)? {
-        LocalCommandRunner().run(self.argv(for: argv, cwd: cwd), cwd: nil, timeout: timeout)
+        local.run(self.argv(for: argv, cwd: cwd), cwd: nil, timeout: timeout)
     }
 
     public func runCapturingStderr(_ argv: [String], cwd: String?, timeout: TimeInterval) -> CommandOutput? {
-        LocalCommandRunner().runCapturingStderr(self.argv(for: argv, cwd: cwd), cwd: nil, timeout: timeout)
+        local.runCapturingStderr(self.argv(for: argv, cwd: cwd), cwd: nil, timeout: timeout)
     }
 }

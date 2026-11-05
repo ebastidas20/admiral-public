@@ -119,7 +119,7 @@ public actor JSONRPCConnection {
         guard let value = try? JSONDecoder().decode(JSONValue.self, from: Data(line.utf8)),
               case .object = value, value["jsonrpc"] != nil || value["id"] != nil || value["method"] != nil
         else {
-            log("acp: non-JSON line: \(Self.loggable(line))")
+            log(AcpLog.nonJSONPrefix + Self.loggable(line))
             return
         }
         if let method = value["method"]?.stringValue {

@@ -57,6 +57,34 @@ final class ProcessAcpTransportTests: XCTestCase {
         XCTAssertEqual(line, "hello")
     }
 
+    /// A Finder-launched app inherits launchd's PATH; the agent's binary lives only in a dir the
+    /// login shell's PATH has. `/usr/bin/env` must look it up on THAT PATH, set in the child env.
+    func testFindsABinaryOnlyOnTheLoginPathDespiteAMinimalInheritedPath() async throws {
+        let dir = try ToolDir(name: "acp-only-here", script: #"echo '{"jsonrpc":"2.0","id":1}'"#)
+        defer { dir.remove() }
+        let t = try ProcessAcpTransport(
+            command: AcpCommand(command: "acp-only-here", args: []),
+            env: [:],
+            logURL: tempLog(),
+            baseEnvironment: ["PATH": "/usr/bin:/bin"],
+            loginPath: { dir.url.path + ":/usr/bin:/bin" })
+        defer { t.terminate() }
+        let line = await firstLine(t)
+        XCTAssertEqual(line, #"{"jsonrpc":"2.0","id":1}"#)
+    }
+
+    /// When `lines` finishes the exit is already in the log, so a failure can say "127".
+    func testExitStatusIsLoggedBeforeLinesFinish() async throws {
+        let log = tempLog()
+        let t = try ProcessAcpTransport(
+            command: AcpCommand(command: "no-such-acp-agent-\(UUID().uuidString)", args: []),
+            env: [:], logURL: log, baseEnvironment: ["PATH": "/usr/bin:/bin"], loginPath: { nil })
+        defer { t.terminate() }
+        for await _ in t.lines {}
+        XCTAssertEqual(AcpLog.exitStatus(log, after: 0), 127)
+        XCTAssertTrue(AcpLog.lastAgentLine(log, after: 0)?.hasPrefix("env: ") == true)
+    }
+
     func testLinesFinishOnProcessExitEvenIfGrandchildHoldsStdout() async throws {
         let log = tempLog()
         let t = try ProcessAcpTransport(

@@ -29,9 +29,51 @@ public enum AcpLog {
     static let tailBytes: UInt64 = 8 * 1024
     public static let maxLineLength = 300
 
-    /// The last line the agent itself wrote (its stderr) after `offset`: the real reason a
-    /// container or binary refused to start. Admiral's own lines carry an `acp:` prefix and are
-    /// skipped. Only the last `tailBytes` are read, and the line is cut at `maxLineLength`.
+    /// How `JSONRPCConnection` logs a stdout line that is not JSON-RPC. That line is the agent's
+    /// own words too: `docker exec` writes an OCI failure ("executable file not found in $PATH")
+    /// to stdout, not stderr, so `lastAgentLine` counts it.
+    public static let nonJSONPrefix = "acp: non-JSON line: "
+
+    /// The line `ProcessAcpTransport` logs when the agent's process ends.
+    static func exitLine(signal: Bool, status: Int32) -> String {
+        "acp: agent \(signal ? "signal" : "exit") status \(status)"
+    }
+
+    /// The agent's exit status from this launch's stretch of the log (after `offset`), nil when
+    /// it has not exited, or was killed by a signal.
+    public static func exitStatus(_ url: URL, after offset: UInt64) -> Int32? {
+        guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }
+        defer { try? handle.close() }
+        let end = size(url)
+        let start = max(offset, end > tailBytes ? end - tailBytes : 0)
+        guard (try? handle.seek(toOffset: start)) != nil, let data = try? handle.readToEnd() else { return nil }
+        let marker = "acp: agent exit status "
+        return String(decoding: data, as: UTF8.self).split(separator: "\n")
+            .last { $0.hasPrefix(marker) || $0.hasPrefix("acp: agent signal status ") }
+            .flatMap { $0.hasPrefix(marker) ? Int32($0.dropFirst(marker.count)) : nil }
+    }
+
+    /// Why a launch failed, as the UI shows it (Test connection, a tab's `connectError`):
+    /// `reason`, the agent's last line from this launch, and — on exit 127 from `env` itself,
+    /// which is a command not found on the `PATH` — a hint to give its full path.
+    public static func failureReason(
+        _ reason: String, log url: URL, after offset: UInt64, command: String
+    ) -> String {
+        let line = lastAgentLine(url, after: offset)
+        var text = line.map { "\(reason): \($0)" } ?? reason
+        // A 127 from inside a container (`docker exec` of a missing binary) is not about the
+        // Mac's PATH: only `env`'s own complaint, or no word at all, gets the hint.
+        if exitStatus(url, after: offset) == 127, line.map({ $0.hasPrefix("env:") }) ?? true {
+            let name = (command as NSString).lastPathComponent
+            text += " \u{2014} is `\(command)` on your PATH? Use its full path (e.g. /usr/local/bin/\(name))"
+        }
+        return text
+    }
+
+    /// The last line the agent itself wrote after `offset` — its stderr, or a non-JSON line on
+    /// its stdout: the real reason a container or binary refused to start. Admiral's own lines
+    /// carry an `acp:` prefix and are skipped (a non-JSON line is unwrapped from its prefix).
+    /// Only the last `tailBytes` are read, and the line is cut at `maxLineLength`.
     public static func lastAgentLine(_ url: URL, after offset: UInt64) -> String? {
         guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }
         defer { try? handle.close() }
@@ -39,7 +81,11 @@ public enum AcpLog {
         let start = max(offset, end > tailBytes ? end - tailBytes : 0)
         guard (try? handle.seek(toOffset: start)) != nil, let data = try? handle.readToEnd() else { return nil }
         let lines = String(decoding: data, as: UTF8.self).split(separator: "\n", omittingEmptySubsequences: false)
-            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .map { line -> String in
+                let l = line.trimmingCharacters(in: .whitespaces)
+                return l.hasPrefix(nonJSONPrefix)
+                    ? String(l.dropFirst(nonJSONPrefix.count)).trimmingCharacters(in: .whitespaces) : l
+            }
         func agentLine(_ l: String) -> Bool { !l.isEmpty && !l.hasPrefix("acp:") }
         // A read that starts mid-file starts mid-line: that first fragment is only the end of
         // a line, used only when no whole line follows it (one stderr line longer than the tail)

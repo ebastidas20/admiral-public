@@ -107,7 +107,7 @@ public final class SessionManager: ObservableObject {
     /// none. The one place an ACP tab's runner is made — hooks, probes and branch refresh all
     /// take it from here. Swappable so tests never spawn `docker exec`.
     public var acpRunnerFactory: (AcpAgentConfig) -> CommandRunner? = { agent in
-        agent.effectiveExec.map { ExecCommandRunner(exec: $0) }
+        agent.effectiveExec.map { ExecCommandRunner(exec: $0, configuredPath: agent.env["PATH"]) }
     }
     /// Whether Admiral's session bridge listener (`/mcp/session`) is up, read at each ACP
     /// launch: true = the tab's agent is offered it (`AcpMCPServer.sessionBridge`); false = no

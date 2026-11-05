@@ -88,7 +88,8 @@ extension SessionManager {
                 mcpServer: sessionBridgeRunning()
                     ? AcpMCPServer.sessionBridge(agent: agent, token: session.token) : nil,
                 hooks: hooks,
-                events: acpEvents(id, controller: box, logURL: logURL, logStart: logStart),
+                events: acpEvents(
+                    id, controller: box, logURL: logURL, logStart: logStart, command: config.launch.command),
                 // `session/load` replays the whole history. The mirror already holds it (same
                 // local id, same file), so the replay is dropped — unless the file is gone, in
                 // which case the replay is what rebuilds the Chat history.
@@ -109,12 +110,13 @@ extension SessionManager {
     /// The controller's events, into this tab. Weak both ways: the manager owns the controller
     /// (through `drivers`), and the controller owns these closures.
     private func acpEvents(
-        _ id: UUID, controller: WeakController, logURL: URL, logStart: UInt64
+        _ id: UUID, controller: WeakController, logURL: URL, logStart: UInt64, command: String
     ) -> AcpSessionController.Events {
         AcpSessionController.Events(
             status: { [weak self] in self?.applyStatus($0, to: id) },
             phase: { [weak self] phase in
-                self?.acpPhaseChanged(id, phase, controller: controller.value, logURL: logURL, logStart: logStart)
+                self?.acpPhaseChanged(
+                    id, phase, controller: controller.value, logURL: logURL, logStart: logStart, command: command)
             },
             sessionStarted: { [weak self] acpSessionID, caps, _ in
                 self?.acpSessionStarted(id, acpSessionID, capabilities: caps)
@@ -213,12 +215,12 @@ extension SessionManager {
 
     /// A failed handshake ends the agent's process and leaves the tab dead; an ended connection
     /// is already dead. Either way the tab records why (`connectError`, with the agent's last
-    /// stderr line from this launch), and input still queued — which would otherwise vanish
-    /// without a word — is written to the tab's ACP log. A failure is reported once: the
+    /// line from this launch and a PATH hint — `AcpLog.failureReason`), and input still queued —
+    /// which would otherwise vanish without a word — is written to the tab's ACP log. A failure is reported once: the
     /// `.ended` that follows a `.failed` adds nothing.
     private func acpPhaseChanged(
         _ id: UUID, _ phase: AcpSessionController.Phase, controller: AcpSessionController?,
-        logURL: URL, logStart: UInt64
+        logURL: URL, logStart: UInt64, command: String
     ) {
         let state: String
         let reason: String
@@ -237,8 +239,8 @@ extension SessionManager {
             state = "ended"
             reason = "the agent exited"
         }
-        let stderr = AcpLog.lastAgentLine(logURL, after: logStart)
-        update(id) { $0.connectError = stderr.map { "\(reason): \($0)" } ?? reason }
+        let message = AcpLog.failureReason(reason, log: logURL, after: logStart, command: command)
+        update(id) { $0.connectError = message }
         for text in controller?.queued ?? [] {
             AcpLog.append("acp: not delivered (session \(state)): \(text)", to: logURL)
         }

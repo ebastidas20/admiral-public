@@ -17,14 +17,15 @@ extension SessionManager {
     /// Spawn the agent, `initialize` ONLY — never `session/new`, which would start its MCP
     /// servers and hooks just to look — then end it, and run the exec probes (git, gh, gh
     /// auth) in its environment. The traffic and the agent's stderr go to
-    /// `<base>/acp/test-<agent id>.log`; a failure carries its last stderr line.
+    /// `<base>/acp/test-<agent id>.log`; a failure carries its last line (stderr, or
+    /// non-JSON stdout) and a PATH hint on a command not found.
     public func testACPConnection(_ agent: AcpAgentConfig) async -> AcpConnectionTestResult {
         let logURL = Self.acpLogURL(base: supportDir, session: "test-\(agent.id.uuidString.lowercased())")
         let logStart = AcpLog.size(logURL)
         func failed(_ reason: String) -> AcpConnectionTestResult {
             AcpLog.append("acp: connection test failed: \(reason)", to: logURL)
-            let stderr = AcpLog.lastAgentLine(logURL, after: logStart)
-            return .failed(message: stderr.map { "\(reason): \($0)" } ?? reason, log: logURL)
+            let message = AcpLog.failureReason(reason, log: logURL, after: logStart, command: agent.launch.command)
+            return .failed(message: message, log: logURL)
         }
         let transport: AcpTransport
         do {

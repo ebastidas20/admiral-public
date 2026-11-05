@@ -765,6 +765,9 @@ final class AppModel: ObservableObject {
         var overrides: [String: String] = [:]
         overrides["ADMIRAL_SOCKET"] = bridgeSocketPath
 
+        // An ACP agent is launched on the login shell's PATH (launchd's has no docker); start
+        // reading it now, off the main actor, so a tab opened later finds it already cached.
+        LoginShellPath.shared.prewarm()
         let manager = SessionManager(
             host: host,
             claudeHome: testHome ?? SessionManager.defaultClaudeHome,

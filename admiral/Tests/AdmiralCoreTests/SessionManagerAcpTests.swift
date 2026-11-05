@@ -781,6 +781,39 @@ final class SessionManagerAcpTests: XCTestCase {
             log: log))
     }
 
+    /// A real launch of a command that is on no PATH: the message carries env's own words and
+    /// the hint to give the full path.
+    func testConnectionTestOfAMissingCommandSaysWhyAndHowToFixIt() async throws {
+        manager.acpTransportFactory = {
+            try ProcessAcpTransport(command: $0.launch, env: $0.env, logURL: $1, loginPath: { nil })
+        }
+        let missing = AcpAgentConfig(name: "Gone", launch: AcpCommand(command: "no-such-acp-agent"), cwd: agentCwd)
+        let result = await manager.testACPConnection(missing)
+        guard case let .failed(message, _) = result else { return XCTFail("expected failed, got \(result)") }
+        XCTAssertEqual(message, "the agent exited or did not answer initialize: "
+            + "env: no-such-acp-agent: No such file or directory"
+            + " \u{2014} is `no-such-acp-agent` on your PATH?"
+            + " Use its full path (e.g. /usr/local/bin/no-such-acp-agent)")
+    }
+
+    /// `docker exec` writes an OCI failure to STDOUT, then exits 127 — that line is the reason,
+    /// and since it is not env's own complaint, no Mac-PATH hint.
+    func testConnectionTestFailureCarriesANonJSONStdoutLine() async throws {
+        let dir = try ToolDir(name: "fake-docker", script: """
+            echo 'OCI runtime exec failed: exec: "claude-agent-acp": executable file not found in $PATH'
+            exit 127
+            """)
+        defer { dir.remove() }
+        manager.acpTransportFactory = {
+            try ProcessAcpTransport(command: $0.launch, env: $0.env, logURL: $1, loginPath: { dir.url.path })
+        }
+        let box = AcpAgentConfig(name: "Box", launch: AcpCommand(command: "fake-docker"), cwd: agentCwd)
+        let result = await manager.testACPConnection(box)
+        guard case let .failed(message, _) = result else { return XCTFail("expected failed, got \(result)") }
+        XCTAssertEqual(message, "the agent exited or did not answer initialize: "
+            + #"OCI runtime exec failed: exec: "claude-agent-acp": executable file not found in $PATH"#)
+    }
+
     func testOpeningAnImportedSessionTwiceSelectsTheOpenTab() async {
         scripted.append(ScriptedAgent(capabilities: resume))
         let first = manager.openImportedACP(agent: ppt, acpSessionID: "a7", title: "Fix the login bug")
