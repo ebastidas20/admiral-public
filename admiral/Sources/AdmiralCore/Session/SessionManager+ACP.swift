@@ -79,7 +79,7 @@ extension SessionManager {
             let box = WeakController()
             let hooks = AcpHookAdapter(
                 base: supportDir, token: session.token, sessionID: sessionID, cwd: cwd,
-                runner: agent.effectiveExec.map { ExecCommandRunner(exec: $0) },
+                runner: acpRunnerFactory(agent),
                 transcriptPath: mirrorURL.path)
             let made = AcpSessionController(
                 config: config, connection: connection,
@@ -113,17 +113,22 @@ extension SessionManager {
             phase: { [weak self] phase in
                 self?.acpPhaseChanged(id, phase, controller: controller.value, logURL: logURL, logStart: logStart)
             },
-            sessionStarted: { [weak self] acpSessionID, _, _ in self?.acpSessionStarted(id, acpSessionID) },
+            sessionStarted: { [weak self] acpSessionID, caps, _ in
+                self?.acpSessionStarted(id, acpSessionID, capabilities: caps)
+            },
             update: { [weak self] _ in self?.update(id) { $0.lastActivityAt = Date() } })
     }
 
-    /// The agent named its session: remember it on the tab, and — unless scratch — write the
-    /// restore record, keeping the tab list's order (the upsert appends).
-    private func acpSessionStarted(_ id: UUID, _ acpSessionID: String) {
+    /// The agent named its session: remember it (and what it negotiated) on the tab, probe its
+    /// environment, and — unless scratch — write the restore record, keeping the tab list's
+    /// order (the upsert appends).
+    private func acpSessionStarted(_ id: UUID, _ acpSessionID: String, capabilities: AcpCapabilities) {
         update(id) {
             $0.acpSessionID = acpSessionID
             $0.connectError = nil
+            $0.acpCapabilities = AcpCapabilityRecord(negotiated: capabilities)
         }
+        probeEnvironment(id)
         guard let s = sessions.first(where: { $0.id == id }), !s.scratch else { return }
         persistRecord(of: s)
         openSessionsStore.reorder(sessions.compactMap(\.claudeSessionID))
@@ -160,6 +165,42 @@ extension SessionManager {
         for text in controller?.queued ?? [] {
             AcpLog.append("acp: not delivered (session \(state)): \(text)", to: logURL)
         }
+    }
+
+    /// `git`/`gh`/`gh auth` in the agent's environment, off the main actor (each bounded at
+    /// 5 s), into the tab's capability record. No exec = nothing to run: the record stays unprobed.
+    private func probeEnvironment(_ id: UUID) {
+        guard let session = sessions.first(where: { $0.id == id }),
+              let runner = acpRunner(for: session) else { return }
+        let cwd = session.cwd
+        Task.detached(priority: .utility) { [weak self] in
+            let probed = AcpCapabilityRecord.probe(runner: runner, cwd: cwd)
+            await MainActor.run {
+                self?.update(id) {
+                    $0.acpCapabilities?.git = probed.git
+                    $0.acpCapabilities?.gh = probed.gh
+                    $0.acpCapabilities?.ghAuthed = probed.ghAuthed
+                }
+            }
+        }
+    }
+
+    /// How this tab reads git, and how often — decided here, once per tab kind: a PTY tab asks
+    /// the Mac every 2 s (as it always has); an ACP tab asks its agent's environment through
+    /// exec, every 5 s (each call is a `docker exec`), and only once the probe found git there.
+    /// Nil = no git to ask; the branch is left alone rather than read from the wrong machine.
+    func gitAccess(for session: AgentSession) -> (runner: CommandRunner, interval: TimeInterval)? {
+        guard session.backend != .pty else { return (LocalCommandRunner(), 2) }
+        guard session.acpCapabilities?.isEnabled(.branch) == true,
+              let runner = acpRunner(for: session) else { return nil }
+        return (runner, 5)
+    }
+
+    /// The runner into an ACP tab's environment (its agent's exec command, via
+    /// `acpRunnerFactory`); nil on a PTY tab, or when the agent has no exec or is gone.
+    public func acpRunner(for session: AgentSession) -> CommandRunner? {
+        guard case let .acp(agentName) = session.backend else { return nil }
+        return acpAgent(named: agentName).flatMap(acpRunnerFactory)
     }
 
     /// An ACP fork: only when the agent advertised `session/fork`, else a no-op. The source's

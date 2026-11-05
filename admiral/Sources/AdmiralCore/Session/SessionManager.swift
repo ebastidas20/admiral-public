@@ -103,6 +103,12 @@ public final class SessionManager: ObservableObject {
     /// The configured ACP agents (Settings → Agents), re-read per call so restore, reload and
     /// fork find an agent edited since launch. None unless the app wires it.
     public var acpAgents: () -> [AcpAgentConfig] = { [] }
+    /// How commands reach an ACP agent's environment (its exec command), or nil when it has
+    /// none. The one place an ACP tab's runner is made — hooks, probes and branch refresh all
+    /// take it from here. Swappable so tests never spawn `docker exec`.
+    public var acpRunnerFactory: (AcpAgentConfig) -> CommandRunner? = { agent in
+        agent.effectiveExec.map { ExecCommandRunner(exec: $0) }
+    }
     /// The session bridge an ACP tab's agent reaches Admiral's tools on, for a tab's token.
     /// Nil (or a nil answer) = no MCP server: the listener is not running.
     public var sessionBridge: ((_ token: String) -> AcpMCPServer?)? = nil
@@ -1261,20 +1267,22 @@ public final class SessionManager: ObservableObject {
     /// footprint. The branch set at commission (and the branch stored per footprint repo) goes
     /// stale the moment a checkout happens — which it does to raise a PR — leaving PR lookups
     /// querying the wrong head, so a freshly-opened PR never surfaces. Refresh them all and
-    /// persist when anything changed. Off-main, throttled (~2s), one refresh in flight per
-    /// session, and a no-op when nothing changed.
+    /// persist when anything changed. Off-main, throttled (`gitAccess`), one refresh in flight
+    /// per session, and a no-op when nothing changed — or when the tab has no git to ask.
     public func refreshGitBranch(for id: UUID) {
         guard let session = sessions.first(where: { $0.id == id }),
+              let access = gitAccess(for: session),
               !branchRefreshingIDs.contains(id),
-              Date().timeIntervalSince(lastBranchRefresh[id] ?? .distantPast) > 2 else { return }
+              Date().timeIntervalSince(lastBranchRefresh[id] ?? .distantPast) > access.interval else { return }
         branchRefreshingIDs.insert(id)
         lastBranchRefresh[id] = Date()
         let cwd = session.cwd
         let roots = session.touchedRepos.map(\.root)
+        let runner = access.runner
         Task.detached(priority: .utility) { [weak self] in
-            let sessionBranch = Git.branch(at: cwd)
+            let sessionBranch = Git.branch(at: cwd, runner: runner)
             var byRoot: [String: String?] = [:]
-            for root in roots where byRoot[root] == nil { byRoot[root] = Git.branch(at: root) }
+            for root in roots where byRoot[root] == nil { byRoot[root] = Git.branch(at: root, runner: runner) }
             await MainActor.run {
                 guard let self else { return }
                 self.branchRefreshingIDs.remove(id)

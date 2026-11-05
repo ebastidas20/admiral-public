@@ -11,7 +11,9 @@ import Foundation
 /// closure backed by `GitHubService`, which owns the shared `gh` rate limit.
 @MainActor
 public final class PRWatchService: ObservableObject {
-    public typealias Fetcher = @Sendable (_ root: String, _ branches: [String]) async -> [PRStatus]
+    /// `session` is the tab the repo belongs to — so the app asks gh where that tab's files are.
+    public typealias Fetcher = @Sendable (_ session: AgentSession, _ root: String, _ branches: [String]) async
+        -> [PRStatus]
 
     /// How often a repo is polled, and the slower cadence for one whose PRs have all merged
     /// (nothing left to learn, but a new branch may still show up).
@@ -46,6 +48,7 @@ public final class PRWatchService: ObservableObject {
         for session in manager.sessions {
             guard let sid = session.claudeSessionID, session.status != .shell else { continue }
             guard isWatched(sid) else { continue }   // the gate
+            guard session.canQueryPRs else { continue }   // an ACP tab with no (logged-in) gh
             // The app only keeps the *selected* session's footprint current, and this runs
             // for sessions nobody is looking at — so ask for the repos we are about to poll.
             // Both calls are guarded internally (in-flight / once-only) and read an append
@@ -114,7 +117,7 @@ public final class PRWatchService: ObservableObject {
             lastFetch[key] = now
             let fetch = self.fetch
             tasks.append(Task { [weak self] in
-                let statuses = await fetch(root, branches)
+                let statuses = await fetch(session, root, branches)
                 guard let self else { return }
                 self.inFlight.remove(key)
                 self.fresh[sid, default: [:]][root] = statuses

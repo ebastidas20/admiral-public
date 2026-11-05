@@ -50,6 +50,10 @@ public struct AgentSession: Identifiable, Sendable, Hashable {
     public var backend: SessionBackend = .pty
     /// The agent's own session id on an ACP tab (`session/new`); nil on a PTY tab.
     public var acpSessionID: String? = nil
+    /// What an ACP tab can do and why not: set from the negotiated capabilities once the agent
+    /// names its session, with the exec probes (git, gh, gh auth) filled in after. Nil on a PTY
+    /// tab, and on an ACP tab still connecting.
+    public var acpCapabilities: AcpCapabilityRecord? = nil
     /// Why an ACP tab's agent is not running — a failed launch or handshake (a stopped
     /// container, a refused mode), or the agent exiting later — with the agent's last stderr
     /// line when it left one. Nil while it runs; a reload starts a fresh session, so it clears.

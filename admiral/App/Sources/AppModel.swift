@@ -104,7 +104,8 @@ final class AppModel: ObservableObject {
         store: PRWatchStore(base: sessions.supportDir),
         idle: idleClock,
         isWatched: { [weak self] sid in self?.isWatchdogWatching(sid) ?? false },
-        fetch: { [github] root, branches in
+        fetch: { [weak self] session, root, branches in
+            guard let github = await self?.github(for: session) else { return [] }
             var prs: [PRStatus] = []
             var seen = Set<Int>()
             for branch in branches {
@@ -123,6 +124,24 @@ final class AppModel: ObservableObject {
         return watchdog.phase(forSession: sid) != .disarmed
     }
     private let github = GitHubService()
+    /// ACP tabs' gh, each run through that tab's exec runner (its environment's gh and login),
+    /// by tab id. All share `GitHubService.sharedLimiter`, so the gh rate cap stays app-wide.
+    private var acpGitHub: [UUID: GitHubService] = [:]
+
+    /// The gh to ask about `session`'s PRs: the Mac's for a PTY tab; the tab's own (through its
+    /// exec) for an ACP tab whose record enables PR watch; nil otherwise.
+    func github(for session: AgentSession) -> GitHubService? {
+        guard session.canQueryPRs else { return nil }
+        guard session.backend != .pty else { return github }
+        if let made = acpGitHub[session.id] { return made }
+        guard let runner = sessions.acpRunner(for: session) else { return nil }
+        let made = GitHubService(runner: runner)
+        // Drop closed tabs' instances as new ones are made (a reload is a new tab id).
+        let open = Set(sessions.sessions.map(\.id))
+        acpGitHub = acpGitHub.filter { open.contains($0.key) }
+        acpGitHub[session.id] = made
+        return made
+    }
     /// Merge-readiness of the selected session's PR (refreshed periodically). nil = none.
     @Published var prStatus: PRStatus?
     private var prSession: UUID?
@@ -1636,10 +1655,10 @@ final class AppModel: ObservableObject {
         // stale chip and refetch now instead of waiting out the 30s throttle.
         if prBranch != branch { prBranch = branch; prStatus = nil; lastPRFetch = .distantPast }
         guard !prFetchInFlight, Date().timeIntervalSince(lastPRFetch) > 30 else { return }
+        guard let gh = github(for: session) else { if prStatus != nil { prStatus = nil }; return }
         prFetchInFlight = true
         lastPRFetch = Date()
         let cwd = session.cwd
-        let gh = github
         Task.detached {
             let status = await gh.prStatus(branch: branch, cwd: cwd)
             await MainActor.run {
@@ -1671,8 +1690,8 @@ final class AppModel: ObservableObject {
     func mergeSelectedPR() {
         guard let pr = prStatus, pr.canMerge, !pr.isMerged, let id = sessions.selectedID,
               let session = sessions.sessions.first(where: { $0.id == id }) else { return }
+        guard let gh = github(for: session) else { return }
         let cwd = session.cwd, number = pr.number
-        let gh = github
         Task.detached {
             let error = await gh.merge(number: number, cwd: cwd)
             await MainActor.run {

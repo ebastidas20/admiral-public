@@ -32,7 +32,7 @@ final class PRWatchServiceTests: XCTestCase {
         service = PRWatchService(
             manager: manager, store: store, idle: idle,
             isWatched: { [weak self] _ in self?.watched ?? false },
-            fetch: { [weak self] root, _ in
+            fetch: { [weak self] _, root, _ in
                 await MainActor.run {
                     self?.fetched.append(root)
                     return self?.next ?? []
@@ -86,6 +86,41 @@ final class PRWatchServiceTests: XCTestCase {
         XCTAssertNil(store.state(forSession: "sid-1"))
     }
 
+    /// An ACP tab is polled only where its gh is there and logged in — asking the Mac's gh
+    /// about a container path would be wrong, and a gh with no login would fail every minute.
+    func testACPTabIsPolledOnlyWhenItsRecordEnablesPRWatch() async {
+        service = PRWatchService(
+            manager: manager, store: store, idle: idle,
+            isWatched: { $0 == "sid-acp" },
+            fetch: { [weak self] session, root, _ in
+                await MainActor.run {
+                    self?.fetched.append("\(session.callsign):\(root)")
+                    return self?.next ?? []
+                }
+            })
+        var acp = AgentSession(callsign: "agent", cwd: "/workspace", claudeSessionID: "sid-acp",
+                               status: .idle, token: "tok-acp")
+        acp.backend = .acp(agentName: "PPT")
+        acp.touchedRepos = session.touchedRepos
+        let caps = AcpCapabilities(initializeResult: .object([:]))
+        acp.acpCapabilities = AcpCapabilityRecord(negotiated: caps, git: true, gh: true, ghAuthed: false)
+        manager.register(acp, handle: host.spawn(executable: "/bin/echo", args: [], env: [:],
+                                                 cwd: "/tmp", onExit: { _ in }))
+        await cycle(at: t0)
+        XCTAssertEqual(fetched, [], "gh not logged in in the agent's environment")
+
+        manager.delete(acp.id)
+        acp = AgentSession(id: UUID(), callsign: "agent", cwd: "/workspace", claudeSessionID: "sid-acp",
+                           status: .idle, token: "tok-acp")
+        acp.backend = .acp(agentName: "PPT")
+        acp.touchedRepos = session.touchedRepos
+        acp.acpCapabilities = AcpCapabilityRecord(negotiated: caps, git: true, gh: true, ghAuthed: true)
+        manager.register(acp, handle: host.spawn(executable: "/bin/echo", args: [], env: [:],
+                                                 cwd: "/tmp", onExit: { _ in }))
+        await cycle(at: t0)
+        XCTAssertEqual(fetched, ["agent:\(root)"], "the fetch is told which tab the repo is")
+    }
+
     func testWatchedSessionFetchesAndTellsTheSessionOnce() async {
         await cycle(at: t0)
         XCTAssertEqual(fetched, [root])
@@ -107,7 +142,7 @@ final class PRWatchServiceTests: XCTestCase {
         service = PRWatchService(
             manager: manager, store: PRWatchStore(base: base), idle: idle,
             isWatched: { _ in true },
-            fetch: { [weak self] root, _ in
+            fetch: { [weak self] _, root, _ in
                 await MainActor.run { self?.fetched.append(root); return self?.next ?? [] }
             })
         await cycle(at: t0.addingTimeInterval(600))

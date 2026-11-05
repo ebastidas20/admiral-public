@@ -14,8 +14,19 @@ final class GitHubService: @unchecked Sendable {
     /// off further when gh actually reports a limit.
     static let sharedLimiter = GHRateLimiter(maxRequestsPerSecond: 2)
     private let limiter: GHRateLimiter
+    /// Where gh runs when it is not this Mac's: an ACP tab's environment, through its exec
+    /// command (that environment's gh and its login). Nil = the Mac's gh, with the resolved
+    /// PATH and token below. Decided once, here, from the runner handed in.
+    private let remote: CommandRunner?
 
-    init(limiter: GHRateLimiter = GitHubService.sharedLimiter) { self.limiter = limiter }
+    /// How long gh may run inside an agent's environment. Longer than the exec runner's 5 s
+    /// default: a `pr list` with checks, or a merge, is a network round trip, not a local read.
+    private static let remoteTimeout: TimeInterval = 30
+
+    init(runner: CommandRunner = LocalCommandRunner(), limiter: GHRateLimiter = GitHubService.sharedLimiter) {
+        self.limiter = limiter
+        self.remote = runner is LocalCommandRunner ? nil : runner
+    }
 
     // Resolution lives in AdmiralCore.GitHubEnvironment so the `admiral-hook` helper — which
     // cannot link App code — shares exactly this behaviour for `one_pr_per_ticket`.
@@ -63,6 +74,14 @@ final class GitHubService: @unchecked Sendable {
     /// limiter to back off so the other tabs' queued calls slow down too.
     private func runResult(_ args: [String], cwd: String) async -> (code: Int32, stdout: Data, stderr: String) {
         await limiter.acquire()
+        if let remote {
+            // The runner hands back no stderr, so a rate limit here is not seen to penalize;
+            // the shared per-second cap above still holds for these calls too.
+            guard let r = remote.run(["gh"] + args, cwd: cwd, timeout: Self.remoteTimeout) else {
+                return (1, Data(), "gh did not run in the agent's environment")
+            }
+            return (r.code, Data(r.stdout.utf8), "")
+        }
         let p = Process()
         p.executableURL = URL(fileURLWithPath: ghPath)
         p.arguments = args

@@ -17,6 +17,28 @@ final class SessionManagerAcpTests: XCTestCase {
     /// Folder the agent works in — absent on this Mac, like a container path.
     private let agentCwd = "/nonexistent-\(UUID().uuidString)/workspace"
     private var ppt: AcpAgentConfig!
+    /// What the tab's exec runner is (`acpRunnerFactory`); nil = the agent has no exec.
+    /// A fake, so no test ever spawns `docker exec`.
+    private var execRunner: ExecFake?
+
+    /// Answers like an environment with git (on `feature-x`) and gh, logged in or not.
+    private final class ExecFake: CommandRunner, @unchecked Sendable {
+        private let lock = NSLock()
+        private var _calls: [[String]] = []
+        var calls: [[String]] { lock.withLock { _calls } }
+        let ghAuthed: Bool
+        let defaultTimeout: TimeInterval = 5
+
+        init(ghAuthed: Bool = true) { self.ghAuthed = ghAuthed }
+
+        func run(_ argv: [String], cwd: String?, timeout: TimeInterval) -> (code: Int32, stdout: String)? {
+            lock.withLock { _calls.append(argv) }
+            if argv == ["gh", "auth", "status"] { return (ghAuthed ? 0 : 1, "") }
+            if argv.contains("--version") { return (0, "") }
+            if argv.contains("symbolic-ref") { return (0, "feature-x\n") }
+            return (1, "")
+        }
+    }
 
     private let fork: JSONValue = .object(["sessionCapabilities": .object(["fork": .object([:])])])
     private let close: JSONValue = .object(["sessionCapabilities": .object(["close": .object([:])])])
@@ -42,6 +64,8 @@ final class SessionManagerAcpTests: XCTestCase {
         launchedConfigs = []
         launchedLogs = []
         manager.acpAgents = { [unowned self] in [ppt] }
+        execRunner = ExecFake()
+        manager.acpRunnerFactory = { [unowned self] _ in execRunner }
         manager.acpTransportFactory = { [unowned self] config, log in
             let agent = scripted.isEmpty ? ScriptedAgent() : scripted.removeFirst()
             launched.append(agent)
@@ -469,5 +493,48 @@ final class SessionManagerAcpTests: XCTestCase {
         XCTAssertTrue(found.isEmpty)
         XCTAssertEqual(lister.methods, ["initialize"])
         XCTAssertTrue(lister.fake.terminated)
+    }
+
+    // MARK: - Capability record / git through exec
+
+    func testCapabilityRecordNegotiatedThenProbedThroughExec() async {
+        execRunner = ExecFake(ghAuthed: false)
+        let s = await readyTab(ScriptedAgent(capabilities: fork))
+        await until("probes") { session(s.id)?.acpCapabilities?.git != nil }
+        let record = session(s.id)?.acpCapabilities
+        XCTAssertEqual(record?.negotiated.fork, true)
+        XCTAssertEqual(record?.git, true)
+        XCTAssertEqual(record?.gh, true)
+        XCTAssertEqual(record?.ghAuthed, false)
+        XCTAssertEqual(record?.isEnabled(.branch), true)
+        XCTAssertEqual(record?.reason(.prWatch), "gh is not logged in in the agent's environment")
+    }
+
+    func testBranchRefreshRunsThroughTheTabsExecRunner() async {
+        let s = await readyTab()
+        await until("probes") { session(s.id)?.acpCapabilities?.git == true }
+        XCTAssertEqual(manager.gitAccess(for: try! XCTUnwrap(session(s.id)))?.interval, 5)
+        manager.refreshGitBranch(for: s.id)
+        await until("branch") { session(s.id)?.gitBranch == "feature-x" }
+        XCTAssertTrue(execRunner?.calls.contains(["git", "-C", agentCwd, "symbolic-ref", "--short", "HEAD"]) ?? false)
+    }
+
+    func testNoExecLeavesRecordUnprobedAndBranchAlone() async {
+        execRunner = nil
+        let s = await readyTab()
+        await until("record") { session(s.id)?.acpCapabilities != nil }
+        let record = session(s.id)?.acpCapabilities
+        XCTAssertNil(record?.git)
+        XCTAssertEqual(record?.reason(.branch), "No exec command configured for this agent")
+        XCTAssertNil(manager.gitAccess(for: try! XCTUnwrap(session(s.id))))
+        manager.refreshGitBranch(for: s.id)
+        try? await Task.sleep(nanoseconds: 100_000_000)
+        XCTAssertNil(session(s.id)?.gitBranch, "the Mac's git must never answer for the agent's cwd")
+    }
+
+    func testPtyTabKeepsLocalGitOnTheTwoSecondThrottle() {
+        let s = AgentSession(callsign: "x", cwd: "/tmp")
+        XCTAssertEqual(manager.gitAccess(for: s)?.interval, 2)
+        XCTAssertTrue(manager.gitAccess(for: s)?.runner is LocalCommandRunner)
     }
 }

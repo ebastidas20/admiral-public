@@ -96,7 +96,7 @@ public struct AcpMCPServer: Sendable, Equatable {
     }
 }
 
-public struct AcpCapabilities: Sendable, Equatable {
+public struct AcpCapabilities: Sendable, Hashable {
     public var agentName: String?
     public var agentVersion: String?
     public var loadSession = false
