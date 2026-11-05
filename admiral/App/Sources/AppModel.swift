@@ -871,6 +871,17 @@ final class AppModel: ObservableObject {
     func requestSearchFocus() { sidebarCollapsed = false; searchFocusToken += 1 }
     func requestDeleteSelected() { deleteRequestToken += 1 }
 
+    /// ⌘⌫: in an editable text view (the composer, a rename or form field) it is the text's own
+    /// "delete to line start" — a menu key equivalent runs before the field sees the key, so it
+    /// is forwarded here; anywhere else it asks to delete the selected tab.
+    func deleteKeyCommand() {
+        if let text = NSApp.keyWindow?.firstResponder as? NSTextView, text.isEditable {
+            text.deleteToBeginningOfLine(nil)
+        } else {
+            requestDeleteSelected()
+        }
+    }
+
     // Keyboard navigation (⌘↑/⌘↓/⌘1–9, ⇧⌘↑/⇧⌘↓) walks `sidebarItems` — permanent tabs and
     // groups; scratch tabs are click-only by design. See AppModel+Groups.swift.
 
