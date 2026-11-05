@@ -97,6 +97,18 @@ final class TabRunTests: XCTestCase {
         XCTAssertFalse(landed)
         XCTAssertEqual(backend.typed, 3)
     }
+
+    /// A driver that takes input for certain (ACP: accepted = will be sent) is sent to once,
+    /// even with the tab still `.unknown` past the wait and nothing in the transcript yet.
+    func testAPromptAcceptedForCertainIsSentOnce() async {
+        let backend = ScriptedTabRunBackend(statuses: [.unknown], resolveSlotAfterPolls: 100)
+        backend.outcome = .accepted
+        backend.path = path
+        let landed = await TabRun(backend: backend, config: config)
+            .deliver("hello", tabID: UUID(), path: path, baselineUserCount: 0)
+        XCTAssertTrue(landed)
+        XCTAssertEqual(backend.typed, 1)
+    }
 }
 
 /// Statuses play out in order (the last one repeats); the slot resolves after a set number
@@ -118,11 +130,16 @@ final class ScriptedTabRunBackend: TabRunBackend {
         self.resolveSlotAfterPolls = resolveSlotAfterPolls
     }
 
-    func inject(tabID: UUID, text: String) {
+    /// What `inject` reports: `.typed` (a PTY — only the transcript can confirm it) by default.
+    var outcome: InjectOutcome = .typed
+
+    func inject(tabID: UUID, text: String) -> InjectOutcome {
         typed += 1
-        guard typed == landOnAttempt, let path else { return }
+        guard outcome == .typed else { return outcome }
+        guard typed == landOnAttempt, let path else { return .typed }
         FileManager.default.createFile(atPath: path, contents: Data(
             (#"{"type":"user","message":{"role":"user","content":"\#(text)"}}"# + "\n").utf8))
+        return .typed
     }
 
     func liveStatus(tabID: UUID) -> SessionStatus {

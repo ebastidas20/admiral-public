@@ -2,9 +2,18 @@ import Foundation
 
 /// What running a prompt in a tab needs: type into it, read its live status, find its
 /// transcript, and read a structured-output slot. A protocol so tests drive a scripted fake.
+/// What an `inject` can promise. `.typed`: the text went out as keystrokes, which a claude
+/// still booting can drop — only the transcript gaining it confirms it. `.accepted`: the tab's
+/// driver took it and will send it (an ACP tab's queue); there is nothing to confirm or retry.
+/// `.refused`: it went nowhere (no such tab, or a failed or ended one).
+public enum InjectOutcome: Sendable, Equatable {
+    case typed, accepted, refused
+}
+
 @MainActor
 public protocol TabRunBackend: AnyObject {
-    func inject(tabID: UUID, text: String)
+    @discardableResult
+    func inject(tabID: UUID, text: String) -> InjectOutcome
     /// Fresh status read (re-reads `sessions/<pid>.json`), never a cached value.
     func liveStatus(tabID: UUID) -> SessionStatus
     /// Current transcript path; nil until claude writes its first line.
@@ -78,6 +87,8 @@ public struct TabRun {
     /// typed into the PTY before that are silently lost (the same race the -realCommission
     /// probe works around by re-sending). The session file appears at process boot, so wait
     /// for it (skips the zsh-startup window) first. Returns whether the prompt landed.
+    /// A driver that takes input for certain (`.accepted`) is sent to once, never retyped:
+    /// on ACP a retry would only queue another copy behind the first.
     @discardableResult
     public func deliver(_ prompt: String, tabID: UUID, path: String, baselineUserCount: Int) async -> Bool {
         let readyDeadline = Date().addingTimeInterval(config.injectReadyTimeout)
@@ -85,7 +96,7 @@ public struct TabRun {
             await sleepPoll()
         }
         for _ in 1...max(config.injectMaxAttempts, 1) {
-            backend.inject(tabID: tabID, text: prompt)
+            if backend.inject(tabID: tabID, text: prompt) == .accepted { return true }
             if await promptLanded(path: path, baselineUserCount: baselineUserCount) { return true }
         }
         return false

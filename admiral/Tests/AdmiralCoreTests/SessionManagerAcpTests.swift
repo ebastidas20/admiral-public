@@ -626,6 +626,23 @@ final class SessionManagerAcpTests: XCTestCase {
         XCTAssertEqual(posted.count, 1, "a cancelled turn is the user's own doing — no note")
     }
 
+    /// An ACP tab takes a prompt for certain — queued until the handshake is done counts. So a
+    /// TabRun delivering into a tab still `.unknown` past its wait sends the prompt ONCE: no
+    /// "did the transcript gain it?" check, and no retry queueing copies behind it.
+    func testTabRunDeliversOnceIntoAnACPTabStillConnecting() async throws {
+        let agent = ScriptedAgent()
+        agent.on("initialize") { _ in .hold }
+        scripted.append(agent)
+        let s = manager.commissionACP(agent: ppt, callsign: "slow")
+        let run = TabRun(backend: manager, config: TabRun.Config(
+            pollInterval: 0.01, injectReadyTimeout: 0.05, injectVerifyTimeout: 0.05, injectMaxAttempts: 3))
+        let path = try XCTUnwrap(manager.transcriptPath(tabID: s.id))
+        let landed = await run.deliver("do the thing", tabID: s.id, path: path, baselineUserCount: 0)
+        XCTAssertTrue(landed)
+        XCTAssertEqual(session(s.id)?.status, .unknown)
+        XCTAssertEqual(session(s.id)?.acpQueued, ["do the thing"])
+    }
+
     /// Deny is the card's interrupt: the request is cancelled and the card closes.
     func testDenyCancelsThePermissionAndClosesTheCard() async {
         let agent = ScriptedAgent()

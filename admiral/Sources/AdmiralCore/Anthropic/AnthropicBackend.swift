@@ -84,8 +84,11 @@ extension SessionManager: AnthropicBackend {
         ClientToolCatalog.write(tools, base: supportDir, token: token)
     }
 
-    public func inject(tabID: UUID, text: String) {
-        inject(tabID, text: text)
+    @discardableResult
+    public func inject(tabID: UUID, text: String) -> InjectOutcome {
+        guard let driver = drivers[tabID] else { return .refused }
+        guard inject(tabID, text: text) else { return .refused }
+        return driver.acceptanceIsDelivery ? .accepted : .typed
     }
 
     public func liveStatus(tabID: UUID) -> SessionStatus {

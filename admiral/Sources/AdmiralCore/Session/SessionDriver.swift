@@ -35,6 +35,10 @@ public protocol SessionDriver: AnyObject {
     func terminate()
     /// The spawned process's pid, when known.
     var pid: Int32? { get }
+    /// True when an accepted input is certain to reach the agent (ACP: queued = will be sent),
+    /// so a caller has nothing to confirm or retry. False for keystrokes into a PTY, which a
+    /// claude still booting can drop. A property of the driver, decided at launch.
+    var acceptanceIsDelivery: Bool { get }
 }
 
 /// A tab whose agent runs in a PTY: every call becomes bytes on its `TerminalHost` handle.
@@ -64,6 +68,8 @@ final class PTYSessionDriver: SessionDriver {
     }
 
     var pid: Int32? { handle.pid }
+    /// Keystrokes: a claude still booting drops them, so a caller confirms in the transcript.
+    let acceptanceIsDelivery = false
 
     func submit(prompt: TerminalPrompt) -> Bool {
         host.submit(handle, prompt: prompt)

@@ -84,6 +84,8 @@ public final class AcpSessionController: SessionDriver {
     public private(set) var capabilities: AcpCapabilities?
     /// The agent process's pid, when the launcher knows it.
     public var pid: Int32?
+    /// `accept` queues: whatever it took goes out once the agent can take it.
+    public let acceptanceIsDelivery = true
 
     private let config: AcpAgentConfig
     private let connection: JSONRPCConnection
