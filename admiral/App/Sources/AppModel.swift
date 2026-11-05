@@ -14,7 +14,7 @@ import IOKit.pwr_mgt
 enum ThemeMode: String { case auto, light, dark }
 
 /// Which kind of session the shared New… form will create: a `claude` session
-/// ("New Claude Code") or a plain login `zsh` shell ("New Bash").
+/// ("New Session") or a plain login `zsh` shell ("New Bash").
 enum NewSessionMode { case claudeCode, bash }
 
 @MainActor
@@ -192,7 +192,7 @@ final class AppModel: ObservableObject {
     @Published private(set) var jiraConnecting = false
     @Published var jiraAuthError: String?
     private var jiraAuth: JiraAuthSession?
-    /// Presents the New Claude Code / New Bash form (agent name, folder).
+    /// Presents the New Session / New Bash form (agent name, folder).
     @Published var showNewTerminal = false
     /// Which kind of session that form will create — drives its title and launch recipe.
     @Published var newSessionMode: NewSessionMode = .claudeCode
@@ -935,7 +935,7 @@ final class AppModel: ObservableObject {
         sessions.fork(id)
     }
 
-    /// "New Claude Code": the commission entry point used by the toolbar/empty-state
+    /// "New Session": the commission entry point used by the toolbar/empty-state
     /// buttons. In UI-test mode it commissions the injected directory directly; otherwise
     /// it presents the folder form in claude-code mode.
     func requestCommission() {
@@ -1502,7 +1502,7 @@ final class AppModel: ObservableObject {
     }
 
     /// Commission from the New… form: explicit name and folder. The active
-    /// `newSessionMode` picks the recipe — a `claude` session ("New Claude Code") or a
+    /// `newSessionMode` picks the recipe — a `claude` session ("New Session") or a
     /// plain `zsh` login shell ("New Bash").
     func newSession(name: String, cwd: String, provider: CCSwitchProvider? = nil, scratch: Bool = false) {
         let agentName = name.trimmingCharacters(in: .whitespaces)

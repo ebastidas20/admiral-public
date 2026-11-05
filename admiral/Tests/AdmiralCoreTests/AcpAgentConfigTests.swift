@@ -157,6 +157,22 @@ final class AcpAgentConfigTests: XCTestCase {
         XCTAssertTrue(c.passesIgnoredSkipPermissionsFlag)
     }
 
+    func testDefaultAgentResolvesOnlyWhileTheAgentExists() {
+        let suite = "AcpAgentConfigTests-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let store = AcpAgentStore(defaults: defaults)
+        XCTAssertNil(store.defaultAgent())
+        let agent = AcpAgentConfig.sample
+        store.save([agent])
+        store.defaultAgentID = agent.id
+        XCTAssertEqual(store.defaultAgent()?.id, agent.id)
+        store.save([])
+        XCTAssertNil(store.defaultAgent())  // a deleted agent means Claude Code, not a dangling pick
+        store.defaultAgentID = nil
+        XCTAssertNil(defaults.string(forKey: "admiral.acpDefaultAgent.v1"))
+    }
+
     func testStoreRoundTripsAndFindsByName() {
         let suite = "AcpAgentConfigTests-\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suite)!

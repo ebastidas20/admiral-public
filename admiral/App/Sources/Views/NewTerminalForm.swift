@@ -112,6 +112,10 @@ struct NewTerminalForm: View {
             providerID = model.launchOptionsStore.load().providerID
             scratch = model.scratchByDefault
             agents = model.acpAgents
+            if !isBash, let start = model.acpAgentStore.defaultAgent() {
+                agentID = start.id
+                folder = start.cwd
+            }
         }
         .onChange(of: agentID) {
             imported = nil

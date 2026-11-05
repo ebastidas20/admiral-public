@@ -50,9 +50,9 @@ struct AdmiralCommands: Commands {
     @ObservedObject var model: AppModel
 
     var body: some Commands {
-        // New Claude Code / New Bash under File (replacing the default "New").
+        // New Session / New Bash under File (replacing the default "New").
         CommandGroup(replacing: .newItem) {
-            Button("New Claude Code") { model.requestCommission() }
+            Button("New Session") { model.requestCommission() }
                 .keyboardShortcut("t", modifiers: .command)
             Button("New Bash") { model.requestBash() }
                 .keyboardShortcut("t", modifiers: [.command, .control])

@@ -15,6 +15,7 @@ struct AgentsSettingsView: View {
     @State private var testing = false
     @State private var confirmingDelete: AcpAgentConfig?
     /// The agent whose delete was refused (tabs open on it), and why — shown under its row.
+    @State private var defaultAgentID: UUID?
     @State private var deleteRefused: (id: UUID, reason: String)?
     /// The list row being typed in: its id and which of its fields (0 = argument or key, 1 = value).
     @FocusState private var focusedRow: RowFocus?
@@ -58,7 +59,10 @@ struct AgentsSettingsView: View {
             }
             .padding(20)
         }
-        .onAppear { agents = model.acpAgentStore.load() }
+        .onAppear {
+            agents = model.acpAgentStore.load()
+            defaultAgentID = model.acpAgentStore.defaultAgent()?.id
+        }
         .sheet(item: $confirmingDelete) { agent in
             ConfirmDeleteSheet(
                 title: "Delete \u{201C}\(agent.name)\u{201D}?",
@@ -85,6 +89,21 @@ struct AgentsSettingsView: View {
                 }
             }
             if !agents.isEmpty && apiServerWarningShown { apiServerWarning(leading: 0) }
+            if !agents.isEmpty {
+                HStack {
+                    Text("New tabs open on").font(.system(size: 12)).foregroundStyle(Theme.secondaryText)
+                    Picker("", selection: Binding(
+                        get: { defaultAgentID },
+                        set: { defaultAgentID = $0; model.acpAgentStore.defaultAgentID = $0 })) {
+                        Text("Claude Code (this Mac)").tag(UUID?.none)
+                        ForEach(agents) { Text($0.name).tag(UUID?.some($0.id)) }
+                    }
+                    .labelsHidden().fixedSize()
+                    .accessibilityIdentifier("agents-default")
+                    Spacer()
+                }
+                .padding(.top, 4)
+            }
             HStack {
                 Button("Add Agent") { edit(AcpAgentDraft.new(), isNew: true) }
                     .accessibilityIdentifier("agents-add")
@@ -350,6 +369,10 @@ struct AgentsSettingsView: View {
         guard agent.deletionError(openTabAgents: openTabAgents) == nil else { return requestDelete(agent) }
         agents.removeAll { $0.id == agent.id }
         model.acpAgentStore.save(agents)
+        if defaultAgentID == agent.id {
+            defaultAgentID = nil
+            model.acpAgentStore.defaultAgentID = nil
+        }
         if draft?.id == agent.id { draft = nil }
     }
 

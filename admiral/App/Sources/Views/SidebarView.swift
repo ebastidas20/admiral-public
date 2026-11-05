@@ -57,7 +57,7 @@ struct ReorderDropDelegate: DropDelegate {
 }
 
 /// The always-visible left bar: a search field, a column of session buttons, and the
-/// New Claude Code / New Bash actions pinned at the bottom. Collapsed shows icons only;
+/// New Session / New Bash actions pinned at the bottom. Collapsed shows icons only;
 /// expanded shows search + icons + names. Never hidden.
 struct SidebarView: View {
     @EnvironmentObject var model: AppModel
@@ -138,7 +138,7 @@ struct SidebarView: View {
     private func footerRow(_ action: GroupUIGate.FooterAction) -> some View {
         switch action {
         case .newClaudeCode:
-            ActionButton(icon: "plus", label: "New Claude Code",
+            ActionButton(icon: "plus", label: "New Session",
                          shortcut: Shortcuts.newClaudeCode, collapsed: collapsed,
                          id: "commission-button-sidebar") { model.requestCommission() }
         case .newBash:

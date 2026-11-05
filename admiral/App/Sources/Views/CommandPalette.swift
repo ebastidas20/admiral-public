@@ -119,7 +119,7 @@ struct CommandPalette: View {
 
     private var commands: [PaletteCommand] {
         var c: [PaletteCommand] = [
-            .init(title: "New Claude Code", shortcut: Shortcuts.newClaudeCode, icon: "plus") { model.requestCommission() },
+            .init(title: "New Session", shortcut: Shortcuts.newClaudeCode, icon: "plus") { model.requestCommission() },
             .init(title: "New Bash", shortcut: Shortcuts.newBash, icon: "terminal") { model.requestBash() },
         ]
         if model.groupsEnabled {
