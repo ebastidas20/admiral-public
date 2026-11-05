@@ -156,6 +156,16 @@ final class AcpAgentConfigTests: XCTestCase {
         XCTAssertEqual(config.effectiveExec, AcpCommand(command: "docker", args: ["exec", "box"]))
     }
 
+    /// R14: deleting an agent a tab is open on breaks that tab the same way a rename does, so
+    /// it is refused too (same case-insensitive match); with no tab on it, delete is fine.
+    func testDeleteIsRefusedWhileATabUsesTheAgent() {
+        let saved = AcpAgentConfig.sample
+        XCTAssertEqual(saved.deletionError(openTabAgents: [" CLAUDE-BOX "]), AcpAgentConfig.deleteWithOpenTabs)
+        XCTAssertEqual(AcpAgentConfig.deleteWithOpenTabs, "Close this agent's tabs before deleting it.")
+        XCTAssertNil(saved.deletionError(openTabAgents: ["other"]))
+        XCTAssertNil(saved.deletionError(openTabAgents: []))
+    }
+
     /// R12: a rename while a tab is open on the old name would orphan that tab (it finds its
     /// agent by name), so it is refused; with no tab on it, or a case-only change, it is fine.
     func testRenameIsRefusedWhileATabUsesTheOldName() {

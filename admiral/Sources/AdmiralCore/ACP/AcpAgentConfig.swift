@@ -99,10 +99,7 @@ public struct AcpAgentConfig: Codable, Hashable, Sendable, Identifiable {
     /// checks before saving.
     public func validationErrors(among agents: [AcpAgentConfig], openTabAgents: [String] = []) -> [String] {
         let name = self.name.trimmingCharacters(in: .whitespaces)
-        func same(_ a: String, _ b: String) -> Bool {
-            a.trimmingCharacters(in: .whitespaces).caseInsensitiveCompare(b.trimmingCharacters(in: .whitespaces))
-                == .orderedSame
-        }
+        let same = Self.sameName
         var errors = validationErrors
         if !name.isEmpty, agents.contains(where: { $0.id != id && same($0.name, name) }) {
             errors.append("an agent named \u{201C}\(name)\u{201D} already exists")
@@ -115,6 +112,20 @@ public struct AcpAgentConfig: Codable, Hashable, Sendable, Identifiable {
     }
 
     public static let renameWithOpenTabs = "Close this agent's tabs before renaming it."
+
+    /// Why this agent cannot be deleted now, or nil: a tab open on it (`openTabAgents`, as for a
+    /// rename) would lose its agent — it finds it by name — and break silently (R14).
+    public func deletionError(openTabAgents: [String]) -> String? {
+        openTabAgents.contains(where: { Self.sameName($0, name) }) ? Self.deleteWithOpenTabs : nil
+    }
+
+    public static let deleteWithOpenTabs = "Close this agent's tabs before deleting it."
+
+    /// How every lookup by agent name compares: trimmed, case-insensitive.
+    static func sameName(_ a: String, _ b: String) -> Bool {
+        a.trimmingCharacters(in: .whitespaces).caseInsensitiveCompare(b.trimmingCharacters(in: .whitespaces))
+            == .orderedSame
+    }
 
     /// The agent ignores `--dangerously-skip-permissions`; permissions are set via `defaultMode`.
     public var passesIgnoredSkipPermissionsFlag: Bool {

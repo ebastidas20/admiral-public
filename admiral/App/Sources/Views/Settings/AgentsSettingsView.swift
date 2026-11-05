@@ -14,6 +14,8 @@ struct AgentsSettingsView: View {
     @State private var draftIsNew = false
     @State private var testing = false
     @State private var confirmingDelete: AcpAgentConfig?
+    /// The agent whose delete was refused (tabs open on it), and why — shown under its row.
+    @State private var deleteRefused: (id: UUID, reason: String)?
 
     /// Whether the API server feature is on; nil = the config's. Set only by the probe, which
     /// must draw the warning without turning the real server on.
@@ -47,8 +49,7 @@ struct AgentsSettingsView: View {
         .sheet(item: $confirmingDelete) { agent in
             ConfirmDeleteSheet(
                 title: "Delete \u{201C}\(agent.name)\u{201D}?",
-                message: "Its open tabs keep running until they close; they will not come back on "
-                    + "relaunch until an agent with this name is added again.",
+                message: "Admiral will no longer be able to open tabs on it.",
                 confirmLabel: "Delete Agent",
                 onConfirm: { delete(agent) })
         }
@@ -63,7 +64,13 @@ struct AgentsSettingsView: View {
                     .font(.system(size: 12)).foregroundStyle(Theme.secondaryText)
                     .accessibilityIdentifier("agents-empty")
             }
-            ForEach(agents) { agent in row(agent) }
+            ForEach(agents) { agent in
+                row(agent)
+                if let refused = deleteRefused, refused.id == agent.id {
+                    note("exclamationmark.triangle.fill", refused.reason, leading: 10)
+                        .accessibilityIdentifier("agent-delete-refused")
+                }
+            }
             if !agents.isEmpty && apiServerWarningShown { apiServerWarning(leading: 0) }
             HStack {
                 Button("Add Agent") { edit(AcpAgentDraft.new(), isNew: true) }
@@ -87,7 +94,7 @@ struct AgentsSettingsView: View {
             Spacer(minLength: 8)
             Button("Edit") { edit(AcpAgentDraft(agent), isNew: false) }
             Button("Duplicate") { duplicate(agent) }
-            Button { confirmingDelete = agent } label: { Image(systemName: "trash") }
+            Button { requestDelete(agent) } label: { Image(systemName: "trash") }
                 .help("Delete \(agent.name)")
         }
         .controlSize(.small)
@@ -245,7 +252,19 @@ struct AgentsSettingsView: View {
         draft = nil
     }
 
+    /// Refused while a tab is open on the agent (R14, decided in Core); otherwise confirm.
+    private func requestDelete(_ agent: AcpAgentConfig) {
+        if let reason = agent.deletionError(openTabAgents: openTabAgents) {
+            deleteRefused = (agent.id, reason)
+        } else {
+            deleteRefused = nil
+            confirmingDelete = agent
+        }
+    }
+
     private func delete(_ agent: AcpAgentConfig) {
+        // Re-checked: a tab may have opened on it while the sheet was up.
+        guard agent.deletionError(openTabAgents: openTabAgents) == nil else { return requestDelete(agent) }
         agents.removeAll { $0.id == agent.id }
         model.acpAgentStore.save(agents)
         if draft?.id == agent.id { draft = nil }
@@ -261,7 +280,7 @@ struct AgentsSettingsView: View {
 
     // MARK: - Pieces
 
-    /// The agents named by open tabs — a rename of one of them is refused (R12).
+    /// The agents named by open tabs — a rename (R12) or delete (R14) of one is refused.
     private var openTabAgents: [String] {
         model.sessions.sessions.compactMap {
             if case let .acp(name) = $0.backend { return name }

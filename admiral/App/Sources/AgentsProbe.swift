@@ -110,6 +110,9 @@ extension AppModel {
             check("renaming an agent with open tabs is refused",
                   renamed.validationErrors(among: [pptBox], openTabAgents: openNames)
                       == [AcpAgentConfig.renameWithOpenTabs], openNames.joined(separator: ", "))
+            check("deleting an agent with open tabs is refused",
+                  pptBox.deletionError(openTabAgents: openNames) == AcpAgentConfig.deleteWithOpenTabs,
+                  openNames.joined(separator: ", "))
             for dark in [true, false] {
                 self.acpAgentStore.save([pptBox])
                 await draw("agents-rename-blocked", settings(renamed), NSSize(width: 640, height: 1180), dark: dark)
