@@ -92,11 +92,23 @@ final class AcpCapabilityRecordTests: XCTestCase {
             "sessionCapabilities": .object(["fork": .object([:]), "list": .object([:])]),
             "mcpCapabilities": .object(["http": .bool(true)]),
             "_meta": .object(["steering": .object(["supported": .bool(true)])]),
-        ]))
+        ]), bridgeRunning: true)
         for f in [AcpFeature.fork, .importSessions, .steering, .bridgeTools] {
             XCTAssertTrue(every.isEnabled(f), "\(f)")
             XCTAssertNil(every.reason(f), "\(f)")
         }
+    }
+
+    /// The bridge needs both ends: the agent speaking HTTP MCP, and Admiral's listener up.
+    /// An agent without HTTP is named first — starting the listener would not help it.
+    func testBridgeToolsNeedTheSessionBridgeRunning() {
+        let http = caps(["mcpCapabilities": .object(["http": .bool(true)])])
+        let down = AcpCapabilityRecord(negotiated: http, bridgeRunning: false)
+        XCTAssertEqual(down.reason(.bridgeTools), "Admiral's session bridge is not running")
+        XCTAssertFalse(down.isEnabled(.bridgeTools))
+        XCTAssertNil(AcpCapabilityRecord(negotiated: http, bridgeRunning: true).reason(.bridgeTools))
+        XCTAssertEqual(AcpCapabilityRecord(negotiated: caps(), bridgeRunning: false).reason(.bridgeTools),
+                       "The agent doesn't support HTTP MCP")
     }
 
     func testProbeParsesExitCodes() {

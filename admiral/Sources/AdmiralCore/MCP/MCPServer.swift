@@ -210,6 +210,9 @@ public struct MCPServer {
              + "'GLM5.3 via Fireworks AI') so the tab uses that custom model instead of "
              + "stock Anthropic. Omit `provider` for stock. Unknown provider names fail. "
              + "Use commission_bash for a plain zsh tab with no claude. "
+             + "Called from an ACP agent's tab, the new tab runs on that SAME agent instead: "
+             + "`cwd` is a path in the agent's environment (checked there), and `provider` "
+             + "is refused. "
              + "Optional `scratch`: true makes it a scratch tab — a small row at the bottom of "
              + "the sidebar, not restored on relaunch, and closed automatically once it sits "
              + "idle with no open goals; the user can promote it to a permanent tab. Omit "
@@ -444,6 +447,11 @@ public struct MCPServer {
             return .failure("refused: the session token names no Admiral tab, so no tool is "
                 + "available to this caller")
         }
+        // A schedule's run is a claude tab on this Mac; an ACP caller's would have to be on its
+        // agent, which the scheduler cannot launch yet.
+        if name.hasPrefix("schedule_"), me.backend != .pty {
+            return .failure("schedules can't target ACP agents yet")
+        }
         // An unknown target falls through, so the tool itself answers "no station".
         if let key = Self.ownTabTools[name],
            let named = (args[key] as? String)?.trimmingCharacters(in: .whitespaces), !named.isEmpty,
@@ -517,18 +525,15 @@ public struct MCPServer {
             return bridge.setStructuredOutput(fromToken: token, outputJSON: str(args, "output"),
                                               type: args["type"] as? String)
         case "commission":
-            // cwd is required and must exist, so a session never silently lands in the
-            // app's home directory when the caller omits it.
+            // BridgeCore checks cwd where the new tab will run: on this Mac for a claude, in
+            // the agent's environment for an ACP caller's tab (whose paths mean nothing here).
             let cwd = (args["cwd"] as? String)?.trimmingCharacters(in: .whitespaces) ?? ""
-            var isDir: ObjCBool = false
-            guard !cwd.isEmpty, FileManager.default.fileExists(atPath: cwd, isDirectory: &isDir), isDir.boolValue else {
-                return .failure("cwd is required and must be an existing directory")
-            }
             let provider = (args["provider"] as? String)?.trimmingCharacters(in: .whitespaces)
             return bridge.commission(callsign: str(args, "callsign"), cwd: cwd,
                                      provider: (provider?.isEmpty == false) ? provider : nil,
                                      scratch: args["scratch"] as? Bool,
-                                     outputSchema: Self.schemaArgument(args["output_schema"]))
+                                     outputSchema: Self.schemaArgument(args["output_schema"]),
+                                     fromToken: token)
         case "set_output_schema":
             return bridge.setOutputSchema(callsign: str(args, "callsign"),
                                           schemaJSON: Self.schemaArgument(args["schema"]) ?? "")

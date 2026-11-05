@@ -78,6 +78,8 @@ public final class AcpSessionController: SessionDriver {
     private let connection: JSONRPCConnection
     private let mirror: TranscriptMirror
     private let mcpServers: [AcpMCPServer]
+    /// Admiral offered this tab its session bridge (the listener was running at launch).
+    public var offersBridge: Bool { !mcpServers.isEmpty }
     private let hooks: AcpTurnHooks?
     private let events: Events
 
@@ -197,6 +199,8 @@ public final class AcpSessionController: SessionDriver {
         let caps = AcpCapabilities(initializeResult: try await connection.request(
             "initialize", params: AcpClient.initializeParams()))
         capabilities = caps
+        // The bridge is an HTTP MCP server: an agent that did not advertise HTTP is not sent it.
+        let mcpServers = caps.mcpHTTP ? self.mcpServers : []
 
         let sessionID: String
         var result: JSONValue

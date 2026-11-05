@@ -109,9 +109,10 @@ public final class SessionManager: ObservableObject {
     public var acpRunnerFactory: (AcpAgentConfig) -> CommandRunner? = { agent in
         agent.effectiveExec.map { ExecCommandRunner(exec: $0) }
     }
-    /// The session bridge an ACP tab's agent reaches Admiral's tools on, for a tab's token.
-    /// Nil (or a nil answer) = no MCP server: the listener is not running.
-    public var sessionBridge: ((_ token: String) -> AcpMCPServer?)? = nil
+    /// Whether Admiral's session bridge listener (`/mcp/session`) is up, read at each ACP
+    /// launch: true = the tab's agent is offered it (`AcpMCPServer.sessionBridge`); false = no
+    /// MCP server, and the tab's `bridgeTools` says the bridge is not running. Set by the app.
+    public var sessionBridgeRunning: () -> Bool = { false }
 
     public init(
         host: TerminalHost,

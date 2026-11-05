@@ -84,7 +84,9 @@ extension SessionManager {
             let made = AcpSessionController(
                 config: config, connection: connection,
                 mirror: TranscriptMirror(url: mirrorURL, sessionID: sessionID, cwd: cwd),
-                mcpServer: sessionBridge?(session.token), hooks: hooks,
+                mcpServer: sessionBridgeRunning()
+                    ? AcpMCPServer.sessionBridge(agent: agent, token: session.token) : nil,
+                hooks: hooks,
                 events: acpEvents(id, controller: box, logURL: logURL, logStart: logStart),
                 // `session/load` replays the whole history. The mirror already holds it (same
                 // local id, same file), so the replay is dropped — unless the file is gone, in
@@ -128,7 +130,11 @@ extension SessionManager {
             $0.connectError = nil
         }
         let hasExec = sessions.first(where: { $0.id == id }).flatMap(acpRunner(for:)) != nil
-        update(id) { $0.acpCapabilities = AcpCapabilityRecord(negotiated: capabilities, hasExec: hasExec) }
+        let bridgeRunning = acpController(for: id)?.offersBridge == true
+        update(id) {
+            $0.acpCapabilities = AcpCapabilityRecord(
+                negotiated: capabilities, hasExec: hasExec, bridgeRunning: bridgeRunning)
+        }
         probeEnvironment(id)
         guard let s = sessions.first(where: { $0.id == id }), !s.scratch else { return }
         persistRecord(of: s)

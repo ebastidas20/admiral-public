@@ -565,14 +565,28 @@ public final class BridgeCore {
     ///
     /// `outputSchema` (strict JSON Schema, as text) makes every turn of the tab end with
     /// `set_structured_output(type: "output")`; a bad one fails the call before any tab exists.
+    ///
+    /// `fromToken` is the caller. An ACP tab's caller gets a tab on ITS OWN agent, in that
+    /// agent's environment (`commissionOnAgent`) — never a claude on this Mac. Everyone else
+    /// gets a claude here, in `cwd`, which must be an existing folder on this Mac.
     public func commission(callsign: String, cwd: String, provider: String? = nil,
-                           scratch: Bool? = nil, outputSchema: String? = nil) -> BridgeResult {
+                           scratch: Bool? = nil, outputSchema: String? = nil,
+                           fromToken: String? = nil) -> BridgeResult {
         var schema: JSONValue?
         if let text = outputSchema?.trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty {
             switch Self.parseStrictSchema(text) {
             case let .failure(message): return .failure(message)
             case let .success(parsed): schema = parsed
             }
+        }
+        if case let .acp(agentName)? = fromToken.flatMap(manager.session(forToken:))?.backend {
+            return commissionOnAgent(agentName, callsign: callsign, cwd: cwd, provider: provider,
+                                     scratch: scratch, schema: schema)
+        }
+        // Required and existing, so a session never silently lands in the app's home directory.
+        var isDir: ObjCBool = false
+        guard !cwd.isEmpty, FileManager.default.fileExists(atPath: cwd, isDirectory: &isDir), isDir.boolValue else {
+            return .failure("cwd is required and must be an existing directory")
         }
         let resolvedProvider: CCSwitchProvider?
         switch CCSwitchCatalog.resolve(provider) {
@@ -582,18 +596,58 @@ public final class BridgeCore {
         let session = manager.commission(callsign: callsign, cwd: cwd,
                                          scratch: scratch ?? scratchByDefault(),
                                          provider: resolvedProvider)
-        // Stored before the first prompt can arrive, keyed by the session id it launched with.
-        let withOutput = schema != nil && session.claudeSessionID.map {
-            OutputSchemaStore.set(schema, base: manager.supportDir, session: $0) == nil
-        } == true
+        let output = storeOutputSchema(schema, for: session) ? " output_schema=set" : ""
         let kind = session.scratch ? "scratch " : ""
-        let output = withOutput ? " output_schema=set" : ""
         if let p = resolvedProvider {
             return .success("commissioned \(kind)@\(session.displayTitle) provider=\(p.name)\(output) "
                 + "(session=\(session.id.uuidString.prefix(8)))")
         }
         return .success("commissioned \(kind)@\(session.displayTitle)\(output) "
             + "(session=\(session.id.uuidString.prefix(8)))")
+    }
+
+    /// Stored before the first prompt can arrive, keyed by the session id it launched with.
+    /// True when a schema was given and stored.
+    private func storeOutputSchema(_ schema: JSONValue?, for session: AgentSession) -> Bool {
+        schema != nil && session.claudeSessionID.map {
+            OutputSchemaStore.set(schema, base: manager.supportDir, session: $0) == nil
+        } == true
+    }
+
+    /// `commission` for an ACP caller: a new tab on the caller's agent. `cwd` is a path as the
+    /// AGENT sees it, so it is checked there (`test -d` through the agent's exec, bounded like
+    /// every exec call); empty = the agent's configured cwd. With no exec there is nowhere to
+    /// check, so the agent's configured cwd is used, unchecked, and the reply says so. A CC
+    /// Switch provider is a Mac claude's endpoint and is refused.
+    private func commissionOnAgent(
+        _ agentName: String, callsign: String, cwd: String, provider: String?,
+        scratch: Bool?, schema: JSONValue?
+    ) -> BridgeResult {
+        if let provider, !provider.isEmpty {
+            return .failure("provider applies only to claude tabs on the Mac, not to an ACP agent's tab")
+        }
+        guard let agent = manager.acpAgent(named: agentName) else {
+            return .failure("no ACP agent named \"\(agentName)\" is configured")
+        }
+        let tabCwd: String
+        var note = ""
+        if let runner = manager.acpRunnerFactory(agent) {
+            tabCwd = cwd.isEmpty ? agent.cwd : cwd
+            if !cwd.isEmpty, runner.run(["test", "-d", cwd], cwd: nil, timeout: runner.defaultTimeout)?.code != 0 {
+                return .failure("cwd \(cwd) is not a directory in \(agent.name)'s environment")
+            }
+        } else {
+            tabCwd = agent.cwd
+            if !cwd.isEmpty, cwd != agent.cwd {
+                note = " (\(agent.name) has no exec command to check cwd \(cwd), so it opened in \(agent.cwd))"
+            }
+        }
+        let session = manager.commissionACP(agent: agent, callsign: callsign, cwd: tabCwd,
+                                            scratch: scratch ?? scratchByDefault())
+        let output = storeOutputSchema(schema, for: session) ? " output_schema=set" : ""
+        let kind = session.scratch ? "scratch " : ""
+        return .success("commissioned \(kind)@\(session.displayTitle) on \(agent.name) cwd=\(tabCwd)\(output) "
+            + "(session=\(session.id.uuidString.prefix(8)))\(note)")
     }
 
     /// Plain interactive login zsh — same recipe as the app's "New Bash" (no transcript /

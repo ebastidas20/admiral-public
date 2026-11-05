@@ -163,7 +163,7 @@ final class AcpSessionControllerTests: XCTestCase {
     // MARK: - Handshake
 
     func testNewSessionHandshakeOrder() async {
-        let agent = ScriptedAgent()
+        let agent = ScriptedAgent(capabilities: .object(["mcpCapabilities": .object(["http": .bool(true)])]))
         let c = make(agent)
         await c.start(.new)
         XCTAssertEqual(agent.methods, ["initialize", "session/new", "session/set_mode"])
@@ -178,6 +178,15 @@ final class AcpSessionControllerTests: XCTestCase {
         XCTAssertEqual(phases, [.ready])
         XCTAssertEqual(started?.id, "s1")
         XCTAssertEqual(statuses.last, .idle)
+    }
+
+    /// An agent that does not advertise HTTP MCP is never handed the HTTP bridge server.
+    func testNoMCPServerForAnAgentWithoutHTTP() async {
+        let agent = ScriptedAgent()
+        let c = make(agent)
+        await c.start(.new)
+        XCTAssertEqual(agent.params(of: "session/new").first?["mcpServers"]?.arrayValue?.count, 0)
+        XCTAssertTrue(c.offersBridge, "the bridge was offered; the agent just cannot use it")
     }
 
     func testDefaultConfigOptionsAreAppliedAfterMode() async {

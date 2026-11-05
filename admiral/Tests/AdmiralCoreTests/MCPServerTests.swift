@@ -578,4 +578,126 @@ final class MCPServerTests: XCTestCase {
     }
 
 
+
+    // MARK: - ACP callers
+
+    /// Answers `test -d` like an agent environment holding only `dirs`, and records every call.
+    private final class DirRunner: CommandRunner, @unchecked Sendable {
+        private let lock = NSLock()
+        private var _calls: [[String]] = []
+        var calls: [[String]] { lock.withLock { _calls } }
+        let dirs: Set<String>
+        init(dirs: Set<String>) { self.dirs = dirs }
+        func run(_ argv: [String], cwd: String?, timeout: TimeInterval) -> (code: Int32, stdout: String)? {
+            lock.withLock { _calls.append(argv) }
+            if argv.count == 3, argv[0] == "test", argv[1] == "-d" { return (dirs.contains(argv[2]) ? 0 : 1, "") }
+            return (1, "")
+        }
+    }
+
+    /// A manager with one PTY tab (token "A") and one ACP tab on agent "PPT" (token "P"), whose
+    /// environment holds `/workspace` and `/workspace/sub`. `runner` nil = the agent has no exec.
+    private func makeACPServer(
+        runner: DirRunner? = DirRunner(dirs: ["/workspace", "/workspace/sub"])
+    ) -> (MCPServer, SessionManager, FakeTerminalHost) {
+        let host = FakeTerminalHost()
+        let manager = SessionManager(host: host, claudeHome: URL(fileURLWithPath: "/tmp/admiral-none"),
+                                     executablePath: "/bin/echo",
+                                     supportDir: FileManager.default.temporaryDirectory
+                                        .appendingPathComponent("mcp-acp-\(UUID().uuidString)"))
+        let ppt = AcpAgentConfig(name: "PPT", launch: AcpCommand(command: "docker", args: ["exec", "-i", "c", "a"]),
+                                 cwd: "/workspace")
+        manager.acpAgents = { [ppt] }
+        manager.acpRunnerFactory = { _ in runner }
+        manager.acpTransportFactory = { _, _ in ScriptedAgent() }
+        manager.register(AgentSession(callsign: "alice", cwd: "/a", token: "A"),
+                         handle: FakeTerminalHost.Handle(pid: 1))
+        var acp = AgentSession(callsign: "agent", cwd: "/workspace", token: "P")
+        acp.backend = .acp(agentName: "PPT")
+        manager.register(acp)
+        return (MCPServer(bridge: BridgeCore(manager: manager, idGenerator: { "id" })), manager, host)
+    }
+
+    /// An ACP tab asking for a new tab gets one on its OWN agent, in the agent's environment —
+    /// never a claude on the Mac. The cwd is checked there (`test -d`), not with the Mac's
+    /// FileManager: `/workspace/sub` does not exist on this Mac.
+    func testCommissionFromACPCallerOpensTabOnSameAgent() throws {
+        let runner = DirRunner(dirs: ["/workspace", "/workspace/sub"])
+        let (server, manager, host) = makeACPServer(runner: runner)
+        let reply = try call(server, "commission", ["callsign": "helper", "cwd": "/workspace/sub"], .session("P"))
+        XCTAssertFalse(reply.isError, reply.text)
+        let made = try XCTUnwrap(manager.sessions.first { $0.callsign == "helper" })
+        XCTAssertEqual(made.backend, .acp(agentName: "PPT"))
+        XCTAssertNotEqual(made.backend, .pty)
+        XCTAssertEqual(made.cwd, "/workspace/sub")
+        XCTAssertTrue(host.spawned.isEmpty, "nothing was spawned on the Mac: \(host.spawned)")
+        XCTAssertTrue(runner.calls.contains(["test", "-d", "/workspace/sub"]), "\(runner.calls)")
+        manager.terminateAll()
+    }
+
+    func testCommissionFromACPCallerChecksCwdInTheAgentsEnvironment() throws {
+        let (server, manager, host) = makeACPServer()
+        let missing = try call(server, "commission", ["callsign": "x", "cwd": "/workspace/nope"], .session("P"))
+        XCTAssertTrue(missing.isError)
+        XCTAssertEqual(missing.text, "cwd /workspace/nope is not a directory in PPT's environment")
+        // A Mac folder means nothing there either.
+        let mac = FileManager.default.temporaryDirectory.path
+        XCTAssertTrue(try call(server, "commission", ["callsign": "y", "cwd": mac], .session("P")).isError)
+        XCTAssertNil(manager.sessions.first { ["x", "y"].contains($0.callsign) })
+        // Omitted = the agent's own cwd.
+        XCTAssertFalse(try call(server, "commission", ["callsign": "z"], .session("P")).isError)
+        XCTAssertEqual(manager.sessions.first { $0.callsign == "z" }?.cwd, "/workspace")
+        XCTAssertTrue(host.spawned.isEmpty)
+        manager.terminateAll()
+    }
+
+    /// No exec = nowhere to check: the tab opens in the agent's configured cwd, unchecked.
+    func testCommissionFromACPCallerWithoutExecUsesTheAgentsCwd() throws {
+        let (server, manager, host) = makeACPServer(runner: nil)
+        let reply = try call(server, "commission", ["callsign": "w", "cwd": "/elsewhere"], .session("P"))
+        XCTAssertFalse(reply.isError, reply.text)
+        let made = try XCTUnwrap(manager.sessions.first { $0.callsign == "w" })
+        XCTAssertEqual(made.backend, .acp(agentName: "PPT"))
+        XCTAssertEqual(made.cwd, "/workspace")
+        XCTAssertTrue(reply.text.contains("no exec command"), reply.text)
+        XCTAssertTrue(host.spawned.isEmpty)
+        manager.terminateAll()
+    }
+
+    /// A CC Switch provider is a Mac claude's endpoint; an ACP agent has its own model.
+    func testCommissionFromACPCallerRefusesAProvider() throws {
+        let (server, manager, host) = makeACPServer()
+        let reply = try call(server, "commission", ["callsign": "p", "provider": "Kimi"], .session("P"))
+        XCTAssertTrue(reply.isError)
+        XCTAssertEqual(reply.text, "provider applies only to claude tabs on the Mac, not to an ACP agent's tab")
+        XCTAssertNil(manager.sessions.first { $0.callsign == "p" })
+        XCTAssertTrue(host.spawned.isEmpty)
+    }
+
+    func testScheduleSetFromACPCallerRefused() throws {
+        let (server, _, _) = makeACPServer()
+        for name in ["schedule_set", "schedule_list", "schedule_delete", "schedule_run", "schedule_history"] {
+            let reply = try call(server, name, ["name": "nightly", "cron": "0 3 * * *", "prompt": "hi"],
+                                 .session("P"))
+            XCTAssertTrue(reply.isError, name)
+            XCTAssertEqual(reply.text, "schedules can't target ACP agents yet", name)
+        }
+    }
+
+    func testCommissionFromPTYCallerUnchanged() throws {
+        let (server, manager, host) = makeACPServer()
+        let cwd = FileManager.default.temporaryDirectory.path
+        let reply = try call(server, "commission", ["callsign": "mac-tab", "cwd": cwd], .session("A"))
+        XCTAssertFalse(reply.isError, reply.text)
+        let made = try XCTUnwrap(manager.sessions.first { $0.callsign == "mac-tab" })
+        XCTAssertEqual(made.backend, .pty)
+        XCTAssertEqual(host.spawned.count, 1)
+        // The Mac folder check still applies to a PTY caller.
+        let missing = try call(server, "commission", ["callsign": "m2", "cwd": "/workspace/sub"], .session("A"))
+        XCTAssertTrue(missing.isError)
+        XCTAssertEqual(missing.text, "cwd is required and must be an existing directory")
+        // And schedules are still theirs.
+        XCTAssertNotEqual(try call(server, "schedule_list", [:], .session("A")).text,
+                          "schedules can't target ACP agents yet")
+    }
 }

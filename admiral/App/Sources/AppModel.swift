@@ -33,6 +33,10 @@ final class AppModel: ObservableObject {
     var holdsSchedules: Bool { schedulerLock != nil }
     let mcp: MCPServer
     private var bridgeSocket: BridgeSocketServer?
+    /// The session bridge (127.0.0.1:4142 `/mcp/session`): how an ACP tab's agent, which cannot
+    /// reach `bridgeSocket`, calls the session tools. Up while any ACP agent is configured.
+    private var sessionBridgeServer: SessionMCPHTTPServer?
+    private var acpAgentsObserver: NSObjectProtocol?
     /// Parks `tools/call` from API tool tabs. Same broker `SessionManager` hands the
     /// Anthropic endpoint; the `client` MCP process is the only other side of this socket.
     private var clientToolSocket: ClientToolSocketServer?
@@ -1273,6 +1277,9 @@ final class AppModel: ObservableObject {
             // Read the catalog before restoring: a tab saved on a provider has to find it
             // again here, or it comes back on Anthropic without saying so.
             refreshCCSwitchProviders()
+            // Before restore: a restored ACP tab is offered the bridge only if it is up when
+            // the tab launches (the offer rides on session/new|resume|load).
+            startSessionBridgeTracking()
             for record in sessions.restorableSessions() {
                 // Core decides (and tests) what each record becomes: an ACP tab on its agent —
                 // decided before the folder check, since its cwd is the agent's, not this Mac's —
@@ -1493,6 +1500,40 @@ final class AppModel: ObservableObject {
         }) else { return }
         // Settings → Notifications and the "already looking at it" rule live in the service.
         notifications.post(kind: .terminal, title: session.displayTitle, body: text, sessionID: session.id)
+    }
+
+    /// Keep the session bridge listener in step with the configured ACP agents — up while
+    /// there is at least one, down when there are none — now and on every defaults change
+    /// (Settings → Agents saves there). A tab is offered the bridge only if it is up when the
+    /// tab launches; `sessionBridgeRunning` is how `commissionACP` asks.
+    private func startSessionBridgeTracking() {
+        sessions.sessionBridgeRunning = { [weak self] in self?.sessionBridgeServer != nil }
+        syncSessionBridge()
+        guard acpAgentsObserver == nil else { return }
+        acpAgentsObserver = NotificationCenter.default.addObserver(
+            forName: UserDefaults.didChangeNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.syncSessionBridge() }
+        }
+    }
+
+    private func syncSessionBridge() {
+        let wanted = !sessions.acpAgents().isEmpty
+        if wanted, sessionBridgeServer == nil {
+            let endpoint = SessionMCPEndpoint(mcp: mcp, tokenIsLive: { [weak manager = sessions] in
+                manager?.acpTokenIsLive($0) ?? false
+            })
+            let server = SessionMCPHTTPServer(endpoint: endpoint)
+            guard server.start() != nil else {
+                // Retried on the next defaults change; until then ACP tabs launch without it.
+                NSLog("Admiral: session bridge could not bind 127.0.0.1:%d", Int(SessionMCPHTTPServer.defaultPort))
+                return
+            }
+            sessionBridgeServer = server
+        } else if !wanted, let server = sessionBridgeServer {
+            server.stop()
+            sessionBridgeServer = nil
+        }
     }
 
     /// Serve the bridge tools over this instance's loopback socket (profile-aware — the same

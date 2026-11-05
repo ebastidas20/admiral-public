@@ -133,6 +133,27 @@ final class SessionManagerAcpTests: XCTestCase {
         XCTAssertEqual(launched.first?.params(of: "session/new").first?["cwd"]?.stringValue, agentCwd)
     }
 
+    /// The session bridge rides on `session/new` only while Admiral's listener runs: then it is
+    /// `<mcpCallbackURL>/mcp/session` with the tab's own token as the bearer; otherwise there is
+    /// no MCP server, and the tab says why.
+    func testSessionBridgeIsOfferedOnlyWhileTheListenerRuns() async throws {
+        let http: JSONValue = .object(["mcpCapabilities": .object(["http": .bool(true)])])
+        let down = await readyTab(ScriptedAgent(capabilities: http), callsign: "down")
+        XCTAssertEqual(launched.last?.params(of: "session/new").first?["mcpServers"]?.arrayValue?.count, 0)
+        await until("record") { session(down.id)?.acpCapabilities != nil }
+        XCTAssertEqual(session(down.id)?.acpCapabilities?.reason(.bridgeTools),
+                       "Admiral's session bridge is not running")
+
+        manager.sessionBridgeRunning = { true }
+        let up = await readyTab(ScriptedAgent(capabilities: http), callsign: "up")
+        let server = try XCTUnwrap(launched.last?.params(of: "session/new").first?["mcpServers"]?.arrayValue?.first)
+        XCTAssertEqual(server["name"]?.stringValue, "admiral")
+        XCTAssertEqual(server["url"]?.stringValue, "http://host.docker.internal:4142/mcp/session")
+        XCTAssertEqual(server["headers"]?.arrayValue?.first?["value"]?.stringValue, "Bearer \(up.token)")
+        await until("record") { session(up.id)?.acpCapabilities != nil }
+        XCTAssertNil(session(up.id)?.acpCapabilities?.reason(.bridgeTools))
+    }
+
     func testCommissionACPUsesTheGivenCwdOverTheAgentsDefault() async {
         scripted.append(ScriptedAgent())
         let s = manager.commissionACP(agent: ppt, callsign: "x", cwd: "/workspace/other")

@@ -84,6 +84,14 @@ public struct AcpMCPServer: Sendable, Equatable {
         self.bearer = bearer
     }
 
+    /// Admiral's session bridge for one tab: `<mcpCallbackURL>/mcp/session` (a trailing `/` on
+    /// the callback is dropped), authenticated by the tab's own token.
+    public static func sessionBridge(agent: AcpAgentConfig, token: String) -> AcpMCPServer {
+        var base = agent.mcpCallbackURL.trimmingCharacters(in: .whitespaces)
+        while base.hasSuffix("/") { base.removeLast() }
+        return AcpMCPServer(name: "admiral", url: base + SessionMCPEndpoint.path, bearer: token)
+    }
+
     public var json: JSONValue {
         .object([
             "type": .string("http"),

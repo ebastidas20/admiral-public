@@ -16,15 +16,19 @@ public struct AcpCapabilityRecord: Sendable, Hashable {
     public var negotiated: AcpCapabilities
     /// The agent has an exec command — fixed when the record is built, before any probe.
     public var hasExec: Bool
+    /// Admiral's session bridge listener was running when the tab launched, so the tab was
+    /// offered it (`session/new`'s MCP server). Fixed at launch, like the offer itself.
+    public var bridgeRunning: Bool
     public var git: Bool?
     public var gh: Bool?
     public var ghAuthed: Bool?
 
     public init(
-        negotiated: AcpCapabilities, hasExec: Bool = false,
+        negotiated: AcpCapabilities, hasExec: Bool = false, bridgeRunning: Bool = false,
         git: Bool? = nil, gh: Bool? = nil, ghAuthed: Bool? = nil
     ) {
         self.negotiated = negotiated
+        self.bridgeRunning = bridgeRunning
         // A probe result means it ran somewhere: there is an exec.
         self.hasExec = hasExec || git != nil || gh != nil || ghAuthed != nil
         self.git = git
@@ -51,8 +55,9 @@ public struct AcpCapabilityRecord: Sendable, Hashable {
         case .steering:
             return negotiated.steering ? nil : Self.unsupported("steering")
         case .bridgeTools:
-            // Task 10 adds the second cause here: Admiral's session bridge is not running.
-            return negotiated.mcpHTTP ? nil : Self.unsupported("HTTP MCP")
+            // The agent first: with no HTTP MCP, starting the listener would not help it.
+            guard negotiated.mcpHTTP else { return Self.unsupported("HTTP MCP") }
+            return bridgeRunning ? nil : "Admiral's session bridge is not running"
         }
     }
 
