@@ -882,6 +882,8 @@ struct ChatComposer: View {
     @State private var menuDismissedText: String?
     /// The agent's files for the open `@` query, fetched once per open.
     @State private var fileList: AcpFileListState = .idle
+    /// The tab the in-flight listing was asked for: a result for any other tab is dropped.
+    @State private var fileListTab: UUID?
     /// Every file any listing on this tab returned: what a sent `@path` is checked against.
     @State private var knownFiles: Set<String> = []
     @FocusState private var focused: Bool
@@ -924,6 +926,10 @@ struct ChatComposer: View {
 
     private var menuRowCount: Int { slashOpen ? slashCandidates.count : fileCandidates.count }
 
+    /// "Loading files…" is up: Return / Tab mean "pick", so they wait instead of sending a
+    /// half-typed `@` (the permanent "unavailable" notice still lets Return send).
+    private var fileMenuLoading: Bool { fileMenu == .loading }
+
     /// The hint of the command whose "/name " is the whole text, shown after it.
     private var slashHint: String? {
         guard session.backend != .pty else { return nil }
@@ -954,11 +960,15 @@ struct ChatComposer: View {
                     .focused($focused)
                     .onKeyPress(.return, phases: .down) { press in
                         if menuRowCount > 0 { acceptMenu(); return .handled }
+                        if fileMenuLoading { return .handled }
                         if press.modifiers.contains(.shift) || press.modifiers.contains(.option) { return .ignored }
                         send()
                         return .handled
                     }
-                    .onKeyPress(.tab) { menuRowCount > 0 ? { acceptMenu(); return .handled }() : .ignored }
+                    .onKeyPress(.tab) {
+                        if menuRowCount > 0 { acceptMenu(); return .handled }
+                        return fileMenuLoading ? .handled : .ignored
+                    }
                     .onKeyPress(.upArrow) { moveMenu(-1) }
                     .onKeyPress(.downArrow) { moveMenu(1) }
                     .onKeyPress(.escape) {
@@ -1014,7 +1024,7 @@ struct ChatComposer: View {
         .onChange(of: fileQuery != nil) { _, open in open ? loadFiles() : (fileList = .idle) }
         .onChange(of: session.id) {
             text = ""; attachments = []; optionError = nil; menuDismissedText = nil; focused = true
-            fileList = .idle; knownFiles = []
+            fileList = .idle; fileListTab = nil; knownFiles = []
         }
     }
 
@@ -1042,9 +1052,11 @@ struct ChatComposer: View {
     private func loadFiles() {
         fileList = .loading
         let tab = session
+        fileListTab = tab.id
         Task {
             let files = await model.acpFiles(tab)
-            guard fileList == .loading else { return }   // closed (or the tab changed) meanwhile
+            // Closed meanwhile, or the composer moved to another tab (whose own load may be running).
+            guard fileList == .loading, fileListTab == tab.id else { return }
             if let files {
                 fileList = .loaded(files)
                 knownFiles.formUnion(files)

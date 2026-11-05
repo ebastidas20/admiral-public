@@ -361,25 +361,41 @@ extension SessionManager {
     /// The files in an ACP tab's cwd, as git sees them (tracked + untracked, ignores applied),
     /// read in the agent's environment through the tab's runner — for the composer's `@` menu.
     /// nil = no runner (the agent has no exec command); not a git repo, or any failure = [].
-    /// One run per tab per `acpFilesTTL`; calls inside it share that run.
+    /// A successful listing serves every call for `acpFilesTTL` (calls inside it share the run);
+    /// a failed one is forgotten, so the next `@` asks again.
     public func acpFiles(_ tab: UUID) async -> [String]? {
         guard let session = sessions.first(where: { $0.id == tab }),
               let runner = acpRunner(for: session) else { return nil }
         if let cached = acpFileLists[tab], Date().timeIntervalSince(cached.at) < Self.acpFilesTTL {
-            return await cached.files.value
+            return await cached.files.value ?? []
         }
         let cwd = session.cwd
-        let files = Task.detached(priority: .userInitiated) { () -> [String] in
-            let argv = ["git", "-c", "core.quotepath=off", "ls-files", "--cached", "--others",
-                        "--exclude-standard"]
-            guard let out = runner.run(argv, cwd: cwd, timeout: Self.acpFilesTimeout), out.code == 0 else {
-                return []
-            }
-            return Array(out.stdout.split(separator: "\n", omittingEmptySubsequences: true)
-                .prefix(Self.acpFilesCap).map(String.init))
+        let files = Task.detached(priority: .userInitiated) { () -> [String]? in
+            guard let out = runner.run(Self.acpFilesArgv, cwd: cwd, timeout: Self.acpFilesTimeout),
+                  out.code == 0 else { return nil }
+            return Self.parseLsFiles(out.stdout)
         }
-        acpFileLists[tab] = (Date(), files)
-        return await files.value
+        let at = Date()
+        acpFileLists[tab] = (at, files)
+        let listed = await files.value
+        if listed == nil, acpFileLists[tab]?.at == at { acpFileLists[tab] = nil }
+        return listed ?? []
+    }
+
+    /// NUL-separated (`-z`): without it git C-quotes a name holding `"` or a control character
+    /// even with `core.quotepath=off`.
+    nonisolated static let acpFilesArgv = [
+        "git", "-c", "core.quotepath=off", "ls-files", "-z", "--cached", "--others", "--exclude-standard",
+    ]
+
+    /// `ls-files -z` output → paths, capped; a path holding a control character (newline, tab)
+    /// is dropped, so a hostile file name cannot put one into the draft.
+    nonisolated static func parseLsFiles(_ stdout: String) -> [String] {
+        Array(stdout.split(separator: "\0", omittingEmptySubsequences: true)
+            .lazy
+            .filter { !$0.unicodeScalars.contains { CharacterSet.controlCharacters.contains($0) } }
+            .prefix(acpFilesCap)
+            .map(String.init))
     }
 
     /// The ACP composer's send: the text as typed (what the mirror and UserPromptSubmit see),

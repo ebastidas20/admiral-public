@@ -31,11 +31,15 @@ final class SessionManagerAcpTests: XCTestCase {
         let defaultTimeout: TimeInterval = 5
 
         /// What `git ls-files` prints; nil = it fails (not a repo).
-        var lsFiles: String?
+        var lsFiles: String? {
+            get { lock.withLock { _lsFiles } }
+            set { lock.withLock { _lsFiles = newValue } }
+        }
+        private var _lsFiles: String?
 
         init(ghAuthed: Bool = true, lsFiles: String? = nil) {
             self.ghAuthed = ghAuthed
-            self.lsFiles = lsFiles
+            _lsFiles = lsFiles
         }
 
         func run(_ argv: [String], cwd: String?, timeout: TimeInterval) -> (code: Int32, stdout: String)? {
@@ -347,17 +351,36 @@ final class SessionManagerAcpTests: XCTestCase {
 
     // MARK: - @file
 
-    private let lsFilesArgv = ["git", "-c", "core.quotepath=off", "ls-files", "--cached", "--others",
+    private let lsFilesArgv = ["git", "-c", "core.quotepath=off", "ls-files", "-z", "--cached", "--others",
                                "--exclude-standard"]
 
     func testACPFilesListsThroughTheRunnerAndCaches() async {
-        execRunner = ExecFake(lsFiles: "a\nb\n")
+        execRunner = ExecFake(lsFiles: "a\0b\0")
         let s = await readyTab()
         let first = await manager.acpFiles(s.id)
         XCTAssertEqual(first, ["a", "b"])
         let second = await manager.acpFiles(s.id)
         XCTAssertEqual(second, ["a", "b"])
         XCTAssertEqual(execRunner?.calls.filter { $0 == lsFilesArgv }.count, 1, "the second call is cached")
+    }
+
+    /// `-z` output is taken verbatim (a `"` stays), and a name holding a control character is dropped.
+    func testACPFilesSplitsOnNULAndDropsControlCharacters() async {
+        execRunner = ExecFake(lsFiles: "a\"b.txt\0tab\tx.txt\0line\nbreak\0src/c d.swift\0")
+        let s = await readyTab()
+        let files = await manager.acpFiles(s.id)
+        XCTAssertEqual(files, ["a\"b.txt", "src/c d.swift"])
+    }
+
+    /// A failed listing is not cached: the next call runs again and can succeed.
+    func testACPFilesFailureIsRetried() async {
+        let s = await readyTab()
+        let failed = await manager.acpFiles(s.id)
+        XCTAssertEqual(failed, [])
+        execRunner?.lsFiles = "a\0"
+        let retried = await manager.acpFiles(s.id)
+        XCTAssertEqual(retried, ["a"])
+        XCTAssertEqual(execRunner?.calls.filter { $0 == lsFilesArgv }.count, 2)
     }
 
     func testACPFilesNotARepoIsEmptyAndNoRunnerIsNil() async {

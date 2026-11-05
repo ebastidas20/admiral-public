@@ -31,8 +31,8 @@ public final class SessionManager: ObservableObject {
     /// dropped instead of re-opening a live entry. Cleared when the tab leaves busy.
     var acpLiveClosed: [UUID: Set<String>] = [:]
     /// Each ACP tab's last `git ls-files` (`acpFiles`): when it started, and the listing (in
-    /// flight or done), so calls within `acpFilesTTL` share one run.
-    var acpFileLists: [UUID: (at: Date, files: Task<[String], Never>)] = [:]
+    /// flight or done; nil = it failed, and the entry is dropped once that is known).
+    var acpFileLists: [UUID: (at: Date, files: Task<[String]?, Never>)] = [:]
     /// Runs a live-output flush later — 0.2 s, so a chatty command publishes at most five times a
     /// second per tab. Swappable so tests flush by hand.
     var acpLiveFlushScheduler: (@escaping @MainActor () -> Void) -> Void = { work in
