@@ -9,12 +9,12 @@ final class TicketKeyFinderTests: XCTestCase {
     func testDefaultPatternMatchesOnlyTheOrgsProjects() {
         let text = "PROJ-920, ACME-9359, KEY-7 and OPS-1190; not ICD-10, UTF-8, TOP-1000 or DEV-1"
         XCTAssertEqual(TicketKeyFinder.findKeys(in: text, patterns: [AdmiralConfig.TicketsConfig.defaultPattern]),
-                       ["PROJ-920", "ACME-9359", "KEY-7", "OPS-1190"])
+                       ["OPS-1190", "KEY-7", "ACME-9359", "PROJ-920"])
     }
 
-    func testFindsUniqueKeysInFirstSeenOrder() {
+    func testOrdersKeysByLatestMentionNewestFirst() {
         let text = "Working on PROJ-12 then ABC-3, back to PROJ-12 and X9-100."
-        XCTAssertEqual(TicketKeyFinder.findKeys(in: text, patterns: jira), ["PROJ-12", "ABC-3", "X9-100"])
+        XCTAssertEqual(TicketKeyFinder.findKeys(in: text, patterns: jira), ["X9-100", "PROJ-12", "ABC-3"])
     }
 
     func testIgnoresLowercaseAndPartialTokens() {
@@ -43,7 +43,7 @@ final class TicketKeyFinderTests: XCTestCase {
             ChatEvent(ts: "3", kind: .reply, text: "Done with OPS-1."),
         ]
         let text = TicketKeyFinder.scanText(of: events)
-        XCTAssertEqual(TicketKeyFinder.findKeys(in: text, patterns: jira), ["OPS-1", "WEB-22", "API-9"])
+        XCTAssertEqual(TicketKeyFinder.findKeys(in: text, patterns: jira), ["OPS-1", "API-9", "WEB-22"])
     }
 
     /// Only the user and the agent name the session's tickets. A subagent's report arrives
@@ -110,6 +110,8 @@ final class TicketsConfigTests: XCTestCase {
         XCTAssertEqual(t.openURL(for: "OPS-1")?.absoluteString, "https://acme.atlassian.net/browse/OPS-1")
         t.openURLTemplate = "https://tracker.example/{KEY}?k={key}"
         XCTAssertEqual(t.openURL(for: "OPS-1")?.absoluteString, "https://tracker.example/OPS-1?k=OPS-1")
+        t.openURLTemplate = "https://acme.atlassian.net/"
+        XCTAssertEqual(t.openURL(for: "OPS-1")?.absoluteString, "https://acme.atlassian.net/browse/OPS-1")
     }
 
     func testRoundTripNeverContainsTokens() throws {
