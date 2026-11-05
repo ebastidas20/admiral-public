@@ -138,22 +138,70 @@ final class AcpAgentConfigTests: XCTestCase {
         XCTAssertEqual(AcpAgentDraft(config).config, config)
     }
 
-    func testDraftParsesLinesAndPairsAndEmptyExecMeansDerived() {
+    func testDraftNormalizesRowsAndEmptyExecMeansDerived() {
         var draft = AcpAgentDraft.new()
         XCTAssertEqual(draft.defaultMode, "bypassPermissions")
         XCTAssertEqual(draft.cwd, "", "no container path pre-filled")
+        XCTAssertEqual(draft.args.rows.count, 1, "an empty list shows one empty row")
+        XCTAssertEqual(draft.env.rows.count, 1)
         draft.name = " PPT "
         draft.command = "docker"
-        draft.args = "exec\n  -i\n\nbox\nnpx -y pkg@1.2.3\n"
-        draft.env = "FOO=bar=baz\nnot a pair\n=nokey\n BAR = 1"
+        draft.args = AcpArgList(["exec", "  -i", "", "   ", "box", "npx -y pkg@1.2.3", ""])
+        draft.env = AcpRowList([AcpPair(key: "FOO", value: "bar=baz"), AcpPair(key: "", value: "nokey"),
+                                AcpPair(key: " BAR ", value: " 1")], blank: AcpPair())
         draft.defaultMode = "  "
         let config = draft.config
         XCTAssertEqual(config.name, "PPT")
-        XCTAssertEqual(config.launch.args, ["exec", "-i", "box", "npx -y pkg@1.2.3"])
-        XCTAssertEqual(config.env, ["FOO": "bar=baz", "BAR": " 1"])
+        XCTAssertEqual(config.launch.args, ["exec", "-i", "box", "npx -y pkg@1.2.3"],
+                       "blank rows dropped, inner spaces kept: one row is one arg")
+        XCTAssertEqual(config.env, ["FOO": "bar=baz", "BAR": " 1"], "empty key dropped, value as typed")
         XCTAssertNil(config.defaultMode, "blank = no mode set")
         XCTAssertNil(config.exec)
         XCTAssertEqual(config.effectiveExec, AcpCommand(command: "docker", args: ["exec", "box"]))
+        XCTAssertEqual(draft.validationErrors, [])
+    }
+
+    func testArgListAddRemoveMove() {
+        var list = AcpArgList(["a", "b", "c"])
+        let ids = list.rows.map(\.id)
+        let added = list.append()
+        XCTAssertEqual(list.rows.map(\.item), ["a", "b", "c", ""])
+        list[added] = "d e"
+        XCTAssertEqual(list.values, ["a", "b", "c", "d e"])
+        list.move(ids[0], by: 1)
+        XCTAssertEqual(list.values, ["b", "a", "c", "d e"])
+        list.move(added, by: 1)
+        XCTAssertEqual(list.values, ["b", "a", "c", "d e"], "past the end is a no-op")
+        XCTAssertFalse(list.canMove(added, by: 1))
+        XCTAssertFalse(list.canMove(ids[1], by: -1))
+        XCTAssertTrue(list.canMove(ids[1], by: 1))
+        list.remove(ids[2])
+        XCTAssertEqual(list.values, ["b", "a", "d e"])
+        for row in list.rows { list.remove(row.id) }
+        XCTAssertEqual(list.rows.count, 1, "never no rows")
+        XCTAssertEqual(list.values, [])
+        XCTAssertEqual(AcpArgList([]).values, [])
+    }
+
+    func testPairListDuplicateKeysAreAnErrorNotLastWins() {
+        var list = AcpPairList(["B": "2", "A": "1"])
+        XCTAssertEqual(list.rows.map(\.item.key), ["A", "B"], "opens sorted by key")
+        let id = list.append()
+        list[id] = AcpPair(key: " A ", value: "3")
+        XCTAssertEqual(list.duplicateKeys, ["A"])
+        XCTAssertEqual(list.map, ["A": "1", "B": "2"])
+        var draft = AcpAgentDraft.new()
+        draft.env = list
+        draft.configOptions = AcpRowList([AcpPair(key: "model", value: "opus"),
+                                          AcpPair(key: "model", value: "sonnet")], blank: AcpPair())
+        XCTAssertEqual(draft.validationErrors, [
+            "The environment variable \u{201C}A\u{201D} is set more than once.",
+            "The config option \u{201C}model\u{201D} is set more than once.",
+        ])
+        list.remove(id)
+        XCTAssertEqual(list.duplicateKeys, [])
+        list.move(list.rows[1].id, by: -1)
+        XCTAssertEqual(list.pairs.map(\.key), ["B", "A"])
     }
 
     /// R14: deleting an agent a tab is open on breaks that tab the same way a rename does, so

@@ -1,32 +1,33 @@
 import Foundation
 
-/// Settings → Agents' form, as text: one field per editable value, lists one entry per line
-/// (`args`, and `exec` as its command then its args), maps as `KEY=VALUE` lines. Converts to
-/// and from `AcpAgentConfig` here, so the parsing is under `swift test`, not in a view.
+/// Settings → Agents' form: one field per editable value; lists as rows (`args`, and `exec` as
+/// its command then its args, one argument per row; `env` and `configOptions` as key/value
+/// rows). Converts to and from `AcpAgentConfig` here, so the normalizing is under `swift test`,
+/// not in a view.
 public struct AcpAgentDraft: Equatable, Sendable {
     public var id: UUID
     public var name: String
     public var command: String
-    public var args: String
-    public var env: String
+    public var args: AcpArgList
+    public var env: AcpPairList
     public var cwd: String
     public var defaultMode: String
-    public var configOptions: String
+    public var configOptions: AcpPairList
     public var mcpCallbackURL: String
     /// Empty = use the exec derived from the launch command (`AcpAgentConfig.derivedExec`).
-    public var exec: String
+    public var exec: AcpArgList
 
     public init(_ config: AcpAgentConfig) {
         id = config.id
         name = config.name
         command = config.launch.command
-        args = config.launch.args.joined(separator: "\n")
-        env = Self.lines(config.env)
+        args = AcpArgList(config.launch.args)
+        env = AcpPairList(config.env)
         cwd = config.cwd
         defaultMode = config.defaultMode ?? ""
-        configOptions = Self.lines(config.defaultConfigOptions)
+        configOptions = AcpPairList(config.defaultConfigOptions)
         mcpCallbackURL = config.mcpCallbackURL
-        exec = config.exec.map { ([$0.command] + $0.args).joined(separator: "\n") } ?? ""
+        exec = AcpArgList(config.exec.map { [$0.command] + $0.args } ?? [])
     }
 
     /// A new agent's starting point: the config's defaults, every field empty — the form's
@@ -36,41 +37,28 @@ public struct AcpAgentDraft: Equatable, Sendable {
     }
 
     public var config: AcpAgentConfig {
-        let execLines = Self.entries(exec)
+        let execValues = exec.values
         let mode = defaultMode.trimmingCharacters(in: .whitespaces)
         return AcpAgentConfig(
             id: id,
             name: name.trimmingCharacters(in: .whitespaces),
-            launch: AcpCommand(command: command.trimmingCharacters(in: .whitespaces), args: Self.entries(args)),
-            env: Self.pairs(env),
+            launch: AcpCommand(command: command.trimmingCharacters(in: .whitespaces), args: args.values),
+            env: env.map,
             cwd: cwd.trimmingCharacters(in: .whitespaces),
             defaultMode: mode.isEmpty ? nil : mode,
-            defaultConfigOptions: Self.pairs(configOptions),
+            defaultConfigOptions: configOptions.map,
             mcpCallbackURL: mcpCallbackURL.trimmingCharacters(in: .whitespaces),
-            exec: execLines.first.map { AcpCommand(command: $0, args: Array(execLines.dropFirst())) })
+            exec: execValues.first.map { AcpCommand(command: $0, args: Array(execValues.dropFirst())) })
     }
 
-    /// Non-empty lines, each trimmed of surrounding whitespace (an arg with inner spaces stays one arg).
-    static func entries(_ text: String) -> [String] {
-        text.split(whereSeparator: \.isNewline)
-            .map { $0.trimmingCharacters(in: .whitespaces) }
-            .filter { !$0.isEmpty }
+    /// What the rows say that the config cannot: a key given twice (the config is a map, so it
+    /// would silently keep one). Shown with the config's own errors; Save stays off while any.
+    public var validationErrors: [String] {
+        Self.duplicates("environment variable", env.duplicateKeys)
+            + Self.duplicates("config option", configOptions.duplicateKeys)
     }
 
-    /// `KEY=VALUE` lines; the value is everything after the first `=` (it may hold more).
-    /// A line with no `=` or no key is dropped.
-    static func pairs(_ text: String) -> [String: String] {
-        var out: [String: String] = [:]
-        for line in entries(text) {
-            guard let eq = line.firstIndex(of: "=") else { continue }
-            let key = line[..<eq].trimmingCharacters(in: .whitespaces)
-            guard !key.isEmpty else { continue }
-            out[key] = String(line[line.index(after: eq)...])
-        }
-        return out
-    }
-
-    static func lines(_ map: [String: String]) -> String {
-        map.keys.sorted().map { "\($0)=\(map[$0] ?? "")" }.joined(separator: "\n")
+    static func duplicates(_ what: String, _ keys: [String]) -> [String] {
+        keys.map { "The \(what) \u{201C}\($0)\u{201D} is set more than once." }
     }
 }

@@ -16,6 +16,13 @@ struct AgentsSettingsView: View {
     @State private var confirmingDelete: AcpAgentConfig?
     /// The agent whose delete was refused (tabs open on it), and why — shown under its row.
     @State private var deleteRefused: (id: UUID, reason: String)?
+    /// The list row being typed in: its id and which of its fields (0 = argument or key, 1 = value).
+    @FocusState private var focusedRow: RowFocus?
+
+    struct RowFocus: Hashable {
+        let row: UUID
+        let field: Int
+    }
 
     /// Whether the API server feature is on; nil = the config's. Set only by the probe, which
     /// must draw the warning without turning the real server on.
@@ -23,7 +30,13 @@ struct AgentsSettingsView: View {
 
     /// Opens with `editing` in the form (the probe draws a filled form).
     init(editing: AcpAgentConfig? = nil, apiServerOn: Bool? = nil) {
-        _draft = State(initialValue: editing.map(AcpAgentDraft.init))
+        self.init(draft: editing.map(AcpAgentDraft.init), isNew: false, apiServerOn: apiServerOn)
+    }
+
+    /// Opens with `draft` in the form as typed — rows the config cannot hold, like a duplicate key.
+    init(draft: AcpAgentDraft?, isNew: Bool, apiServerOn: Bool? = nil) {
+        _draft = State(initialValue: draft)
+        _draftIsNew = State(initialValue: isNew)
         self.apiServerOn = apiServerOn
     }
 
@@ -109,37 +122,38 @@ struct AgentsSettingsView: View {
 
     /// The form that works: `npx` fetches the adapter in the container (a bare
     /// `claude-agent-acp` is usually not installed there). Generic names, nobody's setup.
-    static let argumentsPlaceholder = ["exec", "-i", "-w", "/path/in/container", "my-container",
-                                       "npx", "-y", "@agentclientprotocol/claude-agent-acp@<version>"]
-        .joined(separator: "\n")
+    static let argumentsHint = "One argument per row, e.g. `exec`, `-i`, `my-container`, `npx`, `-y`, "
+        + "`@agentclientprotocol/claude-agent-acp@<version>`."
 
     private func form(_ current: AcpAgentDraft) -> some View {
         let config = current.config
-        let errors = config.validationErrors(among: agents, openTabAgents: openTabAgents)
+        let errors = current.validationErrors
+            + config.validationErrors(among: agents, openTabAgents: openTabAgents)
         return SettingsCard(draftIsNew ? "New agent" : "Edit \u{201C}\(config.name)\u{201D}",
-                            "Launched directly — no shell — with one literal argument per line.") {
+                            "Launched directly — no shell — with one literal argument per row.") {
             VStack(alignment: .leading, spacing: 12) {
                 field("Name", \.name, placeholder: "Claude Code (container)", id: "agent-name")
                 field("Command", \.command, placeholder: "docker", id: "agent-command", mono: true)
-                multiline("Arguments", \.args, placeholder: Self.argumentsPlaceholder,
-                          id: "agent-args", height: 150)
+                argList("Arguments", \.args, current.args, placeholders: ["exec"], id: "agent-args")
+                caption(Self.argumentsHint)
                 if config.passesIgnoredSkipPermissionsFlag {
                     note("exclamationmark.triangle.fill",
                          "claude-agent-acp ignores --dangerously-skip-permissions. "
                              + "Admiral sets the mode below instead.")
                         .accessibilityIdentifier("agent-ignored-flag")
                 }
-                multiline("Environment", \.env, placeholder: "KEY=value", id: "agent-env", height: 52)
+                pairList("Environment", \.env, current.env, placeholder: ("NAME", "value"),
+                         add: "Add variable", id: "agent-env")
                 caption("Applies to the command on this Mac, not inside a container. "
                         + "Use `docker exec -e` for the agent's environment.")
                 field("Folder", \.cwd, placeholder: "/path/in/container", id: "agent-cwd", mono: true)
                 caption("Absolute, as the agent sees it (inside the container).")
                 field("Mode", \.defaultMode, placeholder: "none", id: "agent-mode", mono: true)
-                multiline("Config options", \.configOptions, placeholder: "model=opus", id: "agent-options",
-                          height: 40)
+                pairList("Config options", \.configOptions, current.configOptions, placeholder: ("model", "opus"),
+                         add: "Add option", id: "agent-options")
                 field("Bridge URL", \.mcpCallbackURL, placeholder: "http://host.docker.internal:4142",
                       id: "agent-callback", mono: true)
-                execField(config)
+                execField(current)
                 if !errors.isEmpty {
                     VStack(alignment: .leading, spacing: 3) {
                         ForEach(errors, id: \.self) { error in
@@ -169,14 +183,16 @@ struct AgentsSettingsView: View {
 
     /// The exec prefix: empty = the one derived from the launch command, shown under it, and
     /// one click away from being edited.
-    @ViewBuilder private func execField(_ config: AcpAgentConfig) -> some View {
+    @ViewBuilder private func execField(_ current: AcpAgentDraft) -> some View {
+        let config = current.config
         let derived = AcpAgentConfig.derivedExec(from: config.launch)
-        multiline("Exec", \.exec, placeholder: derived.map(Self.lines) ?? "docker\nexec\n<container>",
-                  id: "agent-exec", height: 52)
+        argList("Exec", \.exec, current.exec,
+                placeholders: derived.map { [$0.command] } ?? ["docker"], id: "agent-exec")
         HStack(spacing: 6) {
             if config.exec == nil, let derived {
                 caption("Empty: derived from the launch command — `\(Self.oneLine(derived))`.")
-                Button("Edit") { draft?.exec = Self.lines(derived) }.controlSize(.small).buttonStyle(.link)
+                Button("Edit") { draft?.exec = AcpArgList([derived.command] + derived.args) }
+                    .controlSize(.small).buttonStyle(.link)
             } else if config.exec == nil {
                 caption("None: git, branch, touched repos and PR watch stay off for this agent's tabs.")
             } else {
@@ -248,7 +264,8 @@ struct AgentsSettingsView: View {
     }
 
     private func save(_ config: AcpAgentConfig) {
-        guard config.validationErrors(among: agents, openTabAgents: openTabAgents).isEmpty else { return }
+        guard draft?.validationErrors.isEmpty != false,
+              config.validationErrors(among: agents, openTabAgents: openTabAgents).isEmpty else { return }
         if let i = agents.firstIndex(where: { $0.id == config.id }) {
             agents[i] = config
         } else {
@@ -326,15 +343,100 @@ struct AgentsSettingsView: View {
         }
     }
 
-    private func multiline(
-        _ title: String, _ key: WritableKeyPath<AcpAgentDraft, String>, placeholder: String, id: String,
-        height: CGFloat
+    /// An argv list: one single-line field per argument, up/down to reorder, − to remove, and
+    /// Add argument to append a row (focused).
+    private func argList(
+        _ title: String, _ key: WritableKeyPath<AcpAgentDraft, AcpArgList>, _ list: AcpArgList,
+        placeholders: [String], id: String
+    ) -> some View {
+        rowList(title, key, list, add: "Add argument", id: id, reorderable: true) { text, index, row in
+            TextField(index < placeholders.count ? placeholders[index] : "", text: text)
+                .textFieldStyle(.roundedBorder)
+                .font(.system(size: 12, design: .monospaced))
+                .focused($focusedRow, equals: RowFocus(row: row, field: 0))
+                .accessibilityIdentifier("\(id)-row-\(index)")
+        }
+    }
+
+    /// A key/value list: a key field and a value field side by side, − to remove, and an Add
+    /// button that appends a row and focuses its key.
+    private func pairList(
+        _ title: String, _ key: WritableKeyPath<AcpAgentDraft, AcpPairList>, _ list: AcpPairList,
+        placeholder: (key: String, value: String), add: String, id: String
+    ) -> some View {
+        rowList(title, key, list, add: add, id: id, reorderable: false) { pair, index, row in
+            HStack(spacing: 6) {
+                TextField(index == 0 ? placeholder.key : "", text: pair.key)
+                    .textFieldStyle(.roundedBorder)
+                    .font(.system(size: 12, design: .monospaced))
+                    .frame(width: 150)
+                    .focused($focusedRow, equals: RowFocus(row: row, field: 0))
+                    .accessibilityIdentifier("\(id)-key-\(index)")
+                Text("=").font(.system(size: 12, design: .monospaced)).foregroundStyle(Theme.secondaryText)
+                TextField(index == 0 ? placeholder.value : "", text: pair.value)
+                    .textFieldStyle(.roundedBorder)
+                    .font(.system(size: 12, design: .monospaced))
+                    .focused($focusedRow, equals: RowFocus(row: row, field: 1))
+                    .accessibilityIdentifier("\(id)-value-\(index)")
+            }
+        }
+    }
+
+    /// The one list editor behind all four lists: the label, a row per entry (its fields, then
+    /// up/down when the order matters, then −), and the Add button under them.
+    private func rowList<Item, Fields: View>(
+        _ title: String, _ key: WritableKeyPath<AcpAgentDraft, AcpRowList<Item>>, _ list: AcpRowList<Item>,
+        add: String, id: String, reorderable: Bool,
+        @ViewBuilder fields: @escaping (Binding<Item>, Int, UUID) -> Fields
     ) -> some View {
         HStack(alignment: .top, spacing: 10) {
-            label(title).padding(.top, 6)
-            FieldEditor(text: binding(key), placeholder: placeholder, monospaced: true, height: height,
-                        identifier: id)
+            label(title).padding(.top, 4)
+            VStack(alignment: .leading, spacing: 6) {
+                ForEach(Array(list.rows.enumerated()), id: \.element.id) { index, row in
+                    HStack(spacing: 4) {
+                        fields(Binding(get: { draft?[keyPath: key][row.id] ?? row.item },
+                                       set: { draft?[keyPath: key][row.id] = $0 }),
+                               index, row.id)
+                        if reorderable {
+                            rowButton("chevron.up", "Move up", id: "\(id)-up-\(index)",
+                                      disabled: !list.canMove(row.id, by: -1)) {
+                                draft?[keyPath: key].move(row.id, by: -1)
+                            }
+                            rowButton("chevron.down", "Move down", id: "\(id)-down-\(index)",
+                                      disabled: !list.canMove(row.id, by: 1)) {
+                                draft?[keyPath: key].move(row.id, by: 1)
+                            }
+                        }
+                        rowButton("minus.circle", "Remove", id: "\(id)-remove-\(index)", disabled: list.isBlank) {
+                            draft?[keyPath: key].remove(row.id)
+                        }
+                    }
+                }
+                Button {
+                    if let row = draft?[keyPath: key].append() { focusedRow = RowFocus(row: row, field: 0) }
+                } label: {
+                    Label(add, systemImage: "plus").font(.system(size: 11.5))
+                }
+                .buttonStyle(.borderless)
+                .accessibilityIdentifier("\(id)-add")
+            }
+            .accessibilityElement(children: .contain)
+            .accessibilityIdentifier(id)
         }
+    }
+
+    private func rowButton(
+        _ icon: String, _ help: String, id: String, disabled: Bool, action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            Image(systemName: icon).font(.system(size: 11, weight: .medium)).frame(width: 18, height: 20)
+        }
+        .buttonStyle(.borderless)
+        .foregroundStyle(Theme.secondaryText)
+        .opacity(disabled ? 0.35 : 1)  // the explicit style would otherwise hide the disabled look
+        .disabled(disabled)
+        .help(help)
+        .accessibilityIdentifier(id)
     }
 
     private func caption(_ text: String) -> some View {
@@ -378,6 +480,5 @@ struct AgentsSettingsView: View {
         }
     }
 
-    static func lines(_ c: AcpCommand) -> String { ([c.command] + c.args).joined(separator: "\n") }
     static func oneLine(_ c: AcpCommand) -> String { ([c.command] + c.args).joined(separator: " ") }
 }

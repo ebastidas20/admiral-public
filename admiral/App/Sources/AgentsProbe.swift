@@ -47,7 +47,8 @@ extension AppModel {
                 launch: AcpCommand(command: "docker", args: [
                     "exec", "-i", "-w", "/path/in/container", "-e", "HOME=/home/node", "my-container",
                     "npx", "-y", "@agentclientprotocol/claude-agent-acp@0.100.0"]),
-                cwd: "/path/in/container")
+                env: ["DOCKER_CONFIG": "/path/to/docker-config", "NAME": "value"], cwd: "/path/in/container",
+                defaultConfigOptions: ["model": "opus"])
             let legacy = AcpAgentConfig(
                 name: "JetBrains import",
                 launch: AcpCommand(command: "docker", args: [
@@ -62,6 +63,17 @@ extension AppModel {
                 self.acpAgentStore.save([valid])
                 self.acpConnectionTests[valid.id] = .connected(Self.probeRecord(fork: true, list: true, git: true))
                 await draw("agents-valid", settings(valid), NSSize(width: 640, height: 1180), dark: dark)
+
+                // A new agent: every list empty, one placeholder row each, exec derived from nothing.
+                await draw("agents-new", AgentsSettingsView(draft: AcpAgentDraft.new(), isNew: true)
+                    .frame(width: 640).background(Theme.surface), NSSize(width: 640, height: 900), dark: dark)
+
+                // A key typed twice: refused with a message, never a silent last-wins.
+                var twice = AcpAgentDraft(valid)
+                let extra = twice.env.append()
+                twice.env[extra] = AcpPair(key: "NAME", value: "other")
+                await draw("agents-duplicate-key", AgentsSettingsView(draft: twice, isNew: false)
+                    .frame(width: 640).background(Theme.surface), NSSize(width: 640, height: 1260), dark: dark)
 
                 // With the API server feature on (the warning), drawn without starting a server.
                 self.acpAgentStore.save([valid, legacy])
@@ -79,6 +91,12 @@ extension AppModel {
             check("a duplicate name is refused (any case)",
                   dup.validationErrors(among: [valid, legacy]).contains { $0.contains("already exists") },
                   dup.validationErrors(among: [valid, legacy]).joined(separator: "; "))
+            var twice = AcpAgentDraft(valid)
+            twice.env[twice.env.append()] = AcpPair(key: "NAME", value: "other")
+            check("a duplicate env key is refused", twice.validationErrors.count == 1,
+                  twice.validationErrors.joined(separator: "; "))
+            check("the rows round-trip the config", AcpAgentDraft(valid).config == valid,
+                  "args \(AcpAgentDraft(valid).args.rows.count) rows")
             check("the ignored flag is detected",
                   legacy.passesIgnoredSkipPermissionsFlag && !valid.passesIgnoredSkipPermissionsFlag, "legacy only")
             check("exec is derived from the launch",
