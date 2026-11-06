@@ -92,10 +92,16 @@ extension AppModel {
                       region.isEmpty ? "the drag region is empty"
                           : outside.isEmpty ? "\(empty.count) points in a \(region.count)-rect region"
                           : "not draggable at x=\(outside.map { Int($0.x) })")
-                let grabbed = platters.map { NSPoint(x: $0.midX, y: $0.midY) }
-                    .filter { p in region.contains { $0.contains(p) } }
-                check("\(label): buttons stay out of the drag region", grabbed.isEmpty,
-                      grabbed.isEmpty ? "\(platters.count) button groups excluded" : "draggable at x=\(grabbed.map { Int($0.x) })")
+                // Each button's own centre: a platter's midpoint can fall in the gap between two buttons.
+                let buttons = views(frameView, named: "NSToolbarPlatterView")
+                    .flatMap { views($0, named: "NSToolbarItemViewer") }
+                    .map { $0.convert($0.bounds, to: nil) }
+                    .map { NSPoint(x: $0.midX, y: $0.midY) }
+                let grabbed = buttons.filter { p in region.contains { $0.contains(p) } }
+                check("\(label): buttons stay out of the drag region", !buttons.isEmpty && grabbed.isEmpty,
+                      buttons.isEmpty ? "no toolbar buttons found"
+                          : grabbed.isEmpty ? "\(buttons.count) buttons excluded"
+                          : "draggable at x=\(grabbed.map { Int($0.x) })")
 
                 let shot = NSRect(x: 0, y: header.minY - 60, width: header.width, height: header.height + 60)
                 guard let rep = frameView.bitmapImageRepForCachingDisplay(in: shot) else {
