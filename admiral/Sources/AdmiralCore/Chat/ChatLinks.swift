@@ -60,6 +60,17 @@ public enum ChatLinks {
         return links
     }
 
+    /// A code span that is exactly one http/https URL with a host → that URL; anything else nil.
+    /// Foundation's markdown links a bare URL itself but never one inside backticks, which is
+    /// how agents write URLs in tables.
+    public static func codeSpanURL(_ span: String) -> URL? {
+        let text = span.trimmingCharacters(in: .whitespaces)
+        guard !text.isEmpty, text.rangeOfCharacter(from: .whitespacesAndNewlines) == nil,
+              let url = URL(string: text), let scheme = url.scheme?.lowercased(),
+              scheme == "http" || scheme == "https", url.host?.isEmpty == false else { return nil }
+        return url
+    }
+
     /// `path:52` / `path:52:7` → (path, 52). A Windows-style `C:` or a URL keeps its colon.
     static func splitLine(_ token: String) -> (String, Int?) {
         let parts = token.split(separator: ":", omittingEmptySubsequences: false)

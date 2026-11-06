@@ -72,4 +72,19 @@ final class ChatLinksTests: XCTestCase {
     func testNoCwdMeansNoLinks() {
         XCTAssertTrue(ChatLinks.detect(in: "notes.md", cwd: "", fileExists: { _ in true }).isEmpty)
     }
+
+    /// Agents quote URLs in backticks (tables especially); the markdown parser links a bare URL
+    /// but never one in a code span. Only a span that is exactly one web URL becomes a link.
+    func testACodeSpanThatIsExactlyAWebURLIsALink() {
+        XCTAssertEqual(ChatLinks.codeSpanURL("http://localhost:3000/orders/1042"),
+                       URL(string: "http://localhost:3000/orders/1042"))
+        XCTAssertEqual(ChatLinks.codeSpanURL(" https://example.com/a?b=1 "),
+                       URL(string: "https://example.com/a?b=1"))
+        XCTAssertNil(ChatLinks.codeSpanURL("npm test"))
+        XCTAssertNil(ChatLinks.codeSpanURL("see https://example.com"))
+        XCTAssertNil(ChatLinks.codeSpanURL("http://"))
+        XCTAssertNil(ChatLinks.codeSpanURL("ftp://example.com/x"))
+        XCTAssertNil(ChatLinks.codeSpanURL("mailto:someone@example.com"))
+        XCTAssertNil(ChatLinks.codeSpanURL("src/api/users.ts"))
+    }
 }
