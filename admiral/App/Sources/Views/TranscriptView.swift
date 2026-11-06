@@ -179,7 +179,8 @@ struct AssistantText: View {
         .padding(.horizontal, 6)
     }
 
-    /// Render inline markdown, styling inline `code` spans as chips.
+    /// Render inline markdown, styling inline `code` spans as chips. A chip that is exactly
+    /// a URL is also a link (`ChatLinks.codeSpanURL`).
     static func styled(_ source: String) -> AttributedString {
         var attr = (try? AttributedString(
             markdown: source,
@@ -189,6 +190,10 @@ struct AssistantText: View {
             attr[run.range].backgroundColor = Theme.codeChipBackground
             attr[run.range].foregroundColor = Theme.codeChipText
             attr[run.range].font = .system(size: 13.5, weight: .medium, design: .monospaced)
+            if let url = ChatLinks.codeSpanURL(String(attr[run.range].characters)) {
+                attr[run.range].link = url
+                attr[run.range].underlineStyle = .single
+            }
         }
         return attr
     }
