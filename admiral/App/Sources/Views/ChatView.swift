@@ -394,8 +394,11 @@ struct ChatMarkdownView: View {
 }
 
 /// A markdown table as a grid, with its own Copy (top-right, on hover) that puts the table
-/// on the clipboard as markdown and as tab-separated rows for spreadsheets.
+/// on the clipboard as markdown and as tab-separated rows for spreadsheets. Wider than the
+/// message, it scrolls sideways and keeps its width; a cell wraps at `maxCellWidth`.
 private struct ChatTableView: View {
+    static let maxCellWidth: CGFloat = 360
+
     let header: [String]
     let rows: [[String]]
     let cwd: String
@@ -405,21 +408,10 @@ private struct ChatTableView: View {
     @State private var copied = false
 
     var body: some View {
-        Grid(alignment: .topLeading, horizontalSpacing: 14, verticalSpacing: 7) {
-            GridRow {
-                ForEach(header.indices, id: \.self) { c in cell(header[c]).fontWeight(.semibold) }
-            }
-            Divider().gridCellUnsizedAxes(.horizontal)
-            ForEach(rows.indices, id: \.self) { r in
-                GridRow {
-                    ForEach(rows[r].indices, id: \.self) { c in cell(rows[r][c]) }
-                }
-                if r < rows.count - 1 { Divider().opacity(0.5).gridCellUnsizedAxes(.horizontal) }
-            }
+        ScrollView(.horizontal, showsIndicators: true) {
+            grid
         }
-        .padding(.horizontal, 12).padding(.vertical, 10)
-        .background(RoundedRectangle(cornerRadius: 8).fill(Theme.planCardBackground))
-        .overlay(RoundedRectangle(cornerRadius: 8).stroke(Theme.bubbleBorder))
+        .accessibilityIdentifier("chat-table-scroll")
         // Floats over the table's corner on a material pill, so it reads over any cell.
         .overlay(alignment: .topTrailing) {
             CopyControl(label: "Copy table",
@@ -435,10 +427,49 @@ private struct ChatTableView: View {
         .contextMenu { Button("Copy Table", action: copy) }
     }
 
+    private var grid: some View {
+        Grid(alignment: .topLeading, horizontalSpacing: 14, verticalSpacing: 7) {
+            GridRow {
+                ForEach(header.indices, id: \.self) { c in cell(header[c], bold: true) }
+            }
+            Divider().gridCellUnsizedAxes(.horizontal)
+            ForEach(rows.indices, id: \.self) { r in
+                GridRow {
+                    ForEach(rows[r].indices, id: \.self) { c in cell(rows[r][c]) }
+                }
+                if r < rows.count - 1 { Divider().opacity(0.5).gridCellUnsizedAxes(.horizontal) }
+            }
+        }
+        .padding(.horizontal, 12).padding(.vertical, 10)
+        .background(RoundedRectangle(cornerRadius: 8).fill(Theme.planCardBackground))
+        .overlay(RoundedRectangle(cornerRadius: 8).stroke(Theme.bubbleBorder))
+    }
+
     private func copy() { ChatClipboard.copyTable(header: header, rows: rows) }
 
-    private func cell(_ text: String) -> Text {
-        Text(ChatText.attributed(text, cwd: cwd)).font(.system(size: fontSize - 1))
+    private func cell(_ text: String, bold: Bool = false) -> some View {
+        CappedWidth(cap: Self.maxCellWidth) {
+            Text(ChatText.attributed(text, cwd: cwd))
+                .font(.system(size: fontSize - 1))
+                .fontWeight(bold ? .semibold : .regular)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+}
+
+/// Offers its one child at most `cap` points of width, whatever it is offered, so a table cell
+/// wraps at `cap` even inside a horizontal ScrollView (which offers no width at all) and a
+/// short cell stays as narrow as its text.
+struct CappedWidth: Layout {
+    let cap: CGFloat
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        guard let child = subviews.first else { return .zero }
+        return child.sizeThatFits(ProposedViewSize(width: min(proposal.width ?? cap, cap), height: nil))
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        subviews.first?.place(at: bounds.origin, proposal: ProposedViewSize(width: bounds.width, height: nil))
     }
 }
 
