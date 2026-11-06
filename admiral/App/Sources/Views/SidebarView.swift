@@ -255,7 +255,9 @@ struct SidebarView: View {
             .padding(8)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(Theme.sidebarBackground)
+        // Stops at the header: a plain background reaches up under the titlebar and takes
+        // the sidebar's stretch of it out of the window's drag region (see `paneBackground`).
+        .paneBackground(Theme.sidebarBackground)
         // Custom themed confirm — keyboard-first (Return deletes, Esc cancels) regardless
         // of Full Keyboard Access, and styled to match the app rather than a system alert.
         .sheet(item: $pendingDelete) { session in
