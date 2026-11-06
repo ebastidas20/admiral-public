@@ -1538,6 +1538,16 @@ final class AppModel: ObservableObject {
 
     func interrupt(_ session: AgentSession) { sessions.interrupt(session.id) }
 
+    /// What a click on a chat link does, for the tab's Chat and an expanded message alike: a
+    /// file opens through `openChatFile`, a web link goes to the system, anything else is dropped.
+    var chatOpenURL: OpenURLAction {
+        OpenURLAction { [weak self] url in
+            guard url.isFileURL else { return TerminalLink.isWebURL(url) ? .systemAction : .discarded }
+            self?.openChatFile(url)
+            return .handled
+        }
+    }
+
     /// A file path clicked in the chat. `#L52` (the line the message named) is honoured by
     /// asking VS Code to open there; without a line, or without VS Code, the file opens in
     /// whatever app owns it — the same end as clicking a link in the terminal.

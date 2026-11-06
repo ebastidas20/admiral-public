@@ -93,13 +93,7 @@ struct ChatView: View {
                 fillIfShort()
             }
             .overlay(alignment: .bottom) { jumpToLatest }
-            .environment(\.openURL, OpenURLAction { url in
-                guard url.isFileURL else {
-                    return TerminalLink.isWebURL(url) ? .systemAction : .discarded
-                }
-                model.openChatFile(url)
-                return .handled
-            })
+            .environment(\.openURL, model.chatOpenURL)
             .accessibilityIdentifier("chat-content")
 
             ChatComposer(session: session, isWorking: session.status == .busy, onSend: jumpToBottom)
@@ -544,17 +538,20 @@ struct ReplyView: View {
     var name: String? = nil
     let cwd: String
     var mentions: [String: Color] = [:]
+    var windowTitle: String = "Message"
 
     init(text: String, ts: String, session: AgentSession) {
-        self.init(text: text, ts: ts, avatar: Avatar(session: session, size: ChatMetrics.avatar), cwd: session.cwd)
+        self.init(text: text, ts: ts, avatar: Avatar(session: session, size: ChatMetrics.avatar), cwd: session.cwd,
+                  windowTitle: session.displayTitle)
     }
 
     init(text: String, ts: String, avatar: Avatar, name: String? = nil, cwd: String,
-         mentions: [String: Color] = [:]) {
+         mentions: [String: Color] = [:], windowTitle: String = "Message") {
         self.text = text; self.ts = ts; self.avatar = avatar; self.name = name
-        self.cwd = cwd; self.mentions = mentions
+        self.cwd = cwd; self.mentions = mentions; self.windowTitle = windowTitle
     }
 
+    @Environment(\.openWindow) private var openWindow
     @State private var hovering = false
     @State private var copied = false
 
@@ -572,6 +569,17 @@ struct ReplyView: View {
                         .help(ChatTime.full(ts))
                     CopyControl(label: "Copy message", copied: $copied) { ChatClipboard.copy(text) }
                         .revealed(when: hovering || copied)
+                    Button {
+                        openWindow(id: ExpandedMessage.windowID,
+                                   value: ExpandedMessage(text: text, cwd: cwd, title: windowTitle))
+                    } label: {
+                        Image(systemName: "arrow.up.left.and.arrow.down.right").font(.system(size: 10.5))
+                            .foregroundStyle(Theme.secondaryText)
+                    }
+                    .buttonStyle(.plain)
+                    .help("Expand — open this message in its own window")
+                    .accessibilityIdentifier("message-expand")
+                    .revealed(when: hovering || copied)
                 }
                 .frame(height: 18)
                 ChatMarkdownView(text: text, cwd: cwd, mentions: mentions)

@@ -189,7 +189,8 @@ private struct GroupMessageRow: View, Equatable {
         } else {
             ReplyView(text: text, ts: ts,
                       avatar: (live ?? AvatarLook(colorHex: message.colorHex, symbol: message.symbol)).avatar(ChatMetrics.avatar),
-                      name: message.name, cwd: NSHomeDirectory(), mentions: mentions)
+                      name: message.name, cwd: NSHomeDirectory(), mentions: mentions,
+                      windowTitle: message.name)
         }
     }
 
