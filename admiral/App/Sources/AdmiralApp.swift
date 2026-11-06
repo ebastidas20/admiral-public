@@ -41,6 +41,12 @@ struct AdmiralApp: App {
         .windowStyle(.titleBar)
         .windowToolbarStyle(.unified)
         .commands { AdmiralCommands(model: model) }
+
+        WindowGroup("Message", id: ExpandedMessage.windowID, for: ExpandedMessage.self) { $message in
+            if let message { ExpandedMessageView(message: message).environmentObject(model) }
+        }
+        .defaultSize(width: 820, height: 640)
+        .restorationBehavior(.disabled)
     }
 }
 
