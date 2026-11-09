@@ -188,10 +188,18 @@ final class AppModel: ObservableObject {
         ThemeMode(rawValue: UserDefaults.standard.string(forKey: "admiral.themeMode") ?? "") ?? .auto {
         didSet {
             UserDefaults.standard.set(themeMode.rawValue, forKey: "admiral.themeMode")
-            // SwiftUI re-themes itself from `preferredColorScheme`; the terminals hold baked-in
-            // colors, so they have to be told (existing ones included).
-            host.appearance = Theme.appearance(for: themeMode)
+            applyTheme()
         }
+    }
+
+    /// SwiftUI re-themes itself from `preferredColorScheme`; the terminals hold baked-in
+    /// colors, so they have to be told (existing ones included). The Stealth flag changes the
+    /// palette under an unchanged appearance, so that needs its own re-apply.
+    private func applyTheme() {
+        let paletteChanged = Theme.usesStealthPalette != config.features.stealthTheme
+        Theme.usesStealthPalette = config.features.stealthTheme
+        host.appearance = Theme.appearance(for: themeMode)
+        if paletteChanged { host.reapplyColors() }
     }
 
     var preferredColorScheme: ColorScheme? {
@@ -658,7 +666,11 @@ final class AppModel: ObservableObject {
         self.watchdogStateStore = WatchdogStateStore(defaults: storeDefaults)
         self.goalsNudgeConfigStore = GoalsNudgeConfigStore(defaults: storeDefaults)
         AdmiralConfigStore.migrateLegacyFile()
-        self.config = AdmiralConfigStore.load()
+        let loadedConfig = AdmiralConfigStore.load()
+        self.config = loadedConfig
+        // Here, not in `start()`: that runs from the window's onAppear, after the first paint,
+        // and views that don't redraw would keep the colors they resolved without the flag.
+        Theme.usesStealthPalette = loadedConfig.features.stealthTheme
 
         let launchExecutable: String
         let agentTypeProvider: () -> AgentType
@@ -934,8 +946,7 @@ final class AppModel: ObservableObject {
         // light/dark underneath us — the KVO fires immediately, which seeds the initial value.
         NSApp.publisher(for: \.effectiveAppearance)
             .sink { [weak self] _ in
-                guard let self else { return }
-                self.host.appearance = Theme.appearance(for: self.themeMode)
+                self?.applyTheme()
             }
             .store(in: &bag)
 
@@ -1003,6 +1014,7 @@ final class AppModel: ObservableObject {
         // colors go back to being resolved against the system.
         if let proofPath = probeSurface {
             NSApp.appearance = NSAppearance(named: .aqua)
+            Theme.usesStealthPalette = false  // the checks below assume the flag starts off
             host.appearance = Theme.appearance(for: .dark)
             let handle = host.spawn(
                 executable: "/bin/zsh", args: ["-il"],
@@ -1038,10 +1050,22 @@ final class AppModel: ObservableObject {
             // sessions already open, not just the next one spawned.
             host.appearance = Theme.appearance(for: .light)
             let light = (emulator: emulatorBG(), layer: layerBG())
+            // The Stealth flag keeps the same NSAppearance, so only the palette re-apply can
+            // repaint this terminal. Light has to stay white with the flag on.
+            host.appearance = Theme.appearance(for: .dark)
+            Theme.usesStealthPalette = true
+            host.reapplyColors()
+            let stealth = (emulator: emulatorBG(), layer: layerBG())
+            host.appearance = Theme.appearance(for: .light)
+            let stealthLight = (emulator: emulatorBG(), layer: layerBG())
             host.terminate(handle)
 
-            let wantDark = "#121212", wantLight = "#FFFFFF"
+            let wantDark = "#121212", wantLight = "#FFFFFF", wantStealth = "#0D1420"
             let checks: [(String, String, String)] = [
+                ("stealth emulator background", wantStealth, stealth.emulator),
+                ("stealth layer background", wantStealth, stealth.layer),
+                ("flag-on light emulator background", wantLight, stealthLight.emulator),
+                ("flag-on light layer background", wantLight, stealthLight.layer),
                 ("dark emulator background", wantDark, dark.emulator),
                 ("dark layer background", wantDark, dark.layer),
                 ("relit emulator background", wantLight, light.emulator),
@@ -1816,6 +1840,7 @@ final class AppModel: ObservableObject {
             startAPIServer()
         }
         applyGroupsFlag()
+        applyTheme()
     }
 
     /// Store (or clear, when empty) the Jira OAuth client secret — Keychain only.

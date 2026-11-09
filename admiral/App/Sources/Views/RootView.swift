@@ -89,6 +89,9 @@ struct RootView: View {
             .navigationTitle(activeTitle)
             .toolbarBackgroundVisibility(.hidden, for: .windowToolbar)
         }
+        // The Stealth flag changes dark colors without changing the color scheme, so SwiftUI
+        // won't re-resolve them on its own. Inside the sheets so flipping it keeps Settings open.
+        .id(model.config.features.stealthTheme)
         .preferredColorScheme(model.preferredColorScheme)
         .sheet(isPresented: $model.showCommandPalette) { CommandPalette() }
         .sheet(isPresented: $model.showNewTerminal) { NewTerminalForm() }
@@ -103,7 +106,6 @@ struct RootView: View {
 /// glow — an unmistakable "I'm holding the Mac awake" cue.
 private struct CoffeeToolbarButton: View {
     @EnvironmentObject var model: AppModel
-    @State private var flow = false
     private let rainbow = AngularGradient(
         colors: [.red, .orange, .yellow, .green, .blue, .purple, .red], center: .center)
 
@@ -116,13 +118,16 @@ private struct CoffeeToolbarButton: View {
 
     @ViewBuilder private var icon: some View {
         if model.keepAwake {
-            Image(systemName: "cup.and.saucer.fill")
-                .foregroundStyle(rainbow)
-                .hueRotation(.degrees(flow ? 360 : 0))
-                .shadow(color: .accentColor.opacity(0.55), radius: 4)
-                .animation(.linear(duration: 4).repeatForever(autoreverses: false), value: flow)
-                .onAppear { flow = true }
-                .onDisappear { flow = false }
+            // Hue from the clock: a repeating implicit animation also captures the toolbar's
+            // launch layout, and the icon then loops in from the corner of its platter.
+            TimelineView(.animation(minimumInterval: 1.0 / 30)) { context in
+                Image(systemName: "cup.and.saucer.fill")
+                    .foregroundStyle(rainbow)
+                    .hueRotation(.degrees(
+                        context.date.timeIntervalSinceReferenceDate
+                            .truncatingRemainder(dividingBy: 4) / 4 * 360))
+                    .shadow(color: .accentColor.opacity(0.55), radius: 4)
+            }
         } else {
             Image(systemName: "cup.and.saucer")
         }

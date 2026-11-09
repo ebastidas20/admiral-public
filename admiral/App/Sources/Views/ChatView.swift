@@ -183,7 +183,7 @@ struct ChatView: View {
                     .font(.system(size: 12, weight: .semibold))
                     .foregroundStyle(.white)
                     .padding(.horizontal, 14).padding(.vertical, 8)
-                    .background(Capsule().fill(Theme.accent).shadow(radius: 6, y: 2))
+                    .background(Rectangle().fill(Theme.accent).shadow(radius: 6, y: 2))
             }
             .buttonStyle(.plain)
             .padding(.bottom, 12)
@@ -425,8 +425,8 @@ private struct ChatTableView: View {
             CopyControl(label: "Copy table",
                         help: "Copy table — pastes as a table in editors and as rows and columns in a spreadsheet",
                         copied: $copied, copy: copy)
-                .background(Capsule().fill(.regularMaterial))
-                .overlay(Capsule().stroke(Theme.bubbleBorder))
+                .background(Rectangle().fill(.regularMaterial))
+                .overlay(Rectangle().stroke(Theme.bubbleBorder))
                 .padding(6)
                 .revealed(when: hovering || copied)
         }
@@ -579,7 +579,7 @@ struct WorkingCapsule<Label: View>: View {
             }
         }
         .padding(.horizontal, 12).padding(.vertical, 6)
-        .background(Capsule().fill(Theme.chipBackground))
+        .background(Rectangle().fill(Theme.chipBackground))
     }
 }
 
@@ -686,7 +686,7 @@ struct AskCard: View {
                         .font(.system(size: 10, weight: .semibold)).tracking(0.4)
                         .foregroundStyle(Theme.secondaryText)
                         .padding(.horizontal, 7).padding(.vertical, 3)
-                        .background(RoundedRectangle(cornerRadius: 5).fill(Theme.chipBackground))
+                        .background(Rectangle().fill(Theme.chipBackground))
                 }
                 if question.multiSelect {
                     Text("Pick any").font(.system(size: 11)).foregroundStyle(Theme.secondaryText)
@@ -905,7 +905,7 @@ struct ChatComposer: View {
                     }
                     .foregroundStyle(Theme.secondaryText)
                     .padding(.horizontal, 8).padding(.vertical, 4)
-                    .background(RoundedRectangle(cornerRadius: 6).fill(Theme.chipBackground))
+                    .background(Rectangle().fill(Theme.chipBackground))
                 }
             }
         }

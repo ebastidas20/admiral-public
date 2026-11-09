@@ -1,20 +1,11 @@
 import Foundation
 
-/// Keeps an API tool tab on the `client` MCP server. Built-ins are also stripped at
+/// Keeps an API tool tab on the `client` MCP server. Built-ins are stripped at
 /// launch (`--tools ""`); this hook is the backstop for anything that flag misses,
 /// including Admiral's own bridge tools, which must not run locally during a parked turn.
+/// Those names are not also written into `permissions.deny`: with the tools absent,
+/// Claude Code warns that each deny rule matches no tool.
 public enum ClientToolGuard {
-    /// `permissions.deny` entries written into an API tool tab's `--settings` file.
-    /// The hook denies by prefix, so this list is only the built-ins Claude would
-    /// otherwise run before a hook is consulted.
-    public static let builtInDenyList = [
-        "Bash", "Edit", "Read", "Write", "Glob", "Grep", "WebFetch", "WebSearch",
-        "Task", "TaskOutput", "TaskStop", "TaskCreate", "TaskUpdate", "TaskList", "TaskGet",
-        "NotebookEdit", "TodoWrite", "AskUserQuestion", "Skill", "SlashCommand",
-        "EnterPlanMode", "ExitPlanMode", "ToolSearch", "LSP",
-        "ListMcpResources", "ReadMcpResource", "Agent", "SendMessage",
-    ]
-
     public static let denyReason =
         "This API tab only runs the user's client tools (mcp__client__*). "
         + "Built-in tools and other MCP servers are denied. Call the client tool instead."

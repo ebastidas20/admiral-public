@@ -33,6 +33,13 @@ struct ExperimentalSettingsView: View {
                         .toggleStyle(.switch)
                         .accessibilityIdentifier("settings-experimental-groups")
                 }
+                SettingsCard("Stealth theme",
+                             "Replace the Dark theme's black with the dark blue of Stealth "
+                                + "Browser's top bar. Light is unchanged.") {
+                    Toggle("Enable the Stealth theme", isOn: flag(\.stealthTheme))
+                        .toggleStyle(.switch)
+                        .accessibilityIdentifier("settings-experimental-stealthTheme")
+                }
                 Text("Saved to \((AdmiralConfigStore.defaultURL.path as NSString).abbreviatingWithTildeInPath).")
                     .font(.system(size: 11))
                     .foregroundStyle(Theme.secondaryText)

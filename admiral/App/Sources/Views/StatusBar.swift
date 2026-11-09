@@ -85,6 +85,6 @@ struct StatusBar: View {
         .foregroundStyle(Theme.secondaryText)
         .padding(.horizontal, 9)
         .padding(.vertical, 5)
-        .background(RoundedRectangle(cornerRadius: 6, style: .continuous).fill(Theme.chipBackground))
+        .background(Rectangle().fill(Theme.chipBackground))
     }
 }

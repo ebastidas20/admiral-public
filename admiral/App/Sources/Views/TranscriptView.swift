@@ -83,7 +83,7 @@ struct TranscriptView: View {
                     .foregroundStyle(.white)
                     .padding(.horizontal, 14)
                     .padding(.vertical, 8)
-                    .background(Capsule().fill(Theme.accent).shadow(radius: 6, y: 2))
+                    .background(Rectangle().fill(Theme.accent).shadow(radius: 6, y: 2))
             }
             .buttonStyle(.plain)
             .padding(.bottom, 16)

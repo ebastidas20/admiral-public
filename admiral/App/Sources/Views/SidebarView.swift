@@ -191,7 +191,7 @@ struct SidebarView: View {
                         .focused($searchFocused)
                 }
                 .padding(.horizontal, 9).padding(.vertical, 6)
-                .background(RoundedRectangle(cornerRadius: 7, style: .continuous).fill(Theme.chipBackground))
+                .background(Rectangle().fill(Theme.chipBackground))
                 .padding(.horizontal, 8).padding(.top, 8)
                 .onAppear {
                     if pendingSearchFocus {
@@ -207,9 +207,9 @@ struct SidebarView: View {
                             .opacity(dragging == item.id ? 0.4 : 1)
                             .overlay {
                                 if groupDropTarget == item.id {
-                                    RoundedRectangle(cornerRadius: 7, style: .continuous)
+                                    Rectangle()
                                         .fill(Theme.accent.opacity(0.18))
-                                        .overlay(RoundedRectangle(cornerRadius: 7, style: .continuous)
+                                        .overlay(Rectangle()
                                             .strokeBorder(Theme.accent, style: StrokeStyle(lineWidth: 1, dash: [3, 2])))
                                         .allowsHitTesting(false)
                                 }
@@ -220,7 +220,7 @@ struct SidebarView: View {
                                                                                group: groupDrop))
                     }
                 }
-                .padding(8)
+                .padding(.vertical, 8)  // no side inset: the selected row spans the whole bar
             }
             .sheet(item: $pendingGroupDelete) { group in
                 ConfirmDeleteSheet(
@@ -243,7 +243,7 @@ struct SidebarView: View {
                         )
                     }
                 }
-                .padding(.horizontal, 8).padding(.vertical, 4)
+                .padding(.vertical, 4)
             }
             Divider()
             VStack(spacing: 2) {
@@ -395,10 +395,9 @@ private struct ItemButton<Icon: View, Trailing: View>: View {
             }
         }
         .frame(maxWidth: collapsed ? .infinity : nil, alignment: collapsed ? .center : .leading)
-        .padding(.horizontal, collapsed ? 0 : 8)
+        .padding(.horizontal, collapsed ? 0 : 16)
         .frame(height: SidebarMetrics.row)
-        .background(RoundedRectangle(cornerRadius: 7, style: .continuous)
-            .fill(selected ? Theme.rowSelection : Color.clear))
+        .background(Rectangle().fill(selected ? Theme.rowSelection : Color.clear))
         .contentShape(Rectangle())
         .onTapGesture { onSelect() }
         // NOTE: do NOT make the row `.focusable()` with `.onKeyPress`. SwiftUI's focus
@@ -535,10 +534,9 @@ private struct MiniSessionRow: View {
             }
         }
         .frame(maxWidth: collapsed ? .infinity : nil, alignment: collapsed ? .center : .leading)
-        .padding(.horizontal, collapsed ? 0 : 6)
+        .padding(.horizontal, collapsed ? 0 : 14)
         .frame(height: SidebarMetrics.miniRow)
-        .background(RoundedRectangle(cornerRadius: 5, style: .continuous)
-            .fill(selected ? Theme.rowSelection : Color.clear))
+        .background(Rectangle().fill(selected ? Theme.rowSelection : Color.clear))
         .contentShape(Rectangle())
         .onTapGesture { onSelect() }
         .help(session.displayTitle)

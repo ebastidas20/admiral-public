@@ -131,8 +131,13 @@ final class SwiftTermHost: TerminalHost {
     var appearance: NSAppearance = .currentDrawing() {
         didSet {
             guard appearance.name != oldValue.name else { return }
-            for handle in handles.values { applyColors(to: handle.view) }
+            reapplyColors()
         }
+    }
+
+    /// Re-themes the existing terminals when the palette changes under an unchanged appearance.
+    func reapplyColors() {
+        for handle in handles.values { applyColors(to: handle.view) }
     }
 
     /// Foreground/background for the current `appearance`, as **static** colors.
@@ -143,7 +148,10 @@ final class SwiftTermHost: TerminalHost {
         // the system's. The background matches the app surface so the terminal's black is
         // the same as the sidebar's.
         view.nativeForegroundColor = Theme.resolved(.textColor, in: appearance)
-        view.nativeBackgroundColor = Theme.resolved(Theme.surfaceNS, in: appearance)
+        let background = Theme.resolved(Theme.surfaceNS, in: appearance)
+        view.nativeBackgroundColor = background
+        // The layer paints the default background, and SwiftTerm only sets it once, at creation.
+        view.layer?.backgroundColor = background.cgColor
         // AFTER the colors are set: assigning them is what rebuilds the 256-color palette,
         // so pinning the standard cube has to be the last word.
         Self.pinStandardPalette(view)

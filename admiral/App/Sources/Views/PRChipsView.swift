@@ -92,6 +92,6 @@ struct PRChipsView: View {
         }
         .foregroundStyle(color)
         .padding(.horizontal, 9).padding(.vertical, 5)
-        .background(RoundedRectangle(cornerRadius: 6, style: .continuous).fill(color.opacity(0.15)))
+        .background(Rectangle().fill(color.opacity(0.15)))
     }
 }

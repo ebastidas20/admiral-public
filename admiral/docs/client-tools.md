@@ -43,7 +43,9 @@ no alias passes no `--model` flag. The HTTP response still echoes the request's
 The tab is not an interactive session:
 
 - `--tools ""` removes built-in tools. `--strict-mcp-config` loads only Admiral's MCP
-  config. `--permission-mode bypassPermissions` skips permission dialogs.
+  config. `--permission-mode bypassPermissions` skips permission dialogs. Settings set
+  that same mode and do not name the removed tools in `permissions.deny` — Claude Code
+  warns that each such rule matches no tool.
 - The `client` server timeout is 600000 ms, and the process gets `MCP_TOOL_TIMEOUT`
   to the same value.
 - `PreToolUse` matches every tool and denies anything that is not `mcp__client__*`
@@ -116,4 +118,5 @@ the tab, and with it the Haiku process from the first request.
 - API tool tabs do not get the goals reminder. The first request's model is fixed for
   the life of the process. Structured output and client tools cannot be combined.
 - `--tools ""` is what current Claude Code uses to drop built-ins. The `PreToolUse`
-  deny is the backstop if a build ignores the flag.
+  deny is the backstop if a build ignores the flag. Those names are not also listed
+  in `permissions.deny`.

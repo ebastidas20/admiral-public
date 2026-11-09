@@ -244,6 +244,9 @@ final class ClientToolCommissionTests: XCTestCase {
         let settings = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: settingsURL)) as? [String: Any])
         let permissions = try XCTUnwrap(settings["permissions"] as? [String: Any])
         XCTAssertEqual(permissions["defaultMode"] as? String, "bypassPermissions")
+        XCTAssertNil(
+            permissions["deny"],
+            "built-in names are absent under --tools \"\"; a deny rule for each one is a Claude Code warning")
         let hooks = try XCTUnwrap(settings["hooks"] as? [String: Any])
         let pre = try XCTUnwrap((hooks["PreToolUse"] as? [[String: Any]])?.first)
         XCTAssertNil(pre["matcher"], "API tool tabs match every tool")

@@ -8,8 +8,11 @@ enum Theme {
     static let accent = adaptive(light: 0x6C5CE7, dark: 0x8B7CF6)
 
     // ONE surface color for every main area — header, sidebar, content, and the claude
-    // terminal — so the blacks all match. Dark = #121212 (Warp-style); light = #FFFFFF.
-    static let surfaceNS = adaptiveNS(light: 0xFFFFFF, dark: 0x121212)
+    // terminal — so the blacks all match. Dark = #121212 (Warp-style); light = #FFFFFF;
+    // Stealth flag = the top of Stealth Browser's dark top-bar gradient.
+    private static let darkSurface: UInt = 0x121212
+    private static let stealthSurface: UInt = 0x0D1420
+    static let surfaceNS = adaptiveNS(light: 0xFFFFFF, dark: darkSurface, stealth: stealthSurface)
     static let surface = Color(nsColor: surfaceNS)
     static let windowBackground = surface
     static let sidebarBackground = surface
@@ -19,23 +22,23 @@ enum Theme {
     static let secondaryText = Color(nsColor: .secondaryLabelColor)
 
     // Elevated surfaces sit slightly above the flat surface so they stay legible.
-    static let bubbleBackground = adaptive(light: 0xFFFFFF, dark: 0x1F1F1F)
-    static let bubbleBorder = adaptive(light: 0xE6E6EC, dark: 0x2C2C2C)
+    static let bubbleBackground = lifted(light: 0xFFFFFF, dark: 0x1F1F1F)
+    static let bubbleBorder = lifted(light: 0xE6E6EC, dark: 0x2C2C2C)
 
     /// A faint accent-tinted card for the human's prompt (Warp-style), no fake avatar.
-    static let userPromptBackground = adaptive(light: 0xF4F2FD, dark: 0x232331)
+    static let userPromptBackground = lifted(light: 0xF4F2FD, dark: 0x232331)
 
     /// Selected sidebar row: a neutral fill we draw ourselves (same in every focus state).
-    static let rowSelection = adaptive(light: 0xE7E7EE, dark: 0x2A2A2A)
-    static let rowHover = adaptive(light: 0xF0F0F4, dark: 0x222222)
+    static let rowSelection = lifted(light: 0xE7E7EE, dark: 0x2A2A2A)
+    static let rowHover = lifted(light: 0xF0F0F4, dark: 0x222222)
 
     static let codeChipBackground = adaptive(light: 0xEDEBFB, dark: 0x2C2942)
     static let codeChipText = adaptive(light: 0x4B3FB0, dark: 0xB7ADF5)
 
-    static let planCardBackground = adaptive(light: 0xF5F5F7, dark: 0x1E1E1E)
-    static let planCardHeader = adaptive(light: 0xEDEDF0, dark: 0x262626)
+    static let planCardBackground = lifted(light: 0xF5F5F7, dark: 0x1E1E1E)
+    static let planCardHeader = lifted(light: 0xEDEDF0, dark: 0x262626)
 
-    static let chipBackground = adaptive(light: 0xF0F0F3, dark: 0x222222)
+    static let chipBackground = lifted(light: 0xF0F0F3, dark: 0x222222)
 
     static let checkGreen = adaptive(light: 0x2BA84A, dark: 0x46D16B)
     static let inProgressBlue = adaptive(light: 0x2F6BFF, dark: 0x5B8CFF)
@@ -56,8 +59,29 @@ enum Theme {
         }
     }
 
+    /// Whether dark surfaces draw the Stealth palette. `AppModel.applyTheme` is the only writer;
+    /// the dynamic colors below read it whenever they resolve.
+    nonisolated(unsafe) static var usesStealthPalette = false
+
     static func adaptive(light: UInt, dark: UInt) -> Color {
         Color(nsColor: adaptiveNS(light: light, dark: dark))
+    }
+
+    /// Stealth Browser's hover fill: the blue that the Dark chip gray (0x222222) maps to.
+    private static let stealthStep: UInt = 0x172131
+
+    /// A neutral raised above the surface. Under the Stealth flag its lift runs along Stealth
+    /// Browser's blue ramp instead of toward gray. Computed to an opaque color rather than drawn
+    /// translucent: cards nest, and text scrolls beneath some of them.
+    static func lifted(light: UInt, dark: UInt) -> Color {
+        let lift = CGFloat(Int((dark >> 16) & 0xFF) - Int(darkSurface & 0xFF)) / CGFloat(0x22 - 0x12)
+        let channel = { (shift: UInt) -> UInt in
+            let base = CGFloat((stealthSurface >> shift) & 0xFF)
+            let step = CGFloat((stealthStep >> shift) & 0xFF)
+            return UInt((base + (step - base) * lift).rounded()) << shift
+        }
+        return Color(nsColor: adaptiveNS(light: light, dark: dark,
+                                         stealth: channel(16) | channel(8) | channel(0)))
     }
 
     /// The appearance Admiral actually draws in — which is **not** the system's when the
@@ -86,11 +110,14 @@ enum Theme {
     }
 
     /// Dynamic NSColor that resolves per appearance — used directly for the window/title
-    /// bar background so the header matches the chrome in both light and dark.
-    static func adaptiveNS(light: UInt, dark: UInt) -> NSColor {
+    /// bar background so the header matches the chrome in both light and dark. `stealth`
+    /// replaces `dark` while the Stealth flag is on.
+    static func adaptiveNS(light: UInt, dark: UInt, stealth: UInt? = nil) -> NSColor {
         NSColor(name: nil) { appearance in
-            let isDark = appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
-            return NSColor(hex: isDark ? dark : light)
+            guard appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua else {
+                return NSColor(hex: light)
+            }
+            return NSColor(hex: usesStealthPalette ? stealth ?? dark : dark)
         }
     }
 }

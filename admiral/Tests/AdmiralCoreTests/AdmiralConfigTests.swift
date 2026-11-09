@@ -37,6 +37,17 @@ final class AdmiralConfigTests: XCTestCase {
         XCTAssertFalse(config.features.apiServer)
     }
 
+    func testStealthThemeDefaultsOffAndPersists() throws {
+        try #"{"version": 1, "features": {"chatView": true}}"#
+            .write(to: url, atomically: true, encoding: .utf8)
+        var config = AdmiralConfigStore.load(from: url)
+        XCTAssertFalse(config.features.stealthTheme)
+
+        config.features.stealthTheme = true
+        AdmiralConfigStore.save(config, to: url)
+        XCTAssertTrue(AdmiralConfigStore.load(from: url).features.stealthTheme)
+    }
+
     func testRoundTripBothTrue() {
         let config = AdmiralConfig(version: 1, features: .init(chatView: true, apiServer: true))
         AdmiralConfigStore.save(config, to: url)

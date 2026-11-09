@@ -17,11 +17,15 @@ public struct AdmiralConfig: Codable, Equatable, Sendable {
         public var apiServer: Bool
         /// Group chats: tabs that share one conversation.
         public var groups: Bool
+        /// The Dark theme's black becomes the dark blue of Stealth Browser's top bar.
+        public var stealthTheme: Bool
 
-        public init(chatView: Bool = false, apiServer: Bool = false, groups: Bool = false) {
+        public init(chatView: Bool = false, apiServer: Bool = false, groups: Bool = false,
+                    stealthTheme: Bool = false) {
             self.chatView = chatView
             self.apiServer = apiServer
             self.groups = groups
+            self.stealthTheme = stealthTheme
         }
 
         public init(from decoder: Decoder) throws {
@@ -29,6 +33,7 @@ public struct AdmiralConfig: Codable, Equatable, Sendable {
             chatView = try c.decodeIfPresent(Bool.self, forKey: .chatView) ?? false
             apiServer = try c.decodeIfPresent(Bool.self, forKey: .apiServer) ?? false
             groups = try c.decodeIfPresent(Bool.self, forKey: .groups) ?? false
+            stealthTheme = try c.decodeIfPresent(Bool.self, forKey: .stealthTheme) ?? false
         }
     }
 

@@ -4,8 +4,10 @@ import Foundation
 /// injects `--mcp-config` for the bridge relay. It contains a top-level `hooks` block, so
 /// it merges non-destructively: `--settings` overrides only the keys it names, and hooks union
 /// across settings sources. A normal tab leaves the user's `permissions` untouched. An API
-/// tool tab also writes `permissions` (`bypassPermissions` plus a built-in deny list) so a
-/// parked tool call is not a dialog the HTTP client cannot answer.
+/// tool tab also writes `permissions.defaultMode` (`bypassPermissions`) so a parked tool
+/// call is not a dialog the HTTP client cannot answer. It does not write a built-in
+/// `permissions.deny` list: the tab launches with `--tools ""`, and Claude Code warns
+/// that a deny rule matches no tool when that tool is not in the session.
 ///
 /// **This is no longer a governance mechanism.** Governance lives in `hookd`, registered
 /// globally. Admiral injects these events because each of its own features below is
@@ -44,8 +46,9 @@ public enum HookSettings {
     /// only thing that lifts claude's hold on socket messages to a `bypassPermissions`
     /// session, and this file's source outranks the user's own settings.
     /// `clientTools` is an API tool tab. Its `PreToolUse` hook matches every tool (the
-    /// AskUserQuestion matcher would never see Bash), and `permissions` denies built-ins
-    /// and forces `bypassPermissions`. A normal tab stays hooks-only.
+    /// AskUserQuestion matcher would never see Bash), and `permissions.defaultMode` is
+    /// `bypassPermissions`. Built-in names are not listed under `permissions.deny`.
+    /// A normal tab stays hooks-only.
     public static func json(helper: String, providerEnv: [String: String]? = nil,
                             acceptPeerMessages: Bool = false, clientTools: Bool = false) -> [String: Any] {
         var matchers = matchers
@@ -62,10 +65,7 @@ public enum HookSettings {
         if let providerEnv, !providerEnv.isEmpty { settings["env"] = providerEnv }
         if acceptPeerMessages { settings["crossSessionInbound"] = "accept" }
         if clientTools {
-            settings["permissions"] = [
-                "defaultMode": "bypassPermissions",
-                "deny": ClientToolGuard.builtInDenyList,
-            ]
+            settings["permissions"] = ["defaultMode": "bypassPermissions"]
         }
         return settings
     }

@@ -54,6 +54,7 @@ struct SettingsWindow: View {
         }
         .frame(width: 860, height: 600)
         .background(Theme.surface)
+        .id(model.config.features.stealthTheme)  // repaints when the flag flips; see RootView
         // A cancellation action, never the default button: Return belongs to the fields that
         // commit on it (port, idle minutes, the Jira secret).
         .toolbar {

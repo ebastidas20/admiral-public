@@ -222,7 +222,7 @@ private struct PaletteRow: View {
                 .font(.system(size: 11, weight: .medium, design: .monospaced))
                 .foregroundStyle(Theme.secondaryText)
                 .padding(.horizontal, 7).padding(.vertical, 3)
-                .background(RoundedRectangle(cornerRadius: 5, style: .continuous).fill(Theme.chipBackground))
+                .background(Rectangle().fill(Theme.chipBackground))
         }
         .padding(.horizontal, 10)
         .frame(height: 34)

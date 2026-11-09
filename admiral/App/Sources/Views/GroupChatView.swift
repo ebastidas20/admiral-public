@@ -212,7 +212,7 @@ private struct GroupMessageRow: View, Equatable {
                             .font(.system(size: 11)).foregroundStyle(Theme.secondaryText).lineLimit(1)
                     }
                     .padding(.horizontal, 8).padding(.vertical, 3)
-                    .background(Capsule().fill(Theme.secondaryText.opacity(0.12)))
+                    .background(Rectangle().fill(Theme.chipBackground))
                     .help(chip.names.map { "@\($0)" }.joined(separator: ", ") + " reacted " + chip.emoji)
                     .accessibilityIdentifier("group-reaction")
                 }
@@ -297,13 +297,13 @@ struct PausedPill: View {
             Button(action: onContinue) {
                 Text("Continue").font(.system(size: 12, weight: .medium)).foregroundStyle(.white)
                     .padding(.horizontal, 12).padding(.vertical, 4)
-                    .background(Capsule().fill(Theme.accent))
+                    .background(Rectangle().fill(Theme.accent))
             }
             .buttonStyle(.plain)
             .accessibilityIdentifier("group-continue")
         }
         .padding(.leading, 14).padding(.trailing, 6).padding(.vertical, 5)
-        .background(Capsule().fill(Theme.chipBackground))
+        .background(Rectangle().fill(Theme.chipBackground))
         .frame(maxWidth: .infinity)
         .padding(.top, 12)
     }
