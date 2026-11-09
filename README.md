@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="admiral/assets/admiral-icon-source.png" width="112" alt="Admiral icon">
+<img src="admiral/App/Sources/Assets.xcassets/AppIcon.appiconset/icon_512.png" width="112" alt="Admiral icon">
 
 # Admiral
 
