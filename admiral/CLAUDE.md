@@ -281,7 +281,9 @@ exactly what `commission` injected, then remove it. Use a scratch dir under your
   guards against double-showing). The ledger is keyed by claude's session id like goals,
   because `ADMIRAL_SESSION` changes every launch. The live window is the newest page, parsed
   from the transcript's tail each tick; older pages load on scroll-up. A message, once shown,
-  never changes. The composer **types** into the PTY (`SessionManager.sendTyped`): it never uses a
+  never changes. A code span that is exactly an http(s) URL is a link (`ChatLinks.codeSpanURL`),
+  wide tables scroll sideways (cells wrap at 360 pt), and any agent message expands into its own
+  window (`ExpandedMessage`). The composer **types** into the PTY (`SessionManager.sendTyped`): it never uses a
   bracketed paste, because claude wraps a paste in `<pasted_content>` and treats it as
   untrusted, and newlines go as LF (Ctrl+J). `\`+CR left a literal backslash in longer
   messages. **AskUserQuestion**: while the tab shows Chat
