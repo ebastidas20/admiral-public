@@ -327,13 +327,16 @@ exactly what `commission` injected, then remove it. Use a scratch dir under your
   (`defaultConfigOptions`), picked in Settings from `AcpOptionCatalogStore` (what the agent last
   advertised, saved at each session start) — there is no default *mode* field. They apply only
   to a **new** session (never a load/resume); an option or value the agent does not offer is
-  skipped and logged. `commissionACP` opens a **Chat-only** tab on one: `AcpSessionController`
+  skipped and logged. Settings → Agents "New tabs open on" is the ⌘T default (Claude Code on
+  this Mac, or one agent). `commissionACP` opens a **Chat-only** tab on one: `AcpSessionController`
   runs the handshake, the turn, the client-side queue/steering, and holds the agent's
   permission and elicitation requests as Chat cards (never auto-approved). An accepted input
   is certain to go out (`acceptanceIsDelivery`), so `TabRun` never retypes into an ACP tab.
   Agents write no transcript Admiral can read, so `TranscriptMirror` writes a claude-shaped
   **mirror** at `<base>/acp/<sid>.jsonl` (traffic log beside it, `<sid>.log`, bearer masked);
-  Chat, TabRun and the Anthropic endpoint read that like any transcript. A tool result there
+  Chat, TabRun and the Anthropic endpoint read that like any transcript. A `usage_update`
+  carrying `cost` (`queryFinished`) flushes the mirror, so a turn the agent started itself
+  shows. A tool result there
   carries a claude-shaped `toolUseResult` (an edit's `filePath/oldString/newString/type`, a
   command's `stdout`). A `/command` prompt (`AcpSlashCommand`) goes out bare — no goals
   reminder, never as a steer — and is mirrored as claude writes one, so Chat shows it as a

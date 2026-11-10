@@ -87,7 +87,7 @@ struct SessionLaunchView: View {
 
                 SettingsCard("Custom model",
                         "Which CC Switch config a session uses when you tick “Use custom "
-                            + "model” on the New Claude Code form. Choosing one here launches "
+                            + "model” on the New Session form. Choosing one here launches "
                             + "nothing and changes no open tab — it only sets what that "
                             + "checkbox means. CC Switch owns the values; Admiral reads them.") {
                     if providers.isEmpty {

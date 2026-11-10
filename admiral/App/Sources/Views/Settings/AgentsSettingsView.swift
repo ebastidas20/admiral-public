@@ -14,8 +14,9 @@ struct AgentsSettingsView: View {
     @State private var draftIsNew = false
     @State private var testing = false
     @State private var confirmingDelete: AcpAgentConfig?
-    /// The agent whose delete was refused (tabs open on it), and why — shown under its row.
+    /// The agent New Session opens on (nil = Claude Code on this Mac), mirrored from the store.
     @State private var defaultAgentID: UUID?
+    /// The agent whose delete was refused (tabs open on it), and why — shown under its row.
     @State private var deleteRefused: (id: UUID, reason: String)?
     /// The list row being typed in: its id and which of its fields (0 = argument or key, 1 = value).
     @FocusState private var focusedRow: RowFocus?
@@ -92,7 +93,7 @@ struct AgentsSettingsView: View {
             if !agents.isEmpty {
                 HStack {
                     Text("New tabs open on").font(.system(size: 12)).foregroundStyle(Theme.secondaryText)
-                    Picker("", selection: Binding(
+                    Picker("New tabs open on", selection: Binding(
                         get: { defaultAgentID },
                         set: { defaultAgentID = $0; model.acpAgentStore.defaultAgentID = $0 })) {
                         Text("Claude Code (this Mac)").tag(UUID?.none)
