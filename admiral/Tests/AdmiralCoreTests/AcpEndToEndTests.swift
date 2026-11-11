@@ -10,7 +10,7 @@ import XCTest
 /// ADMIRAL_ACP_E2E=1 swift test --filter AcpEndToEndTests
 /// ```
 ///
-/// `ADMIRAL_ACP_E2E_CONTAINER` names the container (default `ppt-claude-1`). The tests drive
+/// `ADMIRAL_ACP_E2E_CONTAINER` names the container (required; no default). The tests drive
 /// the real code paths — `ProcessAcpTransport`, `SessionManager.commissionACP`,
 /// `testACPConnection`, `importACPSessions`, fork, restore, reload — with a temp support dir
 /// and an isolated `UserDefaults` suite. Nothing outside the temp dir is touched on the Mac;
@@ -24,7 +24,7 @@ import XCTest
 @MainActor
 final class AcpEndToEndTests: XCTestCase {
     private static let env = ProcessInfo.processInfo.environment
-    private static let container = env["ADMIRAL_ACP_E2E_CONTAINER"] ?? "ppt-claude-1"
+    private static let container = env["ADMIRAL_ACP_E2E_CONTAINER"] ?? ""
     private static let package = "@agentclientprotocol/claude-agent-acp@0.100.0"
 
     private var base: URL!
@@ -39,8 +39,9 @@ final class AcpEndToEndTests: XCTestCase {
 
     override func setUp() async throws {
         try await super.setUp()
-        guard Self.env["ADMIRAL_ACP_E2E"] == "1" else {
-            throw XCTSkip("ACP end-to-end tests run only with ADMIRAL_ACP_E2E=1 (they need \(Self.container))")
+        guard Self.env["ADMIRAL_ACP_E2E"] == "1", !Self.container.isEmpty else {
+            throw XCTSkip("ACP end-to-end tests run only with ADMIRAL_ACP_E2E=1 and "
+                + "ADMIRAL_ACP_E2E_CONTAINER=<a running container with claude and npx>")
         }
         base = FileManager.default.temporaryDirectory.appendingPathComponent("acp-e2e-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
@@ -79,7 +80,7 @@ final class AcpEndToEndTests: XCTestCase {
 
     private func agent(cwd: String = "/workspace", callbackPort: UInt16 = 4142) -> AcpAgentConfig {
         AcpAgentConfig(
-            name: "ppt-e2e",
+            name: "e2e-agent",
             launch: AcpCommand(command: "docker", args: [
                 "exec", "-i", "-w", "/workspace", Self.container, "npx", "-y", Self.package,
             ]),

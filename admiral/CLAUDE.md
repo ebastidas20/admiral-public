@@ -37,7 +37,7 @@ git config core.hooksPath admiral/.githooks
 swift test
 
 # Opt-in ACP end-to-end tests against a real agent in a container (never part of plain `swift test`)
-ADMIRAL_ACP_E2E=1 swift test --filter AcpEndToEndTests
+ADMIRAL_ACP_E2E=1 ADMIRAL_ACP_E2E_CONTAINER=<container> swift test --filter AcpEndToEndTests
 
 # App: regenerate the project after adding files or changing project.yml / deps
 cd App && xcodegen generate
