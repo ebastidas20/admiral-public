@@ -14,7 +14,7 @@ import IOKit.pwr_mgt
 enum ThemeMode: String { case auto, light, dark }
 
 /// Which kind of session the shared New… form will create: a `claude` session
-/// ("New Claude Code") or a plain login `zsh` shell ("New Bash").
+/// ("New Session") or a plain login `zsh` shell ("New Bash").
 enum NewSessionMode { case claudeCode, bash }
 
 @MainActor
@@ -33,6 +33,23 @@ final class AppModel: ObservableObject {
     var holdsSchedules: Bool { schedulerLock != nil }
     let mcp: MCPServer
     private var bridgeSocket: BridgeSocketServer?
+    /// The session bridge (127.0.0.1:4142 `/mcp/session`): how an ACP tab's agent, which cannot
+    /// reach `bridgeSocket`, calls the session tools. Up while any ACP agent is configured.
+    private var sessionBridgeServer: SessionMCPHTTPServer?
+    private var acpAgentsObserver: NSObjectProtocol?
+    /// Settings → Agents: the configured ACP agents (profile-aware, like the tab stores).
+    let acpAgentStore: AcpAgentStore
+    /// What each agent last advertised (mode, model, …) — Settings → Agents' "Starting options".
+    let acpOptionCatalogStore: AcpOptionCatalogStore
+    /// The latest composer option pick per tab: an earlier pick's refusal arriving after a newer
+    /// pick is not shown (`setACPConfigOption`).
+    var acpOptionPicks: [UUID: Int] = [:]
+    /// The ACP tab whose log sheet (`AcpLogView`) is up.
+    @Published var acpLogSession: AgentSession?
+    /// What Test connection last found per agent (by id) — also how the New-session form knows
+    /// whether an agent lists sessions before any tab on it is open.
+    @Published var acpConnectionTests: [UUID: AcpConnectionTestResult] = [:]
+    private var sessionBridgePolicy = SessionBridgePolicy()
     /// Parks `tools/call` from API tool tabs. Same broker `SessionManager` hands the
     /// Anthropic endpoint; the `client` MCP process is the only other side of this socket.
     private var clientToolSocket: ClientToolSocketServer?
@@ -104,7 +121,8 @@ final class AppModel: ObservableObject {
         store: PRWatchStore(base: sessions.supportDir),
         idle: idleClock,
         isWatched: { [weak self] sid in self?.isWatchdogWatching(sid) ?? false },
-        fetch: { [github] root, branches in
+        fetch: { [weak self] session, root, branches in
+            guard let github = await self?.github(for: session) else { return [] }
             var prs: [PRStatus] = []
             var seen = Set<Int>()
             for branch in branches {
@@ -123,6 +141,24 @@ final class AppModel: ObservableObject {
         return watchdog.phase(forSession: sid) != .disarmed
     }
     private let github = GitHubService()
+    /// ACP tabs' gh, each run through that tab's exec runner (its environment's gh and login),
+    /// by tab id. All share `GitHubService.sharedLimiter`, so the gh rate cap stays app-wide.
+    private var acpGitHub: [UUID: GitHubService] = [:]
+
+    /// The gh to ask about `session`'s PRs: the Mac's for a PTY tab; the tab's own (through its
+    /// exec) for an ACP tab whose record enables PR watch; nil otherwise.
+    func github(for session: AgentSession) -> GitHubService? {
+        guard session.canQueryPRs else { return nil }
+        guard session.backend.isACP else { return github }
+        if let made = acpGitHub[session.id] { return made }
+        guard let runner = sessions.acpRunner(for: session) else { return nil }
+        let made = GitHubService(runner: runner)
+        // Drop closed tabs' instances as new ones are made (a reload is a new tab id).
+        let open = Set(sessions.sessions.map(\.id))
+        acpGitHub = acpGitHub.filter { open.contains($0.key) }
+        acpGitHub[session.id] = made
+        return made
+    }
     /// Merge-readiness of the selected session's PR (refreshed periodically). nil = none.
     @Published var prStatus: PRStatus?
     private var prSession: UUID?
@@ -156,7 +192,7 @@ final class AppModel: ObservableObject {
     @Published private(set) var jiraConnecting = false
     @Published var jiraAuthError: String?
     private var jiraAuth: JiraAuthSession?
-    /// Presents the New Claude Code / New Bash form (agent name, folder).
+    /// Presents the New Session / New Bash form (agent name, folder).
     @Published var showNewTerminal = false
     /// Which kind of session that form will create — drives its title and launch recipe.
     @Published var newSessionMode: NewSessionMode = .claudeCode
@@ -327,18 +363,12 @@ final class AppModel: ObservableObject {
         }
     }
 
-    /// Group chat: an untagged message goes to the members a model scores at or above the
-    /// threshold, or to the highest scorer (Settings → Bridge & API). Off = every member.
+    /// Group chat: an untagged message goes to the members one haiku call picks from the
+    /// recent conversation (Settings → Bridge & API). Off = every member.
     static let groupRelevanceEnabledKey = "admiral.groupRelevanceEnabled"
     @Published var groupRelevanceEnabled: Bool =
         UserDefaults.standard.object(forKey: AppModel.groupRelevanceEnabledKey) as? Bool ?? true {
         didSet { UserDefaults.standard.set(groupRelevanceEnabled, forKey: Self.groupRelevanceEnabledKey) }
-    }
-    static let groupRelevanceThresholdKey = "admiral.groupRelevanceThreshold"
-    @Published var groupRelevanceThreshold: Double =
-        UserDefaults.standard.object(forKey: AppModel.groupRelevanceThresholdKey) as? Double
-            ?? GroupRelevance.defaultThreshold {
-        didSet { UserDefaults.standard.set(groupRelevanceThreshold, forKey: Self.groupRelevanceThresholdKey) }
     }
 
     func toggleAPIServer() {
@@ -577,6 +607,10 @@ final class AppModel: ObservableObject {
     /// `ChatProbe.swift`) — writes PASS/FAIL and exits.
     private let probeChat: String?
     private let probeChatProof: String?
+    /// `-probeGroupRouting <cwd> -probeGroupRoutingProof <file>`: group routing against two real
+    /// claude tabs (see `GroupRoutingProbe.swift`) — writes PASS/FAIL and exits.
+    private let probeGroupRouting: String?
+    private let probeGroupRoutingProof: String?
     /// `-probeSchedule <cwd> -probeScheduleProof <file>`: scheduled runs against a real claude
     /// (see `ScheduleProbe.swift`) — writes PASS/FAIL and exits.
     private let probeSchedule: String?
@@ -594,6 +628,9 @@ final class AppModel: ObservableObject {
     /// `-probeGroupsUI <dir>`: the group chat UI (sidebar, window, picker, popover, sheet) drawn
     /// into PNGs from a fixture, dark and light, no claude (see `GroupsProbe.swift`).
     private let probeGroupsUI: String?
+    /// `-probeAgentsUI <dir>`: Settings → Agents and ACP tabs drawn into PNGs from a fixture,
+    /// dark and light, no agent (see `AgentsProbe.swift`).
+    private let probeAgentsUI: String?
     private var timer: Timer?
     /// Optional isolation profile (from `ADMIRAL_PROFILE` / `-admiralProfile`). When set, the
     /// tab list and per-tab data (open-sessions restore, appearance, footprint) live in a
@@ -635,6 +672,8 @@ final class AppModel: ObservableObject {
         self.probeFileDrop = argValue("-probeFileDrop")
         self.probeChat = argValue("-probeChat")
         self.probeChatProof = argValue("-probeChatProof")
+        self.probeGroupRouting = argValue("-probeGroupRouting")
+        self.probeGroupRoutingProof = argValue("-probeGroupRoutingProof")
         self.probeSchedule = argValue("-probeSchedule")
         self.probeScheduleProof = argValue("-probeScheduleProof")
         self.probeSchedulesUI = argValue("-probeSchedulesUI")
@@ -642,6 +681,7 @@ final class AppModel: ObservableObject {
         self.probeTitlebarTranscript = argValue("-probeTitlebarTranscript")
         self.probeSheets = argValue("-probeSheets")
         self.probeGroupsUI = argValue("-probeGroupsUI")
+        self.probeAgentsUI = argValue("-probeAgentsUI")
         let testHome = argValue("-uiTestClaudeHome").map { URL(fileURLWithPath: $0) }
         // Isolation profile: `ADMIRAL_PROFILE` env (primary — a dev instance is launched by
         // direct-exec with the var set) or `-admiralProfile <slug>`. When set, the tab stores
@@ -719,17 +759,21 @@ final class AppModel: ObservableObject {
         // Per-instance bridge socket: the default path, or a profile-specific one so a dev
         // instance's sessions reach ITS bridge, not the default instance's. Exported into the
         // session env so the injected admiral-bridge-mcp relay connects to the right socket.
+        // A path too long for a socket address is shortened (`AdmiralPaths.socketPath`).
         let bridgeSocketPath = self.profile
-            .map { AdmiralPaths.defaultSupportDir.appendingPathComponent("bridge-\($0).sock").path }
+            .map { AdmiralPaths.socketPath("bridge-\($0).sock", in: AdmiralPaths.defaultSupportDir) }
             ?? BridgeSocketServer.defaultPath
         self.bridgeSocketPath = bridgeSocketPath
         let clientToolSocketPath = self.profile
-            .map { AdmiralPaths.defaultSupportDir.appendingPathComponent("client-tools-\($0).sock").path }
+            .map { AdmiralPaths.socketPath("client-tools-\($0).sock", in: AdmiralPaths.defaultSupportDir) }
             ?? ClientToolSocketServer.defaultPath
         self.clientToolSocketPath = clientToolSocketPath
         var overrides: [String: String] = [:]
         overrides["ADMIRAL_SOCKET"] = bridgeSocketPath
 
+        // An ACP agent is launched on the login shell's PATH (launchd's has no docker); start
+        // reading it now, off the main actor, so a tab opened later finds it already cached.
+        LoginShellPath.shared.prewarm()
         let manager = SessionManager(
             host: host,
             claudeHome: testHome ?? SessionManager.defaultClaudeHome,
@@ -768,6 +812,13 @@ final class AppModel: ObservableObject {
         // Set before restore, which launches the saved tabs.
         manager.modDir = realRecipe ? AppModel.installMod(supportDir: manager.supportDir) : nil
         manager.redactReplies = { AppModel.storedRedactReplies }
+        // Re-read per call: restore, reload and fork find an agent edited in Settings since launch.
+        let acpAgentStore = AcpAgentStore(defaults: storeDefaults)
+        manager.acpAgents = { acpAgentStore.load() }
+        self.acpAgentStore = acpAgentStore
+        let acpOptionCatalogStore = AcpOptionCatalogStore(defaults: storeDefaults)
+        manager.acpOptionCatalog = acpOptionCatalogStore
+        self.acpOptionCatalogStore = acpOptionCatalogStore
         // Goals live in the support dir, not defaults: the hook helper reads them too.
         let goals = GoalsStore(base: manager.supportDir)
         self.goalsStore = goals
@@ -780,6 +831,7 @@ final class AppModel: ObservableObject {
         self.groupSeen = GroupSeenCursor(defaults: storeDefaults)
         let bridge = BridgeCore(manager: manager, goalsStore: goals)
         bridge.scratchByDefault = { UserDefaults.standard.bool(forKey: AppModel.scratchByDefaultKey) }
+        bridge.saveAcpAgents = { acpAgentStore.save($0) }
         self.bridge = bridge
         self.mcp = MCPServer(bridge: bridge)
         // A schedule's custom model resolves against the same CC Switch database as the
@@ -885,7 +937,7 @@ final class AppModel: ObservableObject {
         sessions.fork(id)
     }
 
-    /// "New Claude Code": the commission entry point used by the toolbar/empty-state
+    /// "New Session": the commission entry point used by the toolbar/empty-state
     /// buttons. In UI-test mode it commissions the injected directory directly; otherwise
     /// it presents the folder form in claude-code mode.
     func requestCommission() {
@@ -935,6 +987,10 @@ final class AppModel: ObservableObject {
         }
         bridge.postNotification = { [weak self] id, kind, title, body in
             self?.notifications.post(kind: kind, title: title, body: body, sessionID: id)
+        }
+        // An ACP agent blocked on a permission or a question: the same one gated post.
+        sessions.postNotification = { [weak self] id, kind, title, body in
+            _ = self?.notifications.post(kind: kind, title: title, body: body, sessionID: id)
         }
         notifications.start()
         host.onNotification = { [weak self] view, text in
@@ -1188,6 +1244,11 @@ final class AppModel: ObservableObject {
             runGroupsUIProbe(dir: dir)
             return
         }
+        // Agents UI probe: same place — fixture ACP tabs with no agent, no bridge, no restore.
+        if let dir = probeAgentsUI {
+            runAgentsUIProbe(dir: dir)
+            return
+        }
 
         // UI-test seed: resolve a transcript through the real pid→session-file→encoded-cwd
         // chain (proves underscore-cwd resolution + render through the UI).
@@ -1221,6 +1282,11 @@ final class AppModel: ObservableObject {
             if profile != nil { startBridgeSocket() }
             runChatProbe(cwd: cwd, proof: proof)
         }
+        if let cwd = probeGroupRouting, let proof = probeGroupRoutingProof {
+            // group_say lives on the bridge; only a profiled instance may serve it.
+            if profile != nil { startBridgeSocket() }
+            runGroupRoutingProbe(cwd: cwd, proof: proof)
+        }
         if let cwd = realCommissionCwd {
             newSession(cwd: cwd)
             if let prompt = realPrompt {
@@ -1251,15 +1317,27 @@ final class AppModel: ObservableObject {
             // Read the catalog before restoring: a tab saved on a provider has to find it
             // again here, or it comes back on Anthropic without saying so.
             refreshCCSwitchProviders()
+            // Before restore: a restored ACP tab is offered the bridge only if it is up when
+            // the tab launches (the offer rides on session/new|resume|load).
+            startSessionBridgeTracking()
             for record in sessions.restorableSessions() {
-                var isDir: ObjCBool = false
-                guard FileManager.default.fileExists(atPath: record.cwd, isDirectory: &isDir), isDir.boolValue
-                else { continue }
+                // Core decides (and tests) what each record becomes: an ACP tab on its agent —
+                // decided before the folder check, since its cwd is the agent's, not this Mac's —
+                // a PTY tab, or nothing.
+                let canResume: Bool
+                switch sessions.restorePlan(for: record) {
+                case let .skip(reason):
+                    NSLog("Admiral restore: skipping %@: %@", record.callsign, reason)
+                    continue
+                case let .acp(agent, acpSessionID):
+                    sessions.restoreACP(record, agent: agent, acpSessionID: acpSessionID)
+                    continue
+                case let .pty(resume):
+                    canResume = resume
+                }
                 // Bash tabs reopen as zsh; Claude tabs --resume when a transcript exists
                 // (empty Claude sessions recreate at the SAME id so they reopen cleanly).
                 let recipe: AgentType = record.isBash ? bashAgentType : agentType
-                let canResume = !record.isBash
-                    && sessions.hasTranscript(sessionID: record.sessionID, cwd: record.cwd)
                 let session = sessions.commission(
                     callsign: record.callsign, cwd: record.cwd, agentType: recipe,
                     sessionID: record.sessionID, resume: canResume, teamName: record.teamName,
@@ -1431,7 +1509,7 @@ final class AppModel: ObservableObject {
     }
 
     /// Commission from the New… form: explicit name and folder. The active
-    /// `newSessionMode` picks the recipe — a `claude` session ("New Claude Code") or a
+    /// `newSessionMode` picks the recipe — a `claude` session ("New Session") or a
     /// plain `zsh` login shell ("New Bash").
     func newSession(name: String, cwd: String, provider: CCSwitchProvider? = nil, scratch: Bool = false) {
         let agentName = name.trimmingCharacters(in: .whitespaces)
@@ -1464,6 +1542,53 @@ final class AppModel: ObservableObject {
         notifications.post(kind: .terminal, title: session.displayTitle, body: text, sessionID: session.id)
     }
 
+    /// Keep the session bridge listener in step with the configured ACP agents — up while
+    /// there is at least one, down when there are none — now and on every defaults change
+    /// (Settings → Agents saves there). A tab is offered the bridge only if it is up when the
+    /// tab launches; `sessionBridgeRunning` is how `commissionACP` asks.
+    private func startSessionBridgeTracking() {
+        sessions.sessionBridgeRunning = { [weak self] in self?.sessionBridgeServer != nil }
+        syncSessionBridge()
+        guard acpAgentsObserver == nil else { return }
+        acpAgentsObserver = NotificationCenter.default.addObserver(
+            forName: UserDefaults.didChangeNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.syncSessionBridge() }
+        }
+    }
+
+    /// Start or stop the listener as `SessionBridgePolicy` says. Never blocks: the bind does
+    /// not wait for a held port, and after a failure the policy holds retries until the agent
+    /// list changes or its interval passes (a timer then asks again) — not on every defaults write.
+    private func syncSessionBridge() {
+        let agents = sessions.acpAgents()
+        switch sessionBridgePolicy.action(agents: agents, running: sessionBridgeServer != nil) {
+        case .none:
+            return
+        case .stop:
+            sessionBridgeServer?.stop()
+            sessionBridgeServer = nil
+            sessionBridgePolicy.reset()
+        case .start:
+            let endpoint = SessionMCPEndpoint(mcp: mcp, tokenIsLive: { [weak manager = sessions] in
+                manager?.acpTokenIsLive($0) ?? false
+            })
+            let server = SessionMCPHTTPServer(endpoint: endpoint)
+            guard server.start() != nil else {
+                sessionBridgePolicy.startFailed(agents: agents)
+                NSLog("Admiral: session bridge could not bind 127.0.0.1:%d; "
+                      + "retrying in %d s or when the agents change",
+                      Int(SessionMCPHTTPServer.defaultPort), Int(SessionBridgePolicy.retryInterval))
+                DispatchQueue.main.asyncAfter(deadline: .now() + SessionBridgePolicy.retryInterval) { [weak self] in
+                    self?.syncSessionBridge()
+                }
+                return
+            }
+            sessionBridgePolicy.reset()
+            sessionBridgeServer = server
+        }
+    }
+
     /// Serve the bridge tools over this instance's loopback socket (profile-aware — the same
     /// path exported to sessions as ADMIRAL_SOCKET, so a profiled instance never steals the
     /// default one's) so the bridge relay inside an Admiral-hosted claude can drive this app.
@@ -1488,6 +1613,8 @@ final class AppModel: ObservableObject {
     /// Chat or Terminal for `session`. Unmanaged (bash) tabs have no chat: always Terminal.
     /// When `config.features.chatView` is off, every session is forced to Terminal.
     func viewMode(for session: AgentSession) -> ChatLedger.Mode {
+        // An ACP tab has no terminal: Chat is all there is, whatever the Chat flag says.
+        guard !session.backend.isACP else { return .chat }
         guard config.features.chatView else { return .terminal }
         guard session.agentType.isManaged, let sid = session.claudeSessionID else { return .terminal }
         if let cached = viewModeCache[sid] { return cached }
@@ -1504,11 +1631,16 @@ final class AppModel: ObservableObject {
         sessions.selectedSession.map { $0.agentType.isManaged && $0.claudeSessionID != nil } ?? false
     }
 
+    /// ⌘J has something to switch to: a PTY tab with a chat. An ACP tab is Chat only.
+    var selectedCanToggleView: Bool {
+        selectedHasChat && sessions.selectedSession?.backend.isACP == false
+    }
+
     /// ⌘J / the toolbar switch. Written through to the file, so the next AskUserQuestion
     /// the session makes is routed by the mode it is in now.
     /// No-op when `config.features.chatView` is off (chat stays unavailable).
     func setViewMode(_ mode: ChatLedger.Mode, for session: AgentSession) {
-        guard config.features.chatView else { return }
+        guard config.features.chatView, !session.backend.isACP else { return }
         guard session.agentType.isManaged, let sid = session.claudeSessionID else { return }
         ChatLedger.setMode(mode, base: sessions.supportDir, session: sid)
         objectWillChange.send()
@@ -1516,24 +1648,34 @@ final class AppModel: ObservableObject {
     }
 
     func toggleViewMode() {
-        guard let session = sessions.selectedSession, selectedHasChat else { return }
+        guard let session = sessions.selectedSession, selectedCanToggleView else { return }
         setViewMode(viewMode(for: session) == .chat ? .terminal : .chat, for: session)
     }
 
     /// The composer's send: the text plus any attached paths (escaped as a Finder drop types
-    /// them), typed into the session.
-    func sendChat(_ text: String, attachments: [String], to session: AgentSession) {
+    /// them), typed into the session. On an ACP tab, `mentions` (the `@file` paths picked from
+    /// the agent's files) go along as resource links.
+    func sendChat(_ text: String, attachments: [String], mentions: [String] = [], to session: AgentSession) {
         var message = text.trimmingCharacters(in: .whitespacesAndNewlines)
         if let paths = TerminalDrop.pasteText(paths: attachments) {
             message += (message.isEmpty ? "" : " ") + paths.trimmingCharacters(in: .whitespaces)
         }
         guard !message.isEmpty else { return }
-        sessions.sendTyped(session.id, text: message)
+        if !session.backend.isACP {
+            sessions.sendTyped(session.id, text: message)
+        } else {
+            sessions.sendACP(session.id, text: message, mentions: mentions)
+        }
+    }
+
+    /// The files an ACP tab's `@` menu lists; nil = the agent has no exec command to list them with.
+    func acpFiles(_ session: AgentSession) async -> [String]? {
+        await sessions.acpFiles(session.id)
     }
 
     /// The question card's Submit: the answers go in as the next prompt.
     func answerAsk(_ questions: [AskQuestion], answers: [String], for session: AgentSession) {
-        sessions.sendTyped(session.id, text: AskAnswer.text(questions: questions, answers: answers))
+        sessions.answerAsk(session.id, questions: questions, answers: answers)
     }
 
     func interrupt(_ session: AgentSession) { sessions.interrupt(session.id) }
@@ -1554,9 +1696,9 @@ final class AppModel: ObservableObject {
         link.perform()
     }
 
-    /// A permission prompt answered from the chat: Enter takes claude's pre-selected "Yes".
+    /// A permission prompt answered from the chat (on a PTY tab, Enter takes claude's "Yes").
     func allowPermission(_ session: AgentSession) {
-        if let handle = sessions.handle(for: session.id) { host.sendRaw(handle, text: "\r") }
+        sessions.allowPermission(session.id)
     }
 
     private func tick() {
@@ -1571,8 +1713,6 @@ final class AppModel: ObservableObject {
         if schedulerLock != nil { scheduler.tick() }
         // Busy group members that went idle get the wake they were holding.
         if groupsEnabled {
-            // Woken members that ended their turn without group_say: post the reply for them.
-            groupService.postFinishedTurns()
             groupService.flushPending()
             // Names for the prompt hook; skips the write when nothing changed.
             groupService.writeCallsigns()
@@ -1624,10 +1764,10 @@ final class AppModel: ObservableObject {
         // stale chip and refetch now instead of waiting out the 30s throttle.
         if prBranch != branch { prBranch = branch; prStatus = nil; lastPRFetch = .distantPast }
         guard !prFetchInFlight, Date().timeIntervalSince(lastPRFetch) > 30 else { return }
+        guard let gh = github(for: session) else { if prStatus != nil { prStatus = nil }; return }
         prFetchInFlight = true
         lastPRFetch = Date()
         let cwd = session.cwd
-        let gh = github
         Task.detached {
             let status = await gh.prStatus(branch: branch, cwd: cwd)
             await MainActor.run {
@@ -1659,8 +1799,8 @@ final class AppModel: ObservableObject {
     func mergeSelectedPR() {
         guard let pr = prStatus, pr.canMerge, !pr.isMerged, let id = sessions.selectedID,
               let session = sessions.sessions.first(where: { $0.id == id }) else { return }
+        guard let gh = github(for: session) else { return }
         let cwd = session.cwd, number = pr.number
-        let gh = github
         Task.detached {
             let error = await gh.merge(number: number, cwd: cwd)
             await MainActor.run {

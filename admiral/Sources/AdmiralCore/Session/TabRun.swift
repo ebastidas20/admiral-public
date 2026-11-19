@@ -2,9 +2,18 @@ import Foundation
 
 /// What running a prompt in a tab needs: type into it, read its live status, find its
 /// transcript, and read a structured-output slot. A protocol so tests drive a scripted fake.
+/// What an `inject` can promise. `.typed`: the text went out as keystrokes, which a claude
+/// still booting can drop — only the transcript gaining it confirms it. `.accepted`: the tab's
+/// driver took it and will send it (an ACP tab's queue); there is nothing to confirm or retry.
+/// `.refused`: it went nowhere (no such tab, or a failed or ended one).
+public enum InjectOutcome: Sendable, Equatable {
+    case typed, accepted, refused
+}
+
 @MainActor
 public protocol TabRunBackend: AnyObject {
-    func inject(tabID: UUID, text: String)
+    @discardableResult
+    func inject(tabID: UUID, text: String) -> InjectOutcome
     /// Fresh status read (re-reads `sessions/<pid>.json`), never a cached value.
     func liveStatus(tabID: UUID) -> SessionStatus
     /// Current transcript path; nil until claude writes its first line.
@@ -55,11 +64,13 @@ public struct TabRun {
         }
     }
 
-    /// What a turn produced, and whether it ended by hitting `turnTimeout`.
+    /// What a turn produced, and whether it ended by hitting `turnTimeout` or because the
+    /// agent's process went away mid-turn (`.shell`) — the second is a failure, not a timeout.
     public struct Turn: Sendable {
         public var text: String
         public var usage: AnthropicUsage?
         public var timedOut: Bool
+        public var agentExited: Bool = false
     }
 
     let backend: TabRunBackend
@@ -76,6 +87,8 @@ public struct TabRun {
     /// typed into the PTY before that are silently lost (the same race the -realCommission
     /// probe works around by re-sending). The session file appears at process boot, so wait
     /// for it (skips the zsh-startup window) first. Returns whether the prompt landed.
+    /// A driver that takes input for certain (`.accepted`) is sent to once, never retyped:
+    /// on ACP a retry would only queue another copy behind the first.
     @discardableResult
     public func deliver(_ prompt: String, tabID: UUID, path: String, baselineUserCount: Int) async -> Bool {
         let readyDeadline = Date().addingTimeInterval(config.injectReadyTimeout)
@@ -83,7 +96,7 @@ public struct TabRun {
             await sleepPoll()
         }
         for _ in 1...max(config.injectMaxAttempts, 1) {
-            backend.inject(tabID: tabID, text: prompt)
+            if backend.inject(tabID: tabID, text: prompt) == .accepted { return true }
             if await promptLanded(path: path, baselineUserCount: baselineUserCount) { return true }
         }
         return false
@@ -93,6 +106,13 @@ public struct TabRun {
     /// captured. Complete on busy→idle, on the no-busy fallback (output landed and the
     /// tab reads idle after `busySeenTimeout`), or at the hard `turnTimeout` cap. With a
     /// structured-output `slot`, idle counts as done only once that slot resolved.
+    ///
+    /// `.shell` (the agent's process exited — a PTY claude, or an ACP agent whose connection
+    /// closed) ends the turn as a failure (`agentExited`), for every backend: nothing will ever
+    /// read idle again. Guarded like idle: only once the turn was seen busy, or once `.shell`
+    /// still holds after `busySeenTimeout` — a `.shell` read before the turn was observed does
+    /// not end it early. (`.shell` is Admiral's own marker, set on process exit; claude's raw
+    /// `"shell"` parses to `.idle`, so a live tab never reads it.)
     public func awaitTurn(
         tabID: UUID, path: String, fromOffset: Int, slot: ArmType? = nil,
         onText: (String) -> Void = { _ in },
@@ -129,6 +149,9 @@ public struct TabRun {
             // slot to be resolved before idle counts as done.
             let soState = slot.flatMap { backend.structuredOutputState(tabID: tabID, type: $0) }
             let soResolved = slot == nil || soState.map { $0.status != .armed } ?? true
+            if status == .shell, sawBusy || elapsed > config.busySeenTimeout {
+                return Turn(text: text, usage: usage, timedOut: false, agentExited: true)
+            }
             if sawBusy, status == .idle, soResolved { break }
             if !sawBusy, elapsed > config.busySeenTimeout, !text.isEmpty, status == .idle, soResolved { break }
             // Grace bail: idle, still armed, and no Stop block ever recorded means the

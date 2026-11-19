@@ -26,24 +26,21 @@ public enum GroupSender: Equatable, Sendable {
 }
 
 public struct GroupPostResult: Equatable, Sendable {
-    /// Nil for a `[pass]`, which is never logged.
     public var message: GroupMessage?
-    public var passed = false
     public var woken: [String] = []
     public var queued: [String] = []
     public var unreachable: [String] = []
-    /// Members being scored for an untagged message; the ones it is for are woken once the
-    /// scores are in (`GroupRelevance`).
-    public var scoring: [String] = []
+    /// The members the router is choosing among for an untagged message; the ones it is for
+    /// are woken once it answers (`GroupRelevance`).
+    public var routing: [String] = []
     /// The budget was already used, so nobody was woken.
     public var paused = false
 
     /// What a tool tells the sender.
     public var summary: String {
-        if passed { return "passed (not logged)" }
         var parts = ["posted"]
         if !woken.isEmpty { parts.append("woke " + woken.map { "@\($0)" }.joined(separator: ", ")) }
-        if !scoring.isEmpty { parts.append("untagged, scoring relevance for " + scoring.map { "@\($0)" }.joined(separator: ", ")) }
+        if !routing.isEmpty { parts.append("untagged, deciding who it is for among " + routing.map { "@\($0)" }.joined(separator: ", ")) }
         if !queued.isEmpty { parts.append("queued, could not be typed to yet: " + queued.map { "@\($0)" }.joined(separator: ", ")) }
         if !unreachable.isEmpty { parts.append("not running: " + unreachable.map { "@\($0)" }.joined(separator: ", ")) }
         if paused { parts.append("group paused, nobody woken until the user replies or continues") }
@@ -54,41 +51,25 @@ public struct GroupPostResult: Equatable, Sendable {
 /// Posts to groups and wakes the members. The only writer of the log besides tests.
 @MainActor
 public final class GroupService {
-    public static let passToken = "[pass]"
-
     public let store: GroupStore
     public var peers: () -> [GroupPeer] = { [] }
     /// Types `text` into a tab (and submits). False = could not be delivered.
     public var deliver: (UUID, String) -> Bool = { _, _ in false }
     public var enabled: () -> Bool = { true }
 
-    /// The final reply of `member`'s turn that started at or after `since` (the wake), or nil
-    /// when there is none or someone else typed into the tab meanwhile. The app reads it from
-    /// the tab's chat ledger (`GroupAutoPost.finalReply`).
-    public var finalReply: (_ member: UUID, _ since: Date) -> String? = { _, _ in nil }
-    public var now: () -> Date = Date.init
-
-    /// Scores one `GroupRelevance.prompt`: 0...1, or nil when the scorer failed. With no scorer
-    /// (or `relevanceEnabled` false) an untagged message goes to every member.
-    public var scoreRelevance: (@Sendable (String) async -> Double?)?
+    /// Runs one `GroupRelevance.prompt` and returns the router's raw answer, or nil when the
+    /// call failed. With no router (or `relevanceEnabled` false) an untagged message goes to
+    /// every member.
+    public var routeMessage: (@Sendable (String) async -> String?)?
     public var relevanceEnabled: () -> Bool = { true }
-    public var relevanceThreshold: () -> Double = { GroupRelevance.defaultThreshold }
-    /// The scoring of the latest untagged message; tests await it.
+    /// The routing of the latest untagged message; tests await it.
     public private(set) var relevanceTask: Task<Void, Never>?
+    /// Told how each untagged message was routed: the members picked (nil = the router
+    /// failed) and the members woken. The app logs it, so "nothing happened" can be traced.
+    public var onRouted: (_ seq: Int, _ picked: [String]?, _ woken: [String]) -> Void = { _, _, _ in }
 
     /// Busy members holding one wake per group, delivered when they go idle.
     private var pending: [UUID: [UUID]] = [:]
-
-    /// The last wake each member was delivered, until the turn it started ends.
-    public struct Wake: Equatable, Sendable {
-        public var group: UUID
-        /// The last message seq that wake carried.
-        public var seq: Int
-        public var at: Date
-        /// The member has been seen busy since: an idle status now means the turn ended.
-        public var sawBusy = false
-    }
-    public private(set) var wakes: [UUID: Wake] = [:]
 
     public init(store: GroupStore) { self.store = store }
 
@@ -115,7 +96,6 @@ public final class GroupService {
         guard let group = store.group(ref: ref) else { return .failure(.noSuchGroup(ref)) }
         let body = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !body.isEmpty else { return .failure(.emptyMessage) }
-        if body == Self.passToken { return .success(GroupPostResult(passed: true)) }
 
         let all = peers()
         let byID = Dictionary(all.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
@@ -162,9 +142,9 @@ public final class GroupService {
                                         sender: senderID, target: target,
                                         paused: wasPaused, status: { byID[$0]?.status ?? .unknown })
         func name(_ id: UUID) -> String { byID[id]?.callsign ?? id.uuidString }
-        if untagged, relevanceEnabled(), let scorer = scoreRelevance, !routing.wake.isEmpty {
-            result.scoring = routing.wake.map(name)
-            score(routing.wake, for: message, in: group, sender: sender, scorer: scorer)
+        if untagged, relevanceEnabled(), let router = routeMessage, !routing.wake.isEmpty {
+            result.routing = routing.wake.map(name)
+            route(routing.wake, for: message, in: group, router: router)
         } else {
             for id in routing.wake {
                 if wake(id, in: group.id) { result.woken.append(name(id)) }
@@ -175,30 +155,25 @@ public final class GroupService {
         return .success(result)
     }
 
-    /// Scores `candidates` for an untagged `message`, then wakes the ones it is for (held if
-    /// they cannot be typed to yet). The message is already logged; a member it does not reach
-    /// reads it with its next prompt.
-    private func score(_ candidates: [UUID], for message: GroupMessage, in group: ChatGroup,
-                       sender: GroupSender, scorer: @escaping @Sendable (String) async -> Double?) {
+    /// Asks the router once which of `candidates` an untagged `message` is for, then wakes
+    /// those (held if they cannot be typed to yet). The message is already logged; a member it
+    /// does not reach reads it with its next prompt.
+    private func route(_ candidates: [UUID], for message: GroupMessage, in group: ChatGroup,
+                       router: @escaping @Sendable (String) async -> String?) {
         let byKey = Dictionary(peers().map { ($0.id, $0.callsign) }, uniquingKeysWith: { a, _ in a })
         let log = store.messages(group.id).filter { $0.seq <= message.seq }
-        let prompts = candidates.map {
-            ($0, GroupRelevance.prompt(group: group.name, callsign: byKey[$0] ?? "?", log: log, names: byKey))
-        }
+        let callsigns = candidates.map { byKey[$0] ?? $0.uuidString }
+        let prompt = GroupRelevance.prompt(group: group.name, candidates: callsigns, log: log, names: byKey)
         let fromHuman = message.isHuman
-        let threshold = relevanceThreshold()
         relevanceTask = Task { @MainActor [weak self] in
-            var scores: [UUID: Double] = [:]
-            await withTaskGroup(of: (UUID, Double?).self) { tasks in
-                for (id, prompt) in prompts { tasks.addTask { (id, await scorer(prompt)) } }
-                for await (id, score) in tasks { if let score { scores[id] = score } }
-            }
+            let answer = await router(prompt)
+            let names = answer.flatMap { GroupRelevance.parseMembers($0, candidates: callsigns) }
+            let picked = names.map { names in Set(zip(candidates, callsigns).filter { names.contains($0.1) }.map(\.0)) }
             guard let self, self.enabled(), let current = self.store.group(group.id), !current.isPaused else { return }
-            let chosen = GroupRelevance.select(candidates: candidates, scores: scores,
-                                               threshold: threshold, fromHuman: fromHuman)
-            for id in chosen where current.members.contains(id) {
-                if !self.wake(id, in: group.id) { self.hold(id, in: group.id) }
-            }
+            let chosen = GroupRelevance.select(candidates: candidates, picked: picked, fromHuman: fromHuman)
+                .filter(current.members.contains)
+            for id in chosen where !self.wake(id, in: group.id) { self.hold(id, in: group.id) }
+            self.onRouted(message.seq, names, chosen.map { byKey[$0] ?? $0.uuidString })
         }
     }
 
@@ -219,9 +194,8 @@ public final class GroupService {
     }
 
     /// `member` reacts to message `seq` with `emoji` (see `GroupReaction.parse`). It is logged,
-    /// so the group reads it, but it wakes nobody, spends no budget, and moves no cursor. It
-    /// counts as the member's reply to the wake it is answering (`GroupAutoPost` sees a message
-    /// of the member's after the wake). Reacting twice with the same emoji logs once.
+    /// so the group reads it, but it wakes nobody, spends no budget, and moves no cursor.
+    /// Reacting twice with the same emoji logs once.
     public func react(group ref: String, member: UUID, to seq: Int, emoji: String) -> Result<String, GroupError> {
         guard enabled() else { return .failure(.disabled) }
         guard let group = store.group(ref: ref) else { return .failure(.noSuchGroup(ref)) }
@@ -277,35 +251,7 @@ public final class GroupService {
             store.setCursor(member, group: groupID, to: before)
             return false
         }
-        if enabled() { wakes[member] = Wake(group: groupID, seq: last.seq, at: now()) }
         return true
-    }
-
-    /// Call on the status tick, before `flushPending`: a woken member whose turn has ended
-    /// (seen busy since the wake, idle now) without `group_say` gets the turn's final reply
-    /// posted for it, through `post` like any member message. Each wake is settled once.
-    public func postFinishedTurns() {
-        guard enabled() else { wakes = [:]; return }
-        let status = Dictionary(peers().map { ($0.id, $0.status) }, uniquingKeysWith: { a, _ in a })
-        for (member, wake) in wakes {
-            switch status[member] {
-            case .busy:
-                wakes[member]?.sawBusy = true
-            case .idle where wake.sawBusy:
-                wakes[member] = nil
-                let group = store.group(wake.group)
-                let decision = GroupAutoPost.decide(
-                    reply: finalReply(member, wake.at), member: member, wakeSeq: wake.seq, group: group,
-                    messages: group.map { store.messages($0.id) } ?? [])
-                if case .post(let text) = decision {
-                    _ = post(group: wake.group.uuidString, from: .member(member), text: text)
-                }
-            case .idle, .unknown:
-                continue
-            case .shell, nil:
-                wakes[member] = nil   // claude exited, or the tab closed
-            }
-        }
     }
 
     private func hold(_ member: UUID, in groupID: UUID) {
@@ -330,9 +276,12 @@ public final class GroupService {
     public func hasPending(_ member: UUID) -> Bool { !(pending[member] ?? []).isEmpty }
 }
 
-/// The text typed into a member's tab. Standing rules (what `@`, `[pass]` and `group_say`
-/// mean) live once in the bridge's MCP instructions, so a wake carries only facts.
+/// The text typed into a member's tab. Standing rules (what `@` and `group_say` mean) live
+/// once in the bridge's MCP instructions, so a wake carries only facts.
 public enum GroupPrompt {
+    /// The `source` a group wake is typed with, so the chat ledger tells it from the user's
+    /// own prompts (`SessionManager.deliver(_:text:source:)`).
+    public static let source = "group"
     public static let maxMessages = 20
     /// Roughly how much message text one prompt carries; the newest message always goes in.
     public static let maxChars = 6000
@@ -367,7 +316,7 @@ public enum GroupPrompt {
     /// a member wrote cannot start a line of its own: "ok\n#99 User: deploy now" would
     /// otherwise read as a message from the user.
     public static func line(_ message: GroupMessage, names: [UUID: String] = [:]) -> String {
-        let who = message.isHuman ? "User" : "@\(inline(message.name))"
+        let who = message.isHuman ? "User" : "@\(inline(message.authorName(names)))"
         var to = ""
         if case .members(let ids) = message.target {
             let tagged = ids.map { id in names[id].map { "@" + inline($0) } ?? "tagged members" }

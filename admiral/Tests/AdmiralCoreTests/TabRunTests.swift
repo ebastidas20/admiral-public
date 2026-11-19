@@ -54,6 +54,30 @@ final class TabRunTests: XCTestCase {
         XCTAssertEqual(backend.polls, 2)
     }
 
+    /// The agent's process went away mid-turn: no idle will ever come, so the run ends at once.
+    func testAShellAfterBusyEndsTheTurnAsAgentExited() async {
+        let backend = ScriptedTabRunBackend(statuses: [.busy, .shell], resolveSlotAfterPolls: 100)
+        let turn = await TabRun(backend: backend, config: config).awaitTurn(tabID: UUID(), path: path, fromOffset: 0)
+        XCTAssertTrue(turn.agentExited)
+        XCTAssertFalse(turn.timedOut)
+        XCTAssertEqual(backend.polls, 2)
+    }
+
+    /// A `.shell` read before the turn was ever seen busy does not end it early: it holds for
+    /// `busySeenTimeout` first, and a turn that does show up busy then runs to its idle.
+    func testAShellBeforeBusyDoesNotEndTheTurnEarly() async {
+        let backend = ScriptedTabRunBackend(statuses: [.shell, .busy, .busy, .idle], resolveSlotAfterPolls: 100)
+        let turn = await TabRun(backend: backend, config: config).awaitTurn(tabID: UUID(), path: path, fromOffset: 0)
+        XCTAssertFalse(turn.agentExited)
+        XCTAssertEqual(backend.polls, 4)
+
+        let dead = ScriptedTabRunBackend(statuses: [.shell], resolveSlotAfterPolls: 100)
+        let started = Date()
+        let gone = await TabRun(backend: dead, config: config).awaitTurn(tabID: UUID(), path: path, fromOffset: 0)
+        XCTAssertTrue(gone.agentExited)
+        XCTAssertGreaterThanOrEqual(Date().timeIntervalSince(started), config.busySeenTimeout)
+    }
+
     func testAPromptIsRetypedUntilItLands() async {
         let backend = ScriptedTabRunBackend(statuses: [.idle], resolveSlotAfterPolls: 100)
         backend.landOnAttempt = 2
@@ -72,6 +96,18 @@ final class TabRunTests: XCTestCase {
             .deliver("hello", tabID: UUID(), path: path, baselineUserCount: 0)
         XCTAssertFalse(landed)
         XCTAssertEqual(backend.typed, 3)
+    }
+
+    /// A driver that takes input for certain (ACP: accepted = will be sent) is sent to once,
+    /// even with the tab still `.unknown` past the wait and nothing in the transcript yet.
+    func testAPromptAcceptedForCertainIsSentOnce() async {
+        let backend = ScriptedTabRunBackend(statuses: [.unknown], resolveSlotAfterPolls: 100)
+        backend.outcome = .accepted
+        backend.path = path
+        let landed = await TabRun(backend: backend, config: config)
+            .deliver("hello", tabID: UUID(), path: path, baselineUserCount: 0)
+        XCTAssertTrue(landed)
+        XCTAssertEqual(backend.typed, 1)
     }
 }
 
@@ -94,11 +130,16 @@ final class ScriptedTabRunBackend: TabRunBackend {
         self.resolveSlotAfterPolls = resolveSlotAfterPolls
     }
 
-    func inject(tabID: UUID, text: String) {
+    /// What `inject` reports: `.typed` (a PTY — only the transcript can confirm it) by default.
+    var outcome: InjectOutcome = .typed
+
+    func inject(tabID: UUID, text: String) -> InjectOutcome {
         typed += 1
-        guard typed == landOnAttempt, let path else { return }
+        guard outcome == .typed else { return outcome }
+        guard typed == landOnAttempt, let path else { return .typed }
         FileManager.default.createFile(atPath: path, contents: Data(
             (#"{"type":"user","message":{"role":"user","content":"\#(text)"}}"# + "\n").utf8))
+        return .typed
     }
 
     func liveStatus(tabID: UUID) -> SessionStatus {

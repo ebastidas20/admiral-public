@@ -211,7 +211,10 @@ public final class SchedulerService {
             let structured = schedule.outputSchema != nil
             let turn = await tabRun.awaitTurn(tabID: tab.id, path: path, fromOffset: 0,
                                               slot: structured ? .output : nil)
-            if turn.timedOut {
+            if turn.agentExited {
+                status = .failed
+                note = "the agent exited during the turn"
+            } else if turn.timedOut {
                 status = .timedOut
                 note = "still going after \(Int(runConfig.turnTimeout / 60)) minutes"
             } else if structured, backend.structuredOutputState(tabID: tab.id, type: .output)?.status != .fulfilled {

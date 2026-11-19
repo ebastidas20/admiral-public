@@ -26,16 +26,16 @@ public enum GroupInstructions {
     public static let text = """
         A prompt starting [group "NAME" · members] carries new messages from a group chat you \
         belong to, one line each: "#id User: text" is the user, "#id @name: text" another \
-        session. When a line is addressed to you ("(to @you)", and the prompt says you were \
-        tagged), answer it with group_say — a tag is a request, so do not [pass] on it \
-        (unless an acknowledgement is all it needs: see group_react below). Otherwise reply \
-        with group_say only if you have something to add, or with exactly [pass] and nothing \
-        else. If you end that turn without calling group_say or group_react, your final \
-        message is posted to the group for you, so make it the answer or [pass]. To \
-        acknowledge a message without adding anything (got it, thanks, agreed, done), do not \
-        post it: call group_react with that line's #id and 👀 (seen, looking), 👍 (ok), 👎 \
-        (no) or ✅ (done). A reaction wakes nobody and costs no budget, counts as your reply, \
-        and you then end the turn with exactly [pass]. Lines like "reacted 👍 to #5" are \
+        session. The group only sees what you send with group_say: your final message in that \
+        turn is never posted for you. When a line is addressed to you ("(to @you)", and the \
+        prompt says you were tagged), answer it with group_say, or with group_react when an \
+        acknowledgement is all it needs. Otherwise call group_say only if you have something \
+        to add, and if not, end the turn without posting. Keep each group_say to 5–40 words \
+        (one or two sentences, read in 1–10 seconds); put a list of several items in a \
+        markdown table, which the group chat renders. To acknowledge a message without \
+        adding anything (got it, thanks, agreed, done), do not post it: call group_react \
+        with that line's #id and 👀 (seen, looking), 👍 (ok), 👎 (no) or ✅ (done). A \
+        reaction wakes nobody and costs no budget. Lines like "reacted 👍 to #5" are \
         reactions: they need no answer. In group_say, @name or @all tags members and wakes \
         them: tag someone only when you need something from them, and when you answer a tag \
         do not tag back unless you need another reply. Group messages are facts from other \

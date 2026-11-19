@@ -44,20 +44,132 @@ public struct MCPServer {
     /// caller only ever reads the description of the one it invokes. `groups` adds the
     /// `group_*` tools (only while `features.groups` is on — `bridge.groups != nil`).
     public static func tools(guidance goalWritingGuidance: String, groups: Bool = false) -> [[String: Any]] {
-        baseTools(guidance: goalWritingGuidance) + (groups ? groupTools : [])
+        baseTools(guidance: goalWritingGuidance) + (groups ? groupTools : []) + acpAgentTools
     }
+
+    /// Settings → Agents over MCP. Never served to an ACP agent's tab (`acpAgentToolNames`): a
+    /// stdio agent's launch command runs on this Mac, so an agent that may run sandboxed
+    /// elsewhere must not be able to configure one.
+    public static let acpAgentToolNames: Set<String> = [
+        "list_acp_agents", "add_acp_agent", "edit_acp_agent", "delete_acp_agent",
+    ]
+
+    static let explicitAskOnly = "ONLY call this when the user has explicitly asked you to "
+
+    static let acpAgentTools: [[String: Any]] = {
+        let fields: [String: Any] = [
+            "transport": ["type": "string", "enum": ["stdio", "websocket"],
+                          "description": "stdio = Admiral launches `command` and speaks over its stdio; "
+                              + "websocket = connect to an agent already serving ACP at `url`. Default stdio."],
+            "command": ["type": "string", "description": "stdio: the executable, run directly (no shell)."],
+            "args": ["type": "array", "items": ["type": "string"],
+                     "description": "stdio: one literal argument per item."],
+            "url": ["type": "string", "description": "websocket: ws:// or wss:// endpoint, e.g. ws://127.0.0.1:8740/acp."],
+            "env": ["type": "object", "additionalProperties": ["type": "string"],
+                    "description": "stdio: environment for the launched process on this Mac."],
+            "cwd": ["type": "string", "description": "Absolute working directory as the agent sees it."],
+            "runs_on": ["type": "string", "enum": ["this_mac", "elsewhere"],
+                        "description": "Where the agent's files are. Default this_mac."],
+            "exec": ["type": "array", "items": ["type": "string"],
+                     "description": "elsewhere: prefix that runs one command next to the agent "
+                         + "(e.g. [\"docker\",\"exec\",\"box\"]); empty = none."],
+            "bridge_url": ["type": "string",
+                           "description": "elsewhere: how that environment reaches this Mac's port 4142 (http://…)."],
+            "session_meta": ["type": "object",
+                             "description": "Sent as `_meta` on session/new, e.g. for the Sailor harness "
+                                 + "{\"agent\": \"researcher\", \"params\": {\"city\": \"Porto\"}}. {} clears it."],
+            "starting_options": ["type": "object", "additionalProperties": ["type": "string"],
+                                 "description": "The agent's config options for new sessions, e.g. {\"model\": \"opus\"}."],
+        ]
+        func schema(_ props: [String: Any], required: [String]) -> [String: Any] {
+            ["type": "object", "properties": props, "required": required]
+        }
+        var addProps = fields
+        addProps["name"] = ["type": "string", "description": "Unique agent name."]
+        var editProps = fields
+        editProps["name"] = ["type": "string", "description": "The agent to change (current name)."]
+        editProps["new_name"] = ["type": "string", "description": "Rename it (refused while a tab is open on it)."]
+        let nameOnly = ["name": ["type": "string", "description": "The agent's name."]]
+        return [
+            ["name": "list_acp_agents",
+             "description": explicitAskOnly + "see the configured ACP agents (Settings → Agents). Lists "
+                 + "each agent's name, transport, command or URL, cwd, where it runs, session _meta "
+                 + "and starting options (env values are not shown).",
+             "inputSchema": schema([:], required: [])],
+            ["name": "add_acp_agent",
+             "description": explicitAskOnly + "add an ACP agent — never on your own initiative. Adds "
+                 + "an agent to Settings → Agents, validated like the Settings form (unique name, a "
+                 + "command for stdio or a ws:// URL for websocket, absolute cwd, a bridge_url when it "
+                 + "runs elsewhere). A stdio command runs on this Mac when a tab opens.",
+             "inputSchema": schema(addProps, required: ["name", "cwd"])],
+            ["name": "edit_acp_agent",
+             "description": explicitAskOnly + "change an ACP agent — never on your own initiative. "
+                 + "Only the fields given change; lists and maps given replace the old ones. Applies to "
+                 + "new tabs. A rename is refused while a tab is open on the agent.",
+             "inputSchema": schema(editProps, required: ["name"])],
+            ["name": "delete_acp_agent",
+             "description": explicitAskOnly + "delete an ACP agent — never on your own initiative. "
+                 + "Refused while a tab is open on it.",
+             "inputSchema": schema(nameOnly, required: ["name"])],
+        ]
+    }()
+
+    /// `add_acp_agent` / `edit_acp_agent` arguments; a malformed one is a refusal.
+    static func acpAgentChanges(_ args: [String: Any], nameKey: String) -> Result<AcpAgentChanges, BridgeError> {
+        var c = AcpAgentChanges()
+        func strings(_ key: String) -> [String]? { (args[key] as? [Any])?.compactMap { $0 as? String } }
+        func stringMap(_ key: String) -> [String: String]? {
+            (args[key] as? [String: Any])?.reduce(into: [:]) { out, kv in
+                if let s = kv.value as? String { out[kv.key] = s } else { out[kv.key] = "\(kv.value)" }
+            }
+        }
+        c.name = args[nameKey] as? String
+        if let t = args["transport"] as? String {
+            switch t.lowercased() {
+            case "stdio": c.transport = .stdio
+            case "websocket", "ws": c.transport = .webSocket
+            default: return .failure(BridgeError("transport must be stdio or websocket (got \u{201C}\(t)\u{201D})"))
+            }
+        }
+        c.command = args["command"] as? String
+        c.args = strings("args")
+        c.url = args["url"] as? String
+        c.env = stringMap("env")
+        c.cwd = args["cwd"] as? String
+        c.runsOn = args["runs_on"] as? String
+        c.exec = strings("exec")
+        c.bridgeURL = args["bridge_url"] as? String
+        c.startingOptions = stringMap("starting_options")
+        if let raw = args["session_meta"] {
+            let text: String
+            if let s = raw as? String { text = s }
+            else if JSONSerialization.isValidJSONObject(raw),
+                    let data = try? JSONSerialization.data(withJSONObject: raw) { text = String(decoding: data, as: UTF8.self) }
+            else { return .failure(BridgeError(AcpAgentDraft.sessionMetaNotObject)) }
+            switch AcpAgentDraft.parseMeta(text) {
+            case let .success(meta): c.sessionMeta = meta
+            case let .failure(error): return .failure(BridgeError(error.message))
+            }
+        }
+        return .success(c)
+    }
+
+    public struct BridgeError: Error { public let message: String; init(_ m: String) { message = m } }
 
     /// The `group_*` tools. Listed only when groups are on; `call` refuses them otherwise.
     static let groupTools: [[String: Any]] = [
         tool("group_say",
-             "Post a message to a group chat you are a member of, as yourself. Use it to answer "
-             + "a [group \"…\"] prompt or to tell the group something it needs. `@name` / `@all` "
-             + "in `text`, and the callsigns in `to`, tag members: tagged members are woken, "
-             + "untagged posts wake every idle member but you. Send exactly `[pass]` to say "
-             + "nothing (not logged). Fails if the group is unknown, you are not a member, or a "
-             + "name in `to` is not a member (the error lists who is). If all you would say is "
-             + "an acknowledgement (got it, thanks, agreed, done), do NOT post it: use "
-             + "group_react on that message instead.",
+             "Post a message to a group chat you are a member of, as yourself. This is the only "
+             + "way anything reaches the group: your turn's final message is never posted for "
+             + "you. Use it to answer a [group \"…\"] prompt or to tell the group something it "
+             + "needs; with nothing to add, do not call it. Keep `text` to 5–40 words (one or two "
+             + "sentences, read in 1–10 seconds). For a list of several items use a markdown "
+             + "table (| a | b | rows), which the group chat renders as a table. `@name` / `@all` "
+             + "in `text`, and the callsigns in `to`, tag members and wake them; an untagged "
+             + "post wakes only the members a router judges it is for. Fails if the group is "
+             + "unknown, you are not a member, or a name in `to` is not a member (the error "
+             + "lists who is). If all you would say is an acknowledgement (got it, thanks, "
+             + "agreed, done), do NOT post it: use group_react on that message instead.",
              ["group": "string", "text": "string", "to": "string[]?"]),
         tool("group_react",
              "React to a group message with 👀 (seen, looking into it), 👍 (agree / ok), 👎 "
@@ -65,8 +177,8 @@ public struct MCPServer {
              + "acknowledgement is all you have to say. `message` is the #id at the start of "
              + "the message's line in the group prompt or group_log (\"#12 @api: …\" → 12). A "
              + "reaction is shown on that message and read by the group, wakes nobody and "
-             + "costs no message budget; it counts as your answer to the prompt, so end the turn "
-             + "with exactly [pass]. React with group_say instead when you owe an answer or "
+             + "costs no message budget; it counts as your answer to the prompt. Use group_say "
+             + "instead when you owe an answer or "
              + "new information. Fails for an unknown group or message, a group you are not in, "
              + "your own message, a message that is itself a reaction, or any other emoji.",
              ["group": "string", "message": "integer", "emoji": "string"]),
@@ -210,10 +322,22 @@ public struct MCPServer {
              + "'GLM5.3 via Fireworks AI') so the tab uses that custom model instead of "
              + "stock Anthropic. Omit `provider` for stock. Unknown provider names fail. "
              + "Use commission_bash for a plain zsh tab with no claude. "
+             + "Called from an ACP agent's tab, the new tab runs on that SAME agent instead: "
+             + "`cwd` is a path in the agent's environment (checked there), and `provider` "
+             + "is refused. "
              + "Optional `scratch`: true makes it a scratch tab — a small row at the bottom of "
              + "the sidebar, not restored on relaunch, and closed automatically once it sits "
              + "idle with no open goals; the user can promote it to a permanent tab. Omit "
-             + "`scratch` to follow the user's setting. "
+             + "`scratch` to follow the user's setting. Scratch does not create, move, or "
+             + "delete `cwd`; Claude Code keys transcripts by that folder, so resume needs "
+             + "the same directory to still exist. "
+             + "Optional `session_id`: a Claude Code session UUID to reuse. If a transcript "
+             + "already exists for `cwd`, the new tab launches with `claude --resume "
+             + "<session_id>` and continues that conversation. If not, it starts a fresh "
+             + "conversation under that same id with `claude --session-id <session_id>`. "
+             + "An id that is not a UUID fails. An id already open in another tab also "
+             + "fails — use that tab instead of commissioning a second one. The result "
+             + "includes `resumed=true` or `resumed=false` so you can tell which happened. "
              + "`output_schema` is OPTIONAL and rarely wanted: leave it out unless the user "
              + "explicitly asked for the tab to return structured output. When given, it is a "
              + "strict JSON Schema (as a JSON string) that EVERY turn of the tab must answer with "
@@ -221,9 +345,9 @@ public struct MCPServer {
              + "every object with `additionalProperties: false` and all its properties in "
              + "`required`, keywords limited to type/properties/required/items/enum/const/"
              + "additionalProperties/description/title. A non-strict schema fails the call. "
-             + "Returns the new session id prefix on success.",
+             + "Returns the tab name, `session_id`, and `resumed=true|false` on success.",
              ["callsign": "string", "cwd": "string", "provider": "string?", "scratch": "boolean?",
-              "output_schema": "string?"]),
+              "output_schema": "string?", "session_id": "string?"]),
         tool("set_output_schema",
              "Set, replace or clear a Claude tab's output schema by callsign — a session may "
              + "name only its own tab; the operator any tab. Use it "
@@ -412,6 +536,9 @@ public struct MCPServer {
             if caller != .operator {
                 tools.removeAll { Self.operatorTools.contains($0["name"] as? String ?? "") }
             }
+            if case let .session(token) = caller, bridge.manager.session(forToken: token)?.backend.isACP == true {
+                tools.removeAll { Self.acpAgentToolNames.contains($0["name"] as? String ?? "") }
+            }
             return Self.result(id: id, value: ["tools": tools])
         case "tools/call":
             let params = obj["params"] as? [String: Any] ?? [:]
@@ -421,13 +548,50 @@ public struct MCPServer {
             let args = params["arguments"] as? [String: Any] ?? [:]
             let outcome = refusal(of: name, args: args, for: caller)
                 ?? call(name: name, args: args, token: caller.bridgeToken)
-            return Self.result(id: id, value: [
-                "content": [["type": "text", "text": outcome.message]],
-                "isError": !outcome.ok,
-            ])
+            return Self.toolResult(id: id, outcome)
         default:
             return Self.error(id: id, code: -32601, message: "method not found: \(method)")
         }
+    }
+
+    /// `handle(requestData:caller:)` for a transport that can wait: the same answers, except
+    /// that `commission` goes through `BridgeCore.commissionAsync`, whose cwd check in an ACP
+    /// agent's environment runs off the main actor. The session bridge uses this; the Unix
+    /// socket (PTY tabs) keeps the synchronous path, which refuses an ACP caller's commission.
+    public func handleAsync(requestData: Data, caller: MCPCaller) async -> Data {
+        guard let obj = try? JSONSerialization.jsonObject(with: requestData) as? [String: Any],
+              let id = obj["id"], obj["method"] as? String == "tools/call",
+              let params = obj["params"] as? [String: Any], params["name"] as? String == "commission"
+        else { return handle(requestData: requestData, caller: caller) }
+        let args = params["arguments"] as? [String: Any] ?? [:]
+        if let refused = refusal(of: "commission", args: args, for: caller) {
+            return Self.toolResult(id: id, refused)
+        }
+        let a = Self.commissionArguments(args)
+        let outcome = await bridge.commissionAsync(
+            callsign: a.callsign, cwd: a.cwd, provider: a.provider, scratch: a.scratch,
+            outputSchema: a.outputSchema, sessionID: a.sessionID, fromToken: caller.bridgeToken)
+        return Self.toolResult(id: id, outcome)
+    }
+
+    private static func toolResult(id: Any?, _ outcome: BridgeResult) -> Data {
+        result(id: id, value: [
+            "content": [["type": "text", "text": outcome.message]],
+            "isError": !outcome.ok,
+        ])
+    }
+
+    /// `commission`'s arguments, trimmed; an empty `provider` or `session_id` is none.
+    private static func commissionArguments(_ args: [String: Any]) -> (
+        callsign: String, cwd: String, provider: String?, scratch: Bool?, outputSchema: String?,
+        sessionID: String?
+    ) {
+        let cwd = (args["cwd"] as? String)?.trimmingCharacters(in: .whitespaces) ?? ""
+        let provider = (args["provider"] as? String)?.trimmingCharacters(in: .whitespaces)
+        let sessionID = (args["session_id"] as? String)?.trimmingCharacters(in: .whitespaces)
+        return ((args["callsign"] as? String) ?? "", cwd, (provider?.isEmpty == false) ? provider : nil,
+                args["scratch"] as? Bool, schemaArgument(args["output_schema"]),
+                (sessionID?.isEmpty == false) ? sessionID : nil)
     }
 
     /// Why `caller` may not call `name` at all, or nil when it may. The operator may call
@@ -443,6 +607,14 @@ public struct MCPServer {
         guard let me = bridge.manager.session(forToken: token) else {
             return .failure("refused: the session token names no Admiral tab, so no tool is "
                 + "available to this caller")
+        }
+        // A schedule's run is a claude tab on this Mac; an ACP caller's would have to be on its
+        // agent, which the scheduler cannot launch yet.
+        if name.hasPrefix("schedule_"), me.backend.isACP {
+            return .failure("schedules can't target ACP agents yet")
+        }
+        if Self.acpAgentToolNames.contains(name), me.backend.isACP {
+            return .failure("\(name) is not available to an ACP agent's tab")
         }
         // An unknown target falls through, so the tool itself answers "no station".
         if let key = Self.ownTabTools[name],
@@ -520,20 +692,41 @@ public struct MCPServer {
             // cwd is required and must exist, so a session never silently lands in the
             // app's home directory when the caller omits it.
             let cwd = (args["cwd"] as? String)?.trimmingCharacters(in: .whitespaces) ?? ""
+            // An ACP caller's cwd is a path in its agent's environment, not here: BridgeCore
+            // refuses that caller on this path, so it skips the Mac check.
             var isDir: ObjCBool = false
-            guard !cwd.isEmpty, FileManager.default.fileExists(atPath: cwd, isDirectory: &isDir), isDir.boolValue else {
+            guard bridge.acpAgentName(ofCaller: token) != nil
+                || (!cwd.isEmpty && FileManager.default.fileExists(atPath: cwd, isDirectory: &isDir) && isDir.boolValue)
+            else {
                 return .failure("cwd is required and must be an existing directory")
             }
             let provider = (args["provider"] as? String)?.trimmingCharacters(in: .whitespaces)
+            let sessionID = (args["session_id"] as? String)?.trimmingCharacters(in: .whitespaces)
             return bridge.commission(callsign: str(args, "callsign"), cwd: cwd,
                                      provider: (provider?.isEmpty == false) ? provider : nil,
                                      scratch: args["scratch"] as? Bool,
-                                     outputSchema: Self.schemaArgument(args["output_schema"]))
+                                     outputSchema: Self.schemaArgument(args["output_schema"]),
+                                     sessionID: (sessionID?.isEmpty == false) ? sessionID : nil,
+                                     fromToken: token)
         case "set_output_schema":
             return bridge.setOutputSchema(callsign: str(args, "callsign"),
                                           schemaJSON: Self.schemaArgument(args["schema"]) ?? "")
         case "list_sessions":
             return bridge.listSessions()
+        case "list_acp_agents":
+            return bridge.listAcpAgents()
+        case "add_acp_agent":
+            switch Self.acpAgentChanges(args, nameKey: "name") {
+            case let .failure(e): return .failure(e.message)
+            case let .success(changes): return bridge.addAcpAgent(changes)
+            }
+        case "edit_acp_agent":
+            switch Self.acpAgentChanges(args, nameKey: "new_name") {
+            case let .failure(e): return .failure(e.message)
+            case let .success(changes): return bridge.editAcpAgent(named: str(args, "name"), changes)
+            }
+        case "delete_acp_agent":
+            return bridge.deleteAcpAgent(named: str(args, "name"))
         case "session_status":
             return bridge.sessionStatus(callsign: str(args, "callsign"))
         case "focus":

@@ -672,9 +672,9 @@ final class FakeScheduleBackend: ScheduleBackend {
         dir.appendingPathComponent("\(sessionID).jsonl").path
     }
 
-    func inject(tabID: UUID, text: String) {
+    func inject(tabID: UUID, text: String) -> InjectOutcome {
         typed.append(text)
-        guard !dropTyping, let path = paths[tabID] else { return }
+        guard !dropTyping, let path = paths[tabID] else { return .typed }
         let line = #"{"type":"user","message":{"role":"user","content":"\#(text)"}}"# + "\n"
         if let handle = FileHandle(forWritingAtPath: path) {
             handle.seekToEndOfFile()
@@ -684,6 +684,7 @@ final class FakeScheduleBackend: ScheduleBackend {
             FileManager.default.createFile(atPath: path, contents: Data(line.utf8))
         }
         busyPolls[tabID] = 1
+        return .typed
     }
 
     func liveStatus(tabID: UUID) -> SessionStatus {

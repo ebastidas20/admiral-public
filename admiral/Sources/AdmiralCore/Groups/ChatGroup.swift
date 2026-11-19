@@ -28,7 +28,8 @@ public struct ChatGroup: Codable, Identifiable, Equatable, Sendable {
 }
 
 /// One line of a group's log. The author's name and look are copied in when it is posted, so
-/// history still reads right after a tab is renamed, recolored or closed.
+/// history still reads right after the tab is closed; while the tab is open its current name
+/// is shown instead (`authorName`), so a rename shows on every message at once.
 public struct GroupMessage: Codable, Identifiable, Equatable, Sendable {
     public enum Author: Codable, Equatable, Sendable {
         case human
@@ -75,6 +76,13 @@ public struct GroupMessage: Codable, Identifiable, Equatable, Sendable {
 
     public var isHuman: Bool { author == .human }
     public var isReaction: Bool { reactionTo != nil }
+
+    /// The author's name as it reads now: the member's current callsign from `live` (member key
+    /// → callsign) while its tab is open, else the name copied in when it was posted.
+    public func authorName(_ live: [UUID: String]) -> String {
+        if case .member(let id) = author, let current = live[id] { return current }
+        return name
+    }
 }
 
 public enum GroupError: Error, Equatable, CustomStringConvertible {

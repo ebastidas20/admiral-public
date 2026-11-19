@@ -32,7 +32,10 @@ final class BridgeSocketServer {
         return dir.appendingPathComponent("bridge.sock").path
     }
 
-    func start() { server.start() }
+    func start() {
+        // A failed bind leaves every session's bridge MCP unable to connect: say so.
+        if !server.start() { NSLog("Admiral: bridge socket failed to listen at %@", server.path) }
+    }
 
     func stop() { server.stop() }
 }

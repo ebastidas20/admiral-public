@@ -187,15 +187,12 @@ final class GroupReactionTests: XCTestCase {
         XCTAssertTrue(toAlice.contains("#3 User: next?"), toAlice)
     }
 
-    func testAReactionCountsAsTheMembersReplyToItsWake() throws {
+    func testChipsNameAReactorByItsCurrentCallsign() throws {
         let seq = try aliceSays()
-        let before = service.store.messages(group.id)
-        XCTAssertEqual(GroupAutoPost.decide(reply: "Got it.", member: bob, wakeSeq: seq, group: group, messages: before),
-                       .post("Got it."))
         _ = try call("group_react", ["group": "Checkout fix", "message": seq, "emoji": "👍"])
-        XCTAssertEqual(GroupAutoPost.decide(reply: "Got it.", member: bob, wakeSeq: seq, group: group,
-                                            messages: service.store.messages(group.id)),
-                       .skip(.alreadyPosted), "the reaction was the reply, so the final line is not posted too")
+        let log = service.store.messages(group.id)
+        XCTAssertEqual(GroupReaction.chips(log)[seq]?.first?.names, ["bob"])
+        XCTAssertEqual(GroupReaction.chips(log, live: [bob: "bob-renamed"])[seq]?.first?.names, ["bob-renamed"])
     }
 
     func testReactionsAreNotTimelineRowsNorUnread() throws {
@@ -234,8 +231,23 @@ final class GroupReactionTests: XCTestCase {
         XCTAssertTrue(try description("group_log").contains("the #id is what group_react takes"))
         XCTAssertTrue(try description("group_list").contains("use group_react"))
         let react = try description("group_react")
-        for phrase in ["👀", "👍", "👎", "✅", "instead of sending a message", "wakes nobody", "[pass]", "#id"] {
+        for phrase in ["👀", "👍", "👎", "✅", "instead of sending a message", "wakes nobody", "#id"] {
             XCTAssertTrue(react.contains(phrase), phrase)
+        }
+    }
+
+    func testGroupSayAsksForShortMessagesAndTablesForLists() throws {
+        let tool = try XCTUnwrap(MCPServer.tools(guidance: "g", groups: true).first { $0["name"] as? String == "group_say" })
+        let say = try XCTUnwrap(tool["description"] as? String)
+        for phrase in ["5–40 words", "1–10 seconds", "markdown table", "final message is never posted"] {
+            XCTAssertTrue(say.contains(phrase), phrase)
+        }
+    }
+
+    func testNoToolOrInstructionMentionsPass() throws {
+        let tools = MCPServer.tools(guidance: "g", groups: true).compactMap { $0["description"] as? String }
+        for text in tools + [GroupInstructions.text] {
+            XCTAssertFalse(text.contains("[pass]"), text)
         }
     }
 }

@@ -29,6 +29,7 @@ final class MCPServerTests: XCTestCase {
         "update_goals", "commission", "rename_station", "set_structured_output", "pr_status",
         "add_goals", "AskUserQuestion", "set_output_schema", "schedule_list", "schedule_set",
         "schedule_delete", "schedule_run", "schedule_history",
+        "list_acp_agents", "add_acp_agent", "edit_acp_agent", "delete_acp_agent",
     ]
 
     private func toolNames(_ server: MCPServer, _ caller: MCPCaller) -> [String] {
@@ -40,7 +41,7 @@ final class MCPServerTests: XCTestCase {
     func testOperatorToolsListReturnsAllTools() {
         let (server, _) = makeServer()
         let names = toolNames(server, .operator)
-        XCTAssertEqual(names.count, 30)
+        XCTAssertEqual(names.count, 34)
         XCTAssertEqual(Set(names), Self.sessionToolNames.union(Self.operatorToolNames))
         XCTAssertEqual(MCPServer.operatorTools, Self.operatorToolNames)
     }
@@ -49,7 +50,7 @@ final class MCPServerTests: XCTestCase {
     func testSessionToolsListLeavesOutTheOperatorTools() {
         let (server, _) = makeServer()
         let names = toolNames(server, .session("A"))
-        XCTAssertEqual(names.count, 20)
+        XCTAssertEqual(names.count, 24)
         XCTAssertEqual(Set(names), Self.sessionToolNames)
     }
 
@@ -72,7 +73,7 @@ final class MCPServerTests: XCTestCase {
             XCTAssertTrue(reply.text.contains("\(name) is an operator tool"), reply.text)
         }
         XCTAssertEqual(host.sent, [], "nothing was typed into a tab")
-        XCTAssertEqual(toolNames(server, .operator).count, 30)
+        XCTAssertEqual(toolNames(server, .operator).count, 34)
         XCTAssertFalse(try call(server, "list_sessions", [:], .operator).text.contains("sh"),
                        "no bash tab was commissioned")
         XCTAssertTrue(try call(server, "list_sessions", [:], .operator).text.contains("@bob"),
@@ -553,6 +554,74 @@ final class MCPServerTests: XCTestCase {
         XCTAssertEqual(commission("commission", ["callsign": "keep", "cwd": cwd, "scratch": false])?.scratch, false)
     }
 
+    /// Optional `session_id` is advertised on `commission`. A known transcript is
+    /// resumed; a missing one starts a fresh session under that same id.
+    func testCommissionSessionIDResumesOrStartsUnderTheSameId() throws {
+        let home = FileManager.default.temporaryDirectory
+            .appendingPathComponent("admiral-mcp-resume-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: home) }
+        let sid = "00000000-0000-4000-8000-000000000aaa"
+        let cwd = FileManager.default.temporaryDirectory.path
+        let dir = home.appendingPathComponent("projects")
+            .appendingPathComponent(TranscriptLocator.encodeProjectDir(cwd))
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        try Data("{}\n".utf8).write(to: dir.appendingPathComponent("\(sid).jsonl"))
+
+        let host = FakeTerminalHost()
+        let manager = SessionManager(host: host, claudeHome: home, executablePath: "/bin/echo",
+                                     defaultAgentType: AgentType(
+                                        id: "claude_code", displayName: "Claude Code",
+                                        executableName: "zsh",
+                                        defaultArgs: ["-ilc", "claude --session-id \(SessionManager.sessionIDPlaceholder)"],
+                                        symbolName: "sparkles"))
+        let bridge = BridgeCore(manager: manager)
+        let server = MCPServer(bridge: bridge)
+
+        let listed = parse(server.handle(
+            requestData: Data(#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#.utf8),
+            caller: .operator))
+        let tools = (listed["result"] as? [String: Any])?["tools"] as? [[String: Any]] ?? []
+        let commissionTool = tools.first { $0["name"] as? String == "commission" }
+        let schema = commissionTool?["inputSchema"] as? [String: Any]
+        let props = schema?["properties"] as? [String: Any]
+        let required = schema?["required"] as? [String] ?? []
+        XCTAssertNotNil(props?["session_id"], "session_id must be on the commission schema")
+        XCTAssertFalse(required.contains("session_id"), "session_id is optional")
+
+        func call(_ args: [String: Any]) -> (ok: Bool, text: String) {
+            let params: [String: Any] = ["name": "commission", "arguments": args]
+            let req: [String: Any] = ["jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": params]
+            let response = parse(server.handle(requestData: try! JSONSerialization.data(withJSONObject: req),
+                                               caller: .operator))
+            let result = response["result"] as? [String: Any]
+            let text = ((result?["content"] as? [[String: Any]])?.first)?["text"] as? String ?? ""
+            let isError = result?["isError"] as? Bool ?? true
+            return (!isError, text)
+        }
+
+        let resumed = call(["callsign": "LOAN", "cwd": cwd, "session_id": sid])
+        XCTAssertTrue(resumed.ok, resumed.text)
+        XCTAssertTrue(resumed.text.contains("resumed=true"), resumed.text)
+        XCTAssertTrue(resumed.text.contains("session_id=\(sid)"), resumed.text)
+        XCTAssertEqual(manager.sessions.last?.claudeSessionID, sid)
+        let cmd = host.spawned.last?.args.last ?? host.spawned.last?.args.joined(separator: " ") ?? ""
+        XCTAssertTrue(cmd.contains("--resume \(sid)"), "got: \(cmd)")
+
+        let missing = "00000000-0000-4000-8000-000000000bbb"
+        let miss = call(["callsign": "GONE", "cwd": cwd, "session_id": missing])
+        XCTAssertTrue(miss.ok, miss.text)
+        XCTAssertTrue(miss.text.contains("resumed=false"), miss.text)
+        XCTAssertTrue(miss.text.contains("session_id=\(missing)"), miss.text)
+        XCTAssertEqual(manager.sessions.last?.claudeSessionID, missing)
+        let missCmd = host.spawned.last?.args.last ?? host.spawned.last?.args.joined(separator: " ") ?? ""
+        XCTAssertTrue(missCmd.contains("--session-id \(missing)"), "got: \(missCmd)")
+        XCTAssertFalse(missCmd.contains("--resume "), missCmd)
+
+        let live = call(["callsign": "COPY", "cwd": cwd, "session_id": sid])
+        XCTAssertFalse(live.ok, live.text)
+        XCTAssertTrue(live.text.contains("already open as @LOAN"), live.text)
+    }
+
     func testReadRecentMissingStation() {
         let (server, _) = makeServer()
         let params: [String: Any] = ["name": "read_recent", "arguments": ["callsign": "nope"]]
@@ -578,4 +647,197 @@ final class MCPServerTests: XCTestCase {
     }
 
 
+
+    // MARK: - ACP callers
+
+    /// Answers `test -d` like an agent environment holding only `dirs`, and records every call.
+    /// `launches: false` = every call fails to launch or times out (nil), like a stopped container.
+    private final class DirRunner: CommandRunner, @unchecked Sendable {
+        private let lock = NSLock()
+        private var _calls: [[String]] = []
+        private var _onMain: [Bool] = []
+        var calls: [[String]] { lock.withLock { _calls } }
+        /// Whether each call ran on the main thread.
+        var onMain: [Bool] { lock.withLock { _onMain } }
+        let dirs: Set<String>
+        let launches: Bool
+        init(dirs: Set<String>, launches: Bool = true) { self.dirs = dirs; self.launches = launches }
+        func run(_ argv: [String], cwd: String?, timeout: TimeInterval) -> (code: Int32, stdout: String)? {
+            lock.withLock { _calls.append(argv); _onMain.append(Thread.isMainThread) }
+            guard launches else { return nil }
+            if argv.count == 3, argv[0] == "test", argv[1] == "-d" { return (dirs.contains(argv[2]) ? 0 : 1, "") }
+            return (1, "")
+        }
+    }
+
+    /// A `tools/call` the way the session bridge makes it (`handleAsync`).
+    private func callAsync(_ server: MCPServer, _ name: String, _ args: [String: Any],
+                           _ caller: MCPCaller) async throws -> (isError: Bool, text: String) {
+        let request: [String: Any] = ["jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                                      "params": ["name": name, "arguments": args]]
+        let data = try JSONSerialization.data(withJSONObject: request)
+        let reply = await server.handleAsync(requestData: data, caller: caller)
+        let result = try XCTUnwrap(parse(reply)["result"] as? [String: Any])
+        return (result["isError"] as? Bool ?? false,
+                (result["content"] as? [[String: Any]])?.first?["text"] as? String ?? "")
+    }
+
+    /// A manager with one PTY tab (token "A") and one ACP tab on agent "Sandbox" (token "P"), whose
+    /// environment holds `/workspace` and `/workspace/sub`. `runner` nil = the agent has no exec.
+    private func makeACPServer(
+        runner: DirRunner? = DirRunner(dirs: ["/workspace", "/workspace/sub"])
+    ) -> (MCPServer, SessionManager, FakeTerminalHost) {
+        let host = FakeTerminalHost()
+        let manager = SessionManager(host: host, claudeHome: URL(fileURLWithPath: "/tmp/admiral-none"),
+                                     executablePath: "/bin/echo",
+                                     supportDir: FileManager.default.temporaryDirectory
+                                        .appendingPathComponent("mcp-acp-\(UUID().uuidString)"))
+        let sandbox = AcpAgentConfig(name: "Sandbox", launch: AcpCommand(command: "docker", args: ["exec", "-i", "c", "a"]),
+                                 cwd: "/workspace")
+        manager.acpAgents = { [sandbox] }
+        manager.acpRunnerFactory = { _ in runner }
+        manager.acpTransportFactory = { _, _ in ScriptedAgent() }
+        manager.register(AgentSession(callsign: "alice", cwd: "/a", token: "A"),
+                         handle: FakeTerminalHost.Handle(pid: 1))
+        var acp = AgentSession(callsign: "agent", cwd: "/workspace", token: "P")
+        acp.backend = .acp(agentName: "Sandbox")
+        manager.register(acp)
+        return (MCPServer(bridge: BridgeCore(manager: manager, idGenerator: { "id" })), manager, host)
+    }
+
+    /// An ACP tab asking for a new tab gets one on its OWN agent, in the agent's environment —
+    /// never a claude on the Mac. The cwd is checked there (`test -d`), not with the Mac's
+    /// FileManager: `/workspace/sub` does not exist on this Mac.
+    func testCommissionFromACPCallerOpensTabOnSameAgent() async throws {
+        let runner = DirRunner(dirs: ["/workspace", "/workspace/sub"])
+        let (server, manager, host) = makeACPServer(runner: runner)
+        let reply = try await callAsync(server, "commission", ["callsign": "helper", "cwd": "/workspace/sub"],
+                                        .session("P"))
+        XCTAssertFalse(reply.isError, reply.text)
+        let made = try XCTUnwrap(manager.sessions.first { $0.callsign == "helper" })
+        XCTAssertEqual(made.backend, .acp(agentName: "Sandbox"))
+        XCTAssertNotEqual(made.backend, .pty)
+        XCTAssertEqual(made.cwd, "/workspace/sub")
+        XCTAssertTrue(host.spawned.isEmpty, "nothing was spawned on the Mac: \(host.spawned)")
+        XCTAssertTrue(runner.calls.contains(["test", "-d", "/workspace/sub"]), "\(runner.calls)")
+        XCTAssertEqual(runner.onMain, [false], "the cwd check ran off the main thread")
+        manager.terminateAll()
+    }
+
+    /// A check that could not run (exec failed to launch or timed out) says so, and opens nothing.
+    func testCommissionFromACPCallerReportsACheckThatCouldNotRun() async throws {
+        let (server, manager, host) = makeACPServer(runner: DirRunner(dirs: [], launches: false))
+        let reply = try await callAsync(server, "commission", ["callsign": "x", "cwd": "/workspace"], .session("P"))
+        XCTAssertTrue(reply.isError)
+        XCTAssertEqual(reply.text, "could not check cwd /workspace in Sandbox's environment: its exec command "
+            + "failed to launch or timed out, so no tab was opened")
+        XCTAssertNil(manager.sessions.first { $0.callsign == "x" })
+        XCTAssertTrue(host.spawned.isEmpty)
+    }
+
+    /// The agent's cwd is a path in ITS environment; a relative one has no meaning there.
+    func testCommissionFromACPCallerRequiresAnAbsoluteCwd() async throws {
+        let runner = DirRunner(dirs: ["workspace"])
+        let (server, manager, _) = makeACPServer(runner: runner)
+        let reply = try await callAsync(server, "commission", ["callsign": "r", "cwd": "workspace"], .session("P"))
+        XCTAssertTrue(reply.isError)
+        XCTAssertEqual(reply.text, "cwd must be an absolute path in Sandbox's environment (got \"workspace\")")
+        XCTAssertNil(manager.sessions.first { $0.callsign == "r" })
+        XCTAssertTrue(runner.calls.isEmpty, "refused before any exec")
+    }
+
+    /// The synchronous path (the Unix bridge socket, which runs on the main actor) never runs
+    /// an ACP caller's exec: it refuses and points at the session bridge.
+    func testSynchronousCommissionFromACPCallerIsRefused() throws {
+        let runner = DirRunner(dirs: ["/workspace"])
+        let (server, manager, host) = makeACPServer(runner: runner)
+        let reply = try call(server, "commission", ["callsign": "s", "cwd": "/workspace"], .session("P"))
+        XCTAssertTrue(reply.isError)
+        XCTAssertEqual(reply.text, "commission from an ACP agent's tab is served only on the session bridge "
+            + "(POST /mcp/session)")
+        XCTAssertTrue(runner.calls.isEmpty)
+        XCTAssertNil(manager.sessions.first { $0.callsign == "s" })
+        XCTAssertTrue(host.spawned.isEmpty)
+    }
+
+    /// Any other caller gets the same answer from `handleAsync` as from `handle`.
+    func testAsyncCommissionFromPTYCallerOpensAMacTab() async throws {
+        let (server, manager, host) = makeACPServer()
+        let cwd = FileManager.default.temporaryDirectory.path
+        let reply = try await callAsync(server, "commission", ["callsign": "mac2", "cwd": cwd], .session("A"))
+        XCTAssertFalse(reply.isError, reply.text)
+        XCTAssertEqual(manager.sessions.first { $0.callsign == "mac2" }?.backend, .pty)
+        XCTAssertEqual(host.spawned.count, 1)
+        let ghost = try await callAsync(server, "commission", ["callsign": "g", "cwd": cwd], .session("Z"))
+        XCTAssertTrue(ghost.isError, "a token that names no tab is still refused")
+    }
+
+    func testCommissionFromACPCallerChecksCwdInTheAgentsEnvironment() async throws {
+        let (server, manager, host) = makeACPServer()
+        let missing = try await callAsync(server, "commission", ["callsign": "x", "cwd": "/workspace/nope"],
+                                          .session("P"))
+        XCTAssertTrue(missing.isError)
+        XCTAssertEqual(missing.text, "cwd /workspace/nope is not a directory in Sandbox's environment")
+        // A Mac folder means nothing there either.
+        let mac = FileManager.default.temporaryDirectory.path
+        let onMac = try await callAsync(server, "commission", ["callsign": "y", "cwd": mac], .session("P"))
+        XCTAssertTrue(onMac.isError)
+        XCTAssertNil(manager.sessions.first { ["x", "y"].contains($0.callsign) })
+        // Omitted = the agent's own cwd.
+        let omitted = try await callAsync(server, "commission", ["callsign": "z"], .session("P"))
+        XCTAssertFalse(omitted.isError, omitted.text)
+        XCTAssertEqual(manager.sessions.first { $0.callsign == "z" }?.cwd, "/workspace")
+        XCTAssertTrue(host.spawned.isEmpty)
+        manager.terminateAll()
+    }
+
+    /// No exec = nowhere to check: the tab opens in the agent's configured cwd, unchecked.
+    func testCommissionFromACPCallerWithoutExecUsesTheAgentsCwd() async throws {
+        let (server, manager, host) = makeACPServer(runner: nil)
+        let reply = try await callAsync(server, "commission", ["callsign": "w", "cwd": "/elsewhere"], .session("P"))
+        XCTAssertFalse(reply.isError, reply.text)
+        let made = try XCTUnwrap(manager.sessions.first { $0.callsign == "w" })
+        XCTAssertEqual(made.backend, .acp(agentName: "Sandbox"))
+        XCTAssertEqual(made.cwd, "/workspace")
+        XCTAssertTrue(reply.text.contains("no exec command"), reply.text)
+        XCTAssertTrue(host.spawned.isEmpty)
+        manager.terminateAll()
+    }
+
+    /// A CC Switch provider is a Mac claude's endpoint; an ACP agent has its own model.
+    func testCommissionFromACPCallerRefusesAProvider() async throws {
+        let (server, manager, host) = makeACPServer()
+        let reply = try await callAsync(server, "commission", ["callsign": "p", "provider": "Kimi"], .session("P"))
+        XCTAssertTrue(reply.isError)
+        XCTAssertEqual(reply.text, "provider applies only to claude tabs on the Mac, not to an ACP agent's tab")
+        XCTAssertNil(manager.sessions.first { $0.callsign == "p" })
+        XCTAssertTrue(host.spawned.isEmpty)
+    }
+
+    func testScheduleSetFromACPCallerRefused() throws {
+        let (server, _, _) = makeACPServer()
+        for name in ["schedule_set", "schedule_list", "schedule_delete", "schedule_run", "schedule_history"] {
+            let reply = try call(server, name, ["name": "nightly", "cron": "0 3 * * *", "prompt": "hi"],
+                                 .session("P"))
+            XCTAssertTrue(reply.isError, name)
+            XCTAssertEqual(reply.text, "schedules can't target ACP agents yet", name)
+        }
+    }
+
+    func testCommissionFromPTYCallerUnchanged() throws {
+        let (server, manager, host) = makeACPServer()
+        let cwd = FileManager.default.temporaryDirectory.path
+        let reply = try call(server, "commission", ["callsign": "mac-tab", "cwd": cwd], .session("A"))
+        XCTAssertFalse(reply.isError, reply.text)
+        let made = try XCTUnwrap(manager.sessions.first { $0.callsign == "mac-tab" })
+        XCTAssertEqual(made.backend, .pty)
+        XCTAssertEqual(host.spawned.count, 1)
+        // The Mac folder check still applies to a PTY caller.
+        let missing = try call(server, "commission", ["callsign": "m2", "cwd": "/workspace/sub"], .session("A"))
+        XCTAssertTrue(missing.isError)
+        XCTAssertEqual(missing.text, "cwd is required and must be an existing directory")
+        // And schedules are still theirs.
+        XCTAssertNotEqual(try call(server, "schedule_list", [:], .session("A")).text,
+                          "schedules can't target ACP agents yet")
+    }
 }

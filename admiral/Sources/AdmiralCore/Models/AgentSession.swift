@@ -1,7 +1,7 @@
 import Foundation
 
-/// A single agent session Admiral hosts. Pure data (Sendable); the live terminal
-/// handle is held separately by `SessionManager`, keyed by `id`.
+/// A single agent session Admiral hosts. Pure data (Sendable); the live driver (and its
+/// terminal handle) is held separately by `SessionManager`, keyed by `id`.
 public struct AgentSession: Identifiable, Sendable, Hashable {
     public let id: UUID
     /// Human name / callsign (defaults from title, editable).
@@ -45,6 +45,32 @@ public struct AgentSession: Identifiable, Sendable, Hashable {
     /// launch, like the rest of the `--settings` file: flipping the setting changes new tabs
     /// and relaunches, not this one. Decides how `SessionManager.deliver` reaches the tab.
     public var acceptsPeerMessages: Bool = false
+    /// What runs this tab's agent, fixed at launch. Decides which `SessionDriver` the
+    /// `SessionManager` gives it.
+    public var backend: SessionBackend = .pty
+    /// The agent's own session id on an ACP tab (`session/new`); nil on a PTY tab.
+    public var acpSessionID: String? = nil
+    /// What an ACP tab can do and why not: set from the negotiated capabilities once the agent
+    /// names its session, with the exec probes (git, gh, gh auth) filled in after. Nil on a PTY
+    /// tab, and on an ACP tab still connecting.
+    public var acpCapabilities: AcpCapabilityRecord? = nil
+    /// Why an ACP tab's agent is not running — a failed launch or handshake (a stopped
+    /// container, a refused mode), or the agent exiting later — with the agent's last stderr
+    /// line when it left one. Nil while it runs; a reload starts a fresh session, so it clears.
+    public var connectError: String? = nil
+    /// An ACP tab's client-side queue (`AcpSessionController.queued`): input that waits for the
+    /// agent's turn to end, oldest first. Always empty on a PTY tab (claude queues its own).
+    public var acpQueued: [String] = []
+    /// An ACP tab's config options (mode, model, effort, …) as the agent last reported them —
+    /// what the composer's pickers show. Always empty on a PTY tab.
+    public var acpConfigOptions: [AcpConfigOption] = []
+    /// An ACP tab's slash commands as the agent last reported them (replaced wholesale on each
+    /// update) — what the composer's `/` menu offers. Always empty on a PTY tab.
+    public var acpCommands: [AcpCommandInfo] = []
+    /// An ACP tab's running commands' output as it streams (tool call id → the last 8 KB), for
+    /// the Chat's running tool card; the call's entry goes when it completes or fails, and all
+    /// go when the turn ends — the transcript has the finished output. Always empty on a PTY tab.
+    public var acpLiveOutput: [String: String] = [:]
     /// Distinct git repos this session has written to, aggregated from its hook log.
     /// Ephemeral (rebuilt from the on-disk log); not part of the initializer.
     public var touchedRepos: [TouchedRepo] = []

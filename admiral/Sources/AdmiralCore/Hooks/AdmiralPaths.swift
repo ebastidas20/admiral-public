@@ -27,6 +27,25 @@ public enum AdmiralPaths {
         return dir
     }
 
+    /// The most bytes a Unix socket path may have: `sockaddr_un.sun_path` is 104 on macOS,
+    /// one of them the terminating NUL. A longer path fails `bind()` and `connect()`.
+    public static let maxSocketPathBytes = 103
+
+    /// `dir/name` when that fits a socket address, else a short path in the per-user temp
+    /// dir (`$TMPDIR`, mode 0700) named by a hash of the full path. Each instance keeps its own
+    /// socket either way (a different `dir` or `name` hashes differently), and the app and its
+    /// sessions agree on it because Admiral exports the result (`ADMIRAL_SOCKET`,
+    /// `ADMIRAL_CLIENT_SOCKET`). An isolated instance's support dir is often deep enough to
+    /// overflow, which left its sessions' bridge MCP with nothing to connect to.
+    public static func socketPath(_ name: String, in dir: URL,
+                                  temp: URL = FileManager.default.temporaryDirectory) -> String {
+        let full = dir.appendingPathComponent(name).path
+        guard full.utf8.count > maxSocketPathBytes else { return full }
+        var hash: UInt64 = 0xcbf29ce484222325   // FNV-1a: stable across launches and processes
+        for byte in full.utf8 { hash = (hash ^ UInt64(byte)) &* 0x100000001b3 }
+        return temp.appendingPathComponent("admiral-\(String(hash, radix: 16)).sock").path
+    }
+
     /// `<base>/sessions/<token>` (created if missing). The token arrives as `ADMIRAL_SESSION`
     /// in the hook helper's environment, so it is `sanitized` like a payload session id and
     /// can never name a directory outside `sessions/`.

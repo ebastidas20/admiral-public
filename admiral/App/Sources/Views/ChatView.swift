@@ -4,8 +4,9 @@ import UniformTypeIdentifiers
 import AdmiralCore
 
 /// The Chat rendering of a claude session: what you asked, what the agent said when it
-/// stopped, and the moments it needs you. Tool calls and thinking never appear; while the
-/// agent works there is one "Working…" row, whose tooltip names its current action.
+/// stopped, and the moments it needs you. Thinking never appears, nor do a PTY tab's tool
+/// calls (an ACP tab shows each as a `ToolCard`); while the agent works there is one
+/// "Working…" row, whose tooltip names its current action.
 ///
 /// It only renders the ledger (`SessionManager.chats`) and types into the same PTY the
 /// Terminal view shows — it keeps no conversation state of its own, which is what keeps the
@@ -34,6 +35,21 @@ struct ChatView: View {
     private var chat: ChatTranscript { model.sessions.chats[session.id] ?? .empty }
     private var isWorking: Bool { session.status == .busy && !chat.isWaiting }
 
+    /// The gap between consecutive tool cards (the list's own spacing is 18).
+    private static let toolRunGap: CGFloat = 4
+
+    /// The newest running tool call's streamed output, last 6 lines — nil when none is streaming.
+    private var liveOutput: String? {
+        guard !session.acpLiveOutput.isEmpty else { return nil }
+        for item in chat.items.reversed() {
+            guard case let .tool(_, tool, _) = item, tool.status == .running,
+                  let output = session.acpLiveOutput[tool.id] else { continue }
+            let tail = ChatTool.tail(output, lines: 6)
+            return tail.isEmpty ? nil : tail
+        }
+        return nil
+    }
+
     /// History first, then the live window — without an item both happen to hold.
     private var items: [ChatItem] {
         let live = Set(chat.items.map(\.id))
@@ -49,11 +65,17 @@ struct ChatView: View {
                     historyHeader
                     if items.isEmpty && historyExhausted { emptyState }
                     let dayBreaks = ChatHistory.dayBreaks(items)
+                    let toolFollowers = ChatHistory.toolRunFollowers(items, dayBreaks: dayBreaks)
                     ForEach(items) { item in
                         if dayBreaks.contains(item.id) { DayDivider(ts: item.ts) }
                         ChatItemView(item: item, session: session).equatable()
+                            // A run of tool calls reads as one group: each after the first
+                            // takes back most of the stack's spacing.
+                            .padding(.top, toolFollowers.contains(item.id) ? Self.toolRunGap - 18 : 0)
                     }
-                    if isWorking { WorkingRow(session: session, since: chat.lastPromptTS) }
+                    if isWorking {
+                        WorkingRow(session: session, since: chat.lastPromptTS, liveOutput: liveOutput)
+                    }
                 }
                 .frame(maxWidth: 760, alignment: .leading)
                 .frame(maxWidth: .infinity)
@@ -102,6 +124,7 @@ struct ChatView: View {
             })
             .accessibilityIdentifier("chat-content")
 
+            if session.backend.isACP { AcpTabStrip(session: session) }
             ChatComposer(session: session, isWorking: session.status == .busy, onSend: jumpToBottom)
         }
         .paneBackground(Theme.contentBackground)
@@ -135,8 +158,10 @@ struct ChatView: View {
         let cursor = (history.first ?? chat.items.first)?.ts
         let base = model.sessions.supportDir
         let transcript = session.transcriptPath
+        let tools = session.backend.isACP
         Task.detached(priority: .userInitiated) {
-            let page = ChatHistory.page(base: base, session: sid, transcriptPath: transcript, before: cursor)
+            let page = ChatHistory.page(
+                base: base, session: sid, transcriptPath: transcript, before: cursor, tools: tools)
             await MainActor.run {
                 loadingHistory = false
                 // No transcript yet (claude hasn't written it): not the end, just not ready.
@@ -226,6 +251,8 @@ private struct ChatItemView: View, Equatable {
         case let .notice(_, text, ts):
             NoticeLine(text: text, ts: ts)
                 .contextMenu { CopyButton(text: text) }
+        case let .tool(_, tool, _):
+            ToolCard(tool: tool)
         }
     }
 }
@@ -587,19 +614,24 @@ private struct WorkingRow: View {
     @EnvironmentObject var model: AppModel
     let session: AgentSession
     let since: String?
+    /// An ACP tab's running command's latest output lines, shown under the capsule.
+    var liveOutput: String? = nil
 
     var body: some View {
-        HStack(spacing: 10) {
-            SessionAvatarDot(session: session)
-            TimelineView(.periodic(from: .now, by: 1)) { context in
-                WorkingCapsule(elapsed: elapsed(at: context.date)) {
-                    Text("Working…").font(.system(size: 13)).foregroundStyle(Theme.secondaryText)
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 10) {
+                SessionAvatarDot(session: session)
+                TimelineView(.periodic(from: .now, by: 1)) { context in
+                    WorkingCapsule(elapsed: elapsed(at: context.date)) {
+                        Text("Working…").font(.system(size: 13)).foregroundStyle(Theme.secondaryText)
+                    }
                 }
+                .help(currentAction)
+                Spacer(minLength: 0)
             }
-            .help(currentAction)
-            Spacer(minLength: 0)
+            .accessibilityIdentifier("chat-working")
+            if let liveOutput { ToolLiveTail(text: liveOutput) }
         }
-        .accessibilityIdentifier("chat-working")
     }
 
     /// The last tool call in the transcript — the hover detail, never a message.
@@ -797,8 +829,11 @@ private struct NeedsCard: View {
                     Button("Allow") { model.allowPermission(session) }
                         .buttonStyle(.borderedProminent).tint(Theme.accent)
                     Button("Deny") { model.interrupt(session) }
-                    Button("Open in terminal") { model.setViewMode(.terminal, for: session) }
-                        .buttonStyle(.link)
+                    // An ACP tab has no terminal to open.
+                    if !session.backend.isACP {
+                        Button("Open in terminal") { model.setViewMode(.terminal, for: session) }
+                            .buttonStyle(.link)
+                    }
                 }
             }
             .padding(12)
@@ -836,22 +871,88 @@ struct ChatComposer: View {
     let isWorking: Bool
     /// Called after a send — the chat scrolls to the bottom to show it.
     var onSend: () -> Void = {}
+    /// Probe only: the composer starts with this text (e.g. "/" to open the command menu).
+    var initialText: String = ""
+    /// Probe only: the `@` menu lists these instead of asking the agent's runner.
+    var probeFiles: [String]? = nil
 
     @State private var text = ""
     @State private var attachments: [String] = []
+    /// An ACP option the agent refused, until the next pick.
+    @State private var optionError: String?
+    /// The highlighted row of whichever menu is open (`/` or `@` — never both).
+    @State private var menuSelection = 0
+    /// The text Esc closed the open menu on; it stays closed until the text changes.
+    @State private var menuDismissedText: String?
+    /// The agent's files for the open `@` query, fetched once per open.
+    @State private var fileList: AcpFileListState = .idle
+    /// The tab the in-flight listing was asked for: a result for any other tab is dropped.
+    @State private var fileListTab: UUID?
+    /// Every file any listing on this tab returned: what a sent `@path` is checked against.
+    @State private var knownFiles: Set<String> = []
     @FocusState private var focused: Bool
 
     private var hasContent: Bool {
         !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !attachments.isEmpty
     }
 
+    private var slashCandidates: [AcpCommandInfo] {
+        guard session.backend.isACP, text != menuDismissedText,
+              let partial = SlashCommandPicker.query(in: text) else { return [] }
+        return SlashCommandPicker.candidates(partial, commands: session.acpCommands)
+    }
+
+    private var slashOpen: Bool { !slashCandidates.isEmpty }
+
+    /// The `@` query, on an ACP tab, when the `/` menu's text shape is not the one typed.
+    private var fileQuery: FileMentionPicker.Query? {
+        guard session.backend.isACP, SlashCommandPicker.query(in: text) == nil else { return nil }
+        return FileMentionPicker.query(in: text)
+    }
+
+    /// The `@` menu, when it shows: a notice while loading / with no list, else the matches
+    /// (none = closed).
+    private var fileMenu: AcpFileMenuContent? {
+        guard text != menuDismissedText, let query = fileQuery else { return nil }
+        switch fileList {
+        case .idle, .loading: return .loading
+        case .unavailable: return .unavailable
+        case let .loaded(files):
+            let matches = FileMentionPicker.candidates(query.partial, files: files)
+            return matches.isEmpty ? nil : .files(matches)
+        }
+    }
+
+    /// The files the keys move through and accept (a notice row takes no keys).
+    private var fileCandidates: [String] {
+        if case let .files(files) = fileMenu { files } else { [] }
+    }
+
+    private var menuRowCount: Int { slashOpen ? slashCandidates.count : fileCandidates.count }
+
+    /// "Loading files…" is up: Return / Tab mean "pick", so they wait instead of sending a
+    /// half-typed `@` (the permanent "unavailable" notice still lets Return send).
+    private var fileMenuLoading: Bool { fileMenu == .loading }
+
+    /// The hint of the command whose "/name " is the whole text, shown after it.
+    private var slashHint: String? {
+        guard session.backend.isACP else { return nil }
+        return session.acpCommands.first { $0.hint != nil && text == SlashCommandPicker.insert($0) }?.hint
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
+            if let optionError { AcpOptionErrorCaption(text: optionError) }
             if !attachments.isEmpty { chips }
             ZStack(alignment: .topLeading) {
                 if text.isEmpty {
                     Text("Message \(session.displayTitle) — drop files, / commands, @ files")
                         .font(.system(size: 14)).foregroundStyle(Theme.secondaryText)
+                        .padding(.top, 1).padding(.leading, 5)
+                        .allowsHitTesting(false)
+                } else if let slashHint {
+                    (Text(text).foregroundColor(.clear) + Text(slashHint).foregroundColor(Theme.secondaryText))
+                        .font(.system(size: 14))
                         .padding(.top, 1).padding(.leading, 5)
                         .allowsHitTesting(false)
                 }
@@ -862,11 +963,20 @@ struct ChatComposer: View {
                     .fixedSize(horizontal: false, vertical: true)
                     .focused($focused)
                     .onKeyPress(.return, phases: .down) { press in
+                        if menuRowCount > 0 { acceptMenu(); return .handled }
+                        if fileMenuLoading { return .handled }
                         if press.modifiers.contains(.shift) || press.modifiers.contains(.option) { return .ignored }
                         send()
                         return .handled
                     }
+                    .onKeyPress(.tab) {
+                        if menuRowCount > 0 { acceptMenu(); return .handled }
+                        return fileMenuLoading ? .handled : .ignored
+                    }
+                    .onKeyPress(.upArrow) { moveMenu(-1) }
+                    .onKeyPress(.downArrow) { moveMenu(1) }
                     .onKeyPress(.escape) {
+                        if slashOpen || fileMenu != nil { menuDismissedText = text; return .handled }
                         guard text.isEmpty, isWorking else { return .ignored }
                         model.interrupt(session)
                         return .handled
@@ -877,20 +987,91 @@ struct ChatComposer: View {
                 Button(action: attach) { Image(systemName: "plus") }
                     .buttonStyle(.plain).foregroundStyle(Theme.secondaryText)
                     .help("Attach files")
+                if session.backend.isACP {
+                    AcpOptionChips(session: session) { optionError = $0 }
+                }
                 ComposerHint(isWorking: isWorking)
                 Spacer()
                 ComposerSendButton(stop: isWorking && !hasContent, hasContent: hasContent, isWorking: isWorking,
                                    onStop: { model.interrupt(session) }, onSend: send)
             }
         }
-        .composerChrome(focused: focused)
+        .composerBox(focused: focused || slashOpen || fileMenu != nil)
+        // Anchored above the box: a zero-height strip on its top edge, the list hanging up from it.
+        .overlay(alignment: .top) {
+            if slashOpen {
+                Color.clear.frame(maxWidth: .infinity).frame(height: 0)
+                    .overlay(alignment: .bottom) {
+                        AcpSlashMenu(candidates: slashCandidates,
+                                     selection: min(menuSelection, slashCandidates.count - 1)) { acceptMenu($0) }
+                            .fixedSize(horizontal: false, vertical: true)
+                            .padding(.bottom, 6)
+                    }
+            } else if let fileMenu {
+                Color.clear.frame(maxWidth: .infinity).frame(height: 0)
+                    .overlay(alignment: .bottom) {
+                        AcpFileMenu(content: fileMenu,
+                                    selection: min(menuSelection, max(fileCandidates.count - 1, 0))) { acceptMenu($0) }
+                            .fixedSize(horizontal: false, vertical: true)
+                            .padding(.bottom, 6)
+                    }
+            }
+        }
+        .composerColumn()
         .dropDestination(for: URL.self) { urls, _ in
             let files = urls.filter(\.isFileURL).map(\.path)
             attachments.append(contentsOf: files)
             return !files.isEmpty
         }
-        .onAppear { focused = true }
-        .onChange(of: session.id) { text = ""; attachments = []; focused = true }
+        .onAppear {
+            if text.isEmpty { text = initialText }
+            focused = true
+        }
+        .onChange(of: text) { menuSelection = 0 }
+        .onChange(of: fileQuery != nil) { _, open in open ? loadFiles() : (fileList = .idle) }
+        .onChange(of: session.id) {
+            text = ""; attachments = []; optionError = nil; menuDismissedText = nil; focused = true
+            fileList = .idle; fileListTab = nil; knownFiles = []
+        }
+    }
+
+    private func moveMenu(_ delta: Int) -> KeyPress.Result {
+        let count = menuRowCount
+        guard count > 0 else { return .ignored }
+        menuSelection = GroupMentionPicker.move(min(menuSelection, count - 1), by: delta, count: count)
+        return .handled
+    }
+
+    /// Return / Tab / a click on the open menu's row.
+    private func acceptMenu(_ index: Int? = nil) {
+        let count = menuRowCount
+        guard count > 0 else { return }
+        let i = min(index ?? menuSelection, count - 1)
+        if slashOpen {
+            text = SlashCommandPicker.insert(slashCandidates[i])
+        } else if let query = fileQuery {
+            text = FileMentionPicker.insert(fileCandidates[i], into: text, at: query)
+        }
+    }
+
+    /// The `@` menu opened: list the agent's files (the manager caches them briefly), keeping
+    /// every path seen so a sent `@path` is recognised.
+    private func loadFiles() {
+        fileList = .loading
+        let tab = session
+        fileListTab = tab.id
+        let probeFiles = probeFiles
+        Task {
+            let files = if let probeFiles { probeFiles } else { await model.acpFiles(tab) }
+            // Closed meanwhile, or the composer moved to another tab (whose own load may be running).
+            guard fileList == .loading, fileListTab == tab.id else { return }
+            if let files {
+                fileList = .loaded(files)
+                knownFiles.formUnion(files)
+            } else {
+                fileList = .unavailable
+            }
+        }
     }
 
     private var chips: some View {
@@ -913,7 +1094,8 @@ struct ChatComposer: View {
 
     private func send() {
         guard hasContent else { return }
-        model.sendChat(text, attachments: attachments, to: session)
+        let mentions = session.backend.isACP ? FileMentionPicker.mentions(in: text, files: knownFiles) : []
+        model.sendChat(text, attachments: attachments, mentions: mentions, to: session)
         text = ""
         attachments = []
         onSend()
@@ -954,8 +1136,12 @@ struct ComposerHint: View {
     let isWorking: Bool
 
     var body: some View {
+        // One line, first to give way: squeezed by a row of option chips, a wrapping hint
+        // stood one character wide and stretched the whole composer.
         Text(isWorking ? "↵ queue · ⇧↵ newline · esc interrupt" : "↵ send · ⇧↵ newline")
             .font(.system(size: 11)).foregroundStyle(Theme.secondaryText)
+            .lineLimit(1).truncationMode(.tail)
+            .layoutPriority(-1)
     }
 }
 

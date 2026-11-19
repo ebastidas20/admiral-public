@@ -713,6 +713,109 @@ final class BridgeCoreTests: XCTestCase {
         let (bridge2, host2) = makeBridge()
         let r2 = bridge2.sendKeys(to: "alice", keys: "shift+f13")
         XCTAssertTrue(r2.ok, r2.message)
+
         XCTAssertEqual(host2.combined, "\u{1b}[25;2~")
+    }
+
+    /// A Claude session id with a transcript under `cwd` relaunches that conversation
+    /// (`--resume`). A missing or wrong-cwd id starts a fresh session under the same
+    /// id (`--session-id`). An invalid UUID, or an id already open in another tab, fails.
+    func testCommissionResumesExistingClaudeSessionOrStartsUnderTheSameId() throws {
+        let home = FileManager.default.temporaryDirectory
+            .appendingPathComponent("admiral-resume-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: home) }
+
+        let sid = "00000000-0000-4000-8000-000000000abc"
+        let cwd = "/Users/me/proj"
+        let other = "/Users/me/other"
+        func writeTranscript(sessionID: String, cwd: String) throws {
+            let dir = home.appendingPathComponent("projects")
+                .appendingPathComponent(TranscriptLocator.encodeProjectDir(cwd))
+            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            try Data("{}\n".utf8).write(to: dir.appendingPathComponent("\(sessionID).jsonl"))
+        }
+        try writeTranscript(sessionID: sid, cwd: cwd)
+
+        func make() -> (BridgeCore, SessionManager, FakeTerminalHost) {
+            let host = FakeTerminalHost()
+            let manager = SessionManager(
+                host: host, claudeHome: home, executablePath: "/bin/zsh",
+                defaultAgentType: functionRecipe()
+            )
+            return (BridgeCore(manager: manager), manager, host)
+        }
+
+        let (bridge, manager, host) = make()
+        let before = manager.sessions.count
+        let ok = bridge.commission(callsign: "LOAN", cwd: cwd, sessionID: sid)
+        XCTAssertTrue(ok.ok, ok.message)
+        XCTAssertTrue(ok.message.contains("resumed=true"), ok.message)
+        XCTAssertTrue(ok.message.contains("session_id=\(sid)"), ok.message)
+        XCTAssertEqual(manager.sessions.count, before + 1)
+        XCTAssertEqual(manager.sessions.last?.claudeSessionID, sid)
+        let cmd = host.spawned.last?.args.last ?? ""
+        XCTAssertTrue(cmd.contains("--resume \(sid)"), "must resume; got: \(cmd)")
+        XCTAssertFalse(cmd.contains("--session-id"), "must not also pass --session-id; got: \(cmd)")
+
+        // Uppercase UUID still finds the lowercase file.
+        let (bridgeU, managerU, hostU) = make()
+        let upper = bridgeU.commission(callsign: "LOAN2", cwd: cwd, sessionID: sid.uppercased())
+        XCTAssertTrue(upper.ok, upper.message)
+        XCTAssertEqual(managerU.sessions.last?.claudeSessionID, sid)
+        XCTAssertTrue((hostU.spawned.last?.args.last ?? "").contains("--resume \(sid)"))
+
+        let (bridgeMiss, managerMiss, hostMiss) = make()
+        let missing = "00000000-0000-4000-8000-000000000def"
+        let miss = bridgeMiss.commission(callsign: "GONE", cwd: cwd, sessionID: missing)
+        XCTAssertTrue(miss.ok, miss.message)
+        XCTAssertTrue(miss.message.contains("resumed=false"), miss.message)
+        XCTAssertTrue(miss.message.contains("session_id=\(missing)"), miss.message)
+        XCTAssertEqual(managerMiss.sessions.count, 1)
+        XCTAssertEqual(managerMiss.sessions.last?.claudeSessionID, missing)
+        let missCmd = hostMiss.spawned.last?.args.last ?? ""
+        XCTAssertTrue(missCmd.contains("--session-id \(missing)"), "missing transcript must start under that id; got: \(missCmd)")
+        XCTAssertFalse(missCmd.contains("--resume "), "must not resume a missing transcript; got: \(missCmd)")
+
+        let (bridgeWrong, managerWrong, hostWrong) = make()
+        let wrong = bridgeWrong.commission(callsign: "WRONG", cwd: other, sessionID: sid)
+        XCTAssertTrue(wrong.ok, wrong.message)
+        XCTAssertTrue(wrong.message.contains("resumed=false"), wrong.message)
+        XCTAssertEqual(managerWrong.sessions.last?.claudeSessionID, sid)
+        let wrongCmd = hostWrong.spawned.last?.args.last ?? ""
+        XCTAssertTrue(wrongCmd.contains("--session-id \(sid)"), "wrong cwd has no transcript there; got: \(wrongCmd)")
+        XCTAssertFalse(wrongCmd.contains("--resume "), wrongCmd)
+
+        // Same id already open in a tab is refused — don't start a second tab on it.
+        let live = bridge.commission(callsign: "COPY", cwd: cwd, sessionID: sid)
+        XCTAssertFalse(live.ok, live.message)
+        XCTAssertTrue(live.message.contains("already open as @LOAN"), live.message)
+        XCTAssertEqual(manager.sessions.count, before + 1)
+
+        let (bridgeBad, managerBad, _) = make()
+        let bad = bridgeBad.commission(callsign: "BAD", cwd: cwd, sessionID: "not-a-uuid")
+        XCTAssertFalse(bad.ok, bad.message)
+        XCTAssertTrue(bad.message.contains("must be a Claude session id"), bad.message)
+        XCTAssertEqual(managerBad.sessions.count, 0)
+
+        let (bridgeFresh, managerFresh, hostFresh) = make()
+        let fresh = bridgeFresh.commission(callsign: "FRESH", cwd: cwd)
+        XCTAssertTrue(fresh.ok, fresh.message)
+        XCTAssertTrue(fresh.message.contains("resumed=false"), fresh.message)
+        XCTAssertFalse(fresh.message.contains("resumed=true"), fresh.message)
+        XCTAssertTrue(fresh.message.contains("session_id="), fresh.message)
+        let freshCmd = hostFresh.spawned.last?.args.last ?? ""
+        XCTAssertTrue(freshCmd.contains("--session-id"), "fresh launch must use --session-id; got: \(freshCmd)")
+        XCTAssertFalse(freshCmd.contains("--resume "), "fresh launch must not resume; got: \(freshCmd)")
+        XCTAssertNotEqual(managerFresh.sessions.last?.claudeSessionID, sid)
+
+        let blank = bridgeFresh.commission(callsign: "BLANK", cwd: cwd, sessionID: "   ")
+        XCTAssertTrue(blank.ok, blank.message)
+        XCTAssertTrue(blank.message.contains("resumed=false"), blank.message)
+
+        let status = bridge.sessionStatus(callsign: "LOAN")
+        XCTAssertTrue(status.ok, status.message)
+        XCTAssertTrue(status.message.contains("session_id=\(sid)"), status.message)
+        let listed = bridge.listSessions()
+        XCTAssertTrue(listed.message.contains("session_id=\(sid)"), listed.message)
     }
 }

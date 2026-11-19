@@ -1,34 +1,22 @@
 import Foundation
 
-/// Tiny read-only git helper for the status bar / list subtitle.
+/// Tiny read-only git helper for the status bar / list subtitle and the touched-repos log.
+/// `runner` decides where git runs: this Mac by default, or an ACP agent's environment.
 enum Git {
-    static func branch(at cwd: String) -> String? {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-        process.arguments = ["git", "-C", cwd, "symbolic-ref", "--short", "HEAD"]
-        let out = Pipe()
-        process.standardOutput = out
-        process.standardError = Pipe()
-        do { try process.run() } catch { return nil }
-        process.waitUntilExit()
-        guard process.terminationStatus == 0 else { return nil }
-        let data = out.fileHandleForReading.readDataToEndOfFile()
-        let branch = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines)
-        return (branch?.isEmpty == false) ? branch : nil
+    static func branch(at cwd: String, runner: CommandRunner = LocalCommandRunner()) -> String? {
+        output(["git", "-C", cwd, "symbolic-ref", "--short", "HEAD"], runner: runner)
     }
 
-    static func repoRoot(at cwd: String) -> String? {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-        process.arguments = ["git", "-C", cwd, "rev-parse", "--show-toplevel"]
-        let out = Pipe()
-        process.standardOutput = out
-        process.standardError = Pipe()
-        do { try process.run() } catch { return nil }
-        process.waitUntilExit()
-        guard process.terminationStatus == 0 else { return nil }
-        let data = out.fileHandleForReading.readDataToEndOfFile()
-        let root = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines)
-        return (root?.isEmpty == false) ? root : nil
+    static func repoRoot(at cwd: String, runner: CommandRunner = LocalCommandRunner()) -> String? {
+        output(["git", "-C", cwd, "rev-parse", "--show-toplevel"], runner: runner)
+    }
+
+    /// Trimmed stdout of a successful run; nil on failure, timeout (the runner's own bound —
+    /// unbounded locally, as always) or empty output.
+    private static func output(_ argv: [String], runner: CommandRunner) -> String? {
+        guard let result = runner.run(argv, cwd: nil, timeout: runner.defaultTimeout),
+              result.code == 0 else { return nil }
+        let text = result.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+        return text.isEmpty ? nil : text
     }
 }

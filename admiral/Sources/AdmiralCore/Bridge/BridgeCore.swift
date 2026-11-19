@@ -35,6 +35,9 @@ public final class BridgeCore {
     /// Runs the `group_*` tools. Set by the app only while `features.groups` is on; nil = the
     /// tools do not exist (absent from `tools/list`, refused by `tools/call`).
     public var groups: GroupService?
+    /// Saves the ACP agent list (Settings → Agents' store) for the `*_acp_agent` tools; they
+    /// read it back through `manager.acpAgents`. nil = those tools refuse.
+    public var saveAcpAgents: (([AcpAgentConfig]) -> Void)?
     /// Whether a `commission` that doesn't say `scratch` makes a scratch tab (Settings →
     /// Bridge & API). Re-read at every call, so a settings edit applies at once.
     public var scratchByDefault: () -> Bool = { false }
@@ -561,12 +564,26 @@ public final class BridgeCore {
     /// on the wrong model.
     ///
     /// `scratch` makes it a scratch tab (mini sidebar row, not restored, auto-closed once idle
-    /// with no open goals); nil follows `scratchByDefault`.
+    /// with no open goals); nil follows `scratchByDefault`. Scratch does not create, move, or
+    /// delete the working directory — transcripts stay keyed by the `cwd` you pass.
+    ///
+    /// `sessionID` (optional) is a Claude Code session UUID to reuse. If a transcript
+    /// already exists for `cwd`, the tab launches with `claude --resume <id>`. If not,
+    /// it starts a fresh conversation under that same id with `claude --session-id <id>`.
+    /// An id that isn't a UUID fails. An id already open in another tab also fails —
+    /// two tabs cannot share one Claude session id (transcript, goals, and appearance
+    /// are all keyed by it). The success text includes `resumed=true` or `resumed=false`.
     ///
     /// `outputSchema` (strict JSON Schema, as text) makes every turn of the tab end with
     /// `set_structured_output(type: "output")`; a bad one fails the call before any tab exists.
+    ///
+    /// `fromToken` is the caller. An ACP tab's caller is refused here: its tab goes on ITS OWN
+    /// agent, whose cwd check runs `docker exec` and must not hold the main actor — that is
+    /// `commissionAsync`, which the session bridge calls. Everyone else gets a claude on this
+    /// Mac, in `cwd` (the MCP layer checks it is an existing folder here).
     public func commission(callsign: String, cwd: String, provider: String? = nil,
-                           scratch: Bool? = nil, outputSchema: String? = nil) -> BridgeResult {
+                           scratch: Bool? = nil, outputSchema: String? = nil,
+                           sessionID: String? = nil, fromToken: String? = nil) -> BridgeResult {
         var schema: JSONValue?
         if let text = outputSchema?.trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty {
             switch Self.parseStrictSchema(text) {
@@ -574,26 +591,136 @@ public final class BridgeCore {
             case let .success(parsed): schema = parsed
             }
         }
+        if acpAgentName(ofCaller: fromToken) != nil {
+            return .failure("commission from an ACP agent's tab is served only on the session bridge "
+                + "(POST \(SessionMCPEndpoint.path))")
+        }
         let resolvedProvider: CCSwitchProvider?
         switch CCSwitchCatalog.resolve(provider) {
         case let .success(match): resolvedProvider = match
         case let .failure(error): return .failure(error.message)
         }
+        let requestedID: String?
+        let resume: Bool
+        if let raw = sessionID?.trimmingCharacters(in: .whitespacesAndNewlines), !raw.isEmpty {
+            guard UUID(uuidString: raw) != nil else {
+                return .failure("session_id must be a Claude session id (UUID)")
+            }
+            let id = raw.lowercased()
+            if let open = manager.sessions.first(where: { $0.claudeSessionID?.lowercased() == id }) {
+                return .failure("session_id \(id) is already open as @\(open.displayTitle)")
+            }
+            requestedID = id
+            resume = manager.hasTranscript(sessionID: id, cwd: cwd)
+        } else {
+            requestedID = nil
+            resume = false
+        }
         let session = manager.commission(callsign: callsign, cwd: cwd,
+                                         sessionID: requestedID, resume: resume,
                                          scratch: scratch ?? scratchByDefault(),
                                          provider: resolvedProvider)
-        // Stored before the first prompt can arrive, keyed by the session id it launched with.
-        let withOutput = schema != nil && session.claudeSessionID.map {
+        let output = storeOutputSchema(schema, for: session) ? " output_schema=set" : ""
+        let kind = session.scratch ? "scratch " : ""
+        let resumed = " resumed=\(resume)"
+        let claudeID = session.claudeSessionID.map { " session_id=\($0)" } ?? ""
+        if let p = resolvedProvider {
+            return .success("commissioned \(kind)@\(session.displayTitle) provider=\(p.name)\(output)\(resumed) "
+                + "(session=\(session.id.uuidString.prefix(8))\(claudeID))")
+        }
+        return .success("commissioned \(kind)@\(session.displayTitle)\(output)\(resumed) "
+            + "(session=\(session.id.uuidString.prefix(8))\(claudeID))")
+    }
+
+    /// Stored before the first prompt can arrive, keyed by the session id it launched with.
+    /// True when a schema was given and stored.
+    private func storeOutputSchema(_ schema: JSONValue?, for session: AgentSession) -> Bool {
+        schema != nil && session.claudeSessionID.map {
             OutputSchemaStore.set(schema, base: manager.supportDir, session: $0) == nil
         } == true
-        let kind = session.scratch ? "scratch " : ""
-        let output = withOutput ? " output_schema=set" : ""
-        if let p = resolvedProvider {
-            return .success("commissioned \(kind)@\(session.displayTitle) provider=\(p.name)\(output) "
-                + "(session=\(session.id.uuidString.prefix(8)))")
+    }
+
+    /// The caller's ACP agent name, or nil for a PTY tab, the operator, or no caller.
+    func acpAgentName(ofCaller token: String?) -> String? {
+        guard case let .acp(agentName)? = token.flatMap(manager.session(forToken:))?.backend else { return nil }
+        return agentName
+    }
+
+    /// `commission` as the session bridge calls it: the same as `commission` for every caller
+    /// but an ACP tab, whose new tab goes on ITS OWN agent, in that agent's environment —
+    /// never a claude on this Mac. The cwd check (`test -d` through the agent's exec, bounded by
+    /// the runner) runs off the main actor, so a stalled container cannot freeze the UI.
+    public func commissionAsync(callsign: String, cwd: String, provider: String? = nil,
+                                scratch: Bool? = nil, outputSchema: String? = nil,
+                                sessionID: String? = nil, fromToken: String?) async -> BridgeResult {
+        guard let agentName = acpAgentName(ofCaller: fromToken) else {
+            return commission(callsign: callsign, cwd: cwd, provider: provider, scratch: scratch,
+                              outputSchema: outputSchema, sessionID: sessionID, fromToken: fromToken)
         }
-        return .success("commissioned \(kind)@\(session.displayTitle)\(output) "
-            + "(session=\(session.id.uuidString.prefix(8)))")
+        if sessionID != nil {
+            return .failure("session_id applies only to claude tabs on the Mac, not to an ACP agent's tab")
+        }
+        let schema: JSONValue?
+        switch Self.outputSchemaValue(outputSchema) {
+        case let .failure(refusal): return .failure(refusal.message)
+        case let .success(parsed): schema = parsed
+        }
+        let plan: AgentCommissionPlan
+        switch agentCommissionPlan(agentName, cwd: cwd, provider: provider) {
+        case let .failure(refusal): return .failure(refusal.message)
+        case let .success(made): plan = made
+        }
+        if let problem = await Task.detached(priority: .userInitiated, operation: { plan.cwdProblem() }).value {
+            return .failure(problem)
+        }
+        let session = manager.commissionACP(agent: plan.agent, callsign: callsign, cwd: plan.tabCwd,
+                                            scratch: scratch ?? scratchByDefault())
+        let output = storeOutputSchema(schema, for: session) ? " output_schema=set" : ""
+        let kind = session.scratch ? "scratch " : ""
+        return .success("commissioned \(kind)@\(session.displayTitle) on \(plan.agent.name) "
+            + "cwd=\(plan.tabCwd)\(output) (session=\(session.id.uuidString.prefix(8)))\(plan.note)")
+    }
+
+    struct CommissionRefusal: Error { let message: String }
+
+    /// What an ACP caller's commission will do, decided on the main actor before anything runs.
+    /// `cwd` is a path as the AGENT sees it: it must be absolute; empty = the agent's configured
+    /// cwd (nothing to check). With no exec there is nowhere to check, so the agent's configured
+    /// cwd is used, unchecked, and the reply says so. A CC Switch provider is a Mac claude's
+    /// endpoint and is refused.
+    func agentCommissionPlan(
+        _ agentName: String, cwd: String, provider: String?
+    ) -> Result<AgentCommissionPlan, CommissionRefusal> {
+        if let provider, !provider.isEmpty {
+            return .failure(.init(
+                message: "provider applies only to claude tabs on the Mac, not to an ACP agent's tab"))
+        }
+        guard let agent = manager.acpAgent(named: agentName) else {
+            return .failure(.init(message: "no ACP agent named \"\(agentName)\" is configured"))
+        }
+        if !cwd.isEmpty, !cwd.hasPrefix("/") {
+            return .failure(.init(message: "cwd must be an absolute path in \(agent.name)'s environment "
+                + "(got \"\(cwd)\")"))
+        }
+        guard let runner = manager.acpRunnerFactory(agent) else {
+            let note = cwd.isEmpty || cwd == agent.cwd ? ""
+                : " (\(agent.name) has no exec command to check cwd \(cwd), so it opened in \(agent.cwd))"
+            return .success(AgentCommissionPlan(agent: agent, tabCwd: agent.cwd, check: nil, runner: nil, note: note))
+        }
+        return .success(AgentCommissionPlan(
+            agent: agent, tabCwd: cwd.isEmpty ? agent.cwd : cwd, check: cwd.isEmpty ? nil : cwd,
+            runner: runner, note: ""))
+    }
+
+    /// `outputSchema` parsed as strict JSON Schema; nil when absent or blank.
+    private static func outputSchemaValue(_ text: String?) -> Result<JSONValue?, CommissionRefusal> {
+        guard let text = text?.trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty else {
+            return .success(nil)
+        }
+        switch parseStrictSchema(text) {
+        case let .failure(message): return .failure(.init(message: message))
+        case let .success(parsed): return .success(parsed)
+        }
     }
 
     /// Plain interactive login zsh — same recipe as the app's "New Bash" (no transcript /
@@ -614,7 +741,8 @@ public final class BridgeCore {
             let branch = s.gitBranch.map { " branch=\($0)" } ?? ""
             let provider = s.providerName.map { " provider=\($0)" }
                 ?? s.providerID.map { " provider_id=\($0)" } ?? ""
-            return "@\(s.displayTitle) [\(s.agentType.id)] \(s.status.rawValue) cwd=\(s.cwd)\(branch)\(provider)"
+            let sid = s.claudeSessionID.map { " session_id=\($0)" } ?? ""
+            return "@\(s.displayTitle) [\(s.agentType.id)] \(s.status.rawValue) cwd=\(s.cwd)\(branch)\(provider)\(sid)"
         }
         return .success(lines.joined(separator: "\n"))
     }
@@ -625,6 +753,7 @@ public final class BridgeCore {
         }
         var parts = ["@\(s.displayTitle) is \(s.status.rawValue)",
                      "type=\(s.agentType.id)", "cwd=\(s.cwd)"]
+        if let sid = s.claudeSessionID { parts.append("session_id=\(sid)") }
         if let name = s.providerName {
             parts.append("provider=\(name)")
         } else if let id = s.providerID {
@@ -812,4 +941,29 @@ public final class BridgeCore {
         return .success(blocks.joined(separator: "\n\n"))
     }
 
+}
+
+/// An ACP caller's commission, decided (`BridgeCore.agentCommissionPlan`) before the one step
+/// that can block — the cwd check in the agent's environment — runs off the main actor.
+struct AgentCommissionPlan: Sendable {
+    let agent: AcpAgentConfig
+    /// Where the tab opens, as the agent sees it.
+    let tabCwd: String
+    /// The folder to `test -d` in the agent's environment; nil = nothing to check.
+    let check: String?
+    let runner: CommandRunner?
+    /// Appended to the success reply (why the caller's cwd was not used).
+    let note: String
+
+    /// Why the tab must not open, or nil. Blocking (a `docker exec`, bounded by the runner's
+    /// default timeout): call it off the main actor. A check that could not run at all — the
+    /// exec failed to launch or timed out — is reported as that, not as a missing folder.
+    func cwdProblem() -> String? {
+        guard let check, let runner else { return nil }
+        guard let result = runner.run(["test", "-d", check], cwd: nil, timeout: runner.defaultTimeout) else {
+            return "could not check cwd \(check) in \(agent.name)'s environment: its exec command failed "
+                + "to launch or timed out, so no tab was opened"
+        }
+        return result.code == 0 ? nil : "cwd \(check) is not a directory in \(agent.name)'s environment"
+    }
 }

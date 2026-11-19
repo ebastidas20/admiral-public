@@ -37,13 +37,15 @@ struct GroupChatView: View {
                     let tabs = Dictionary(model.memberSessions(group).map { (model.memberKey(for: $0), $0) },
                                           uniquingKeysWith: { a, _ in a })
                     let live = tabs.mapValues(AvatarLook.init(session:))
-                    let chips = GroupReaction.chips(model.groupStore.messages(group.id))
+                    let callsigns = tabs.mapValues(\.displayTitle)
+                    let chips = GroupReaction.chips(model.groupStore.messages(group.id), live: callsigns)
                     ForEach(timeline) { item in
                         if dayBreaks.contains(item.id) { DayDivider(ts: GroupTimeline.iso(item.ts)) }
                         switch item {
                         case .message(let message):
                             GroupMessageRow(message: message, mentions: mentions, live: message.liveLook(in: live),
-                                            text: GroupTimeline.displayText(message, names: tabs.mapValues(\.callsign)),
+                                            name: message.authorName(callsigns),
+                                            text: GroupTimeline.displayText(message, names: callsigns),
                                             reactions: chips[message.seq] ?? [])
                         case .ask(let ask):
                             if let tab = tabs[ask.member] { GroupAskRow(ask: ask, group: group, tab: tab) }
@@ -172,6 +174,9 @@ private struct GroupMessageRow: View, Equatable {
     let mentions: [String: Color]
     /// The author tab's current look, nil once that tab is gone.
     let live: AvatarLook?
+    /// The author's current callsign while its tab is open (a rename shows at once), else the
+    /// name stored with the message.
+    let name: String
     /// The bubble's text: the message, led by any addressee it does not already tag.
     let text: String
     /// What members reacted with, drawn under the message.
@@ -179,7 +184,7 @@ private struct GroupMessageRow: View, Equatable {
 
     static func == (lhs: Self, rhs: Self) -> Bool {
         lhs.message == rhs.message && lhs.mentions == rhs.mentions && lhs.live == rhs.live
-            && lhs.text == rhs.text && lhs.reactions == rhs.reactions
+            && lhs.name == rhs.name && lhs.text == rhs.text && lhs.reactions == rhs.reactions
     }
 
     @ViewBuilder private var bubble: some View {
@@ -189,7 +194,7 @@ private struct GroupMessageRow: View, Equatable {
         } else {
             ReplyView(text: text, ts: ts,
                       avatar: (live ?? AvatarLook(colorHex: message.colorHex, symbol: message.symbol)).avatar(ChatMetrics.avatar),
-                      name: message.name, cwd: NSHomeDirectory(), mentions: mentions)
+                      name: name, cwd: NSHomeDirectory(), mentions: mentions)
         }
     }
 
@@ -237,7 +242,7 @@ private struct GroupAskRow: View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(alignment: .center, spacing: 10) {
                 AvatarLook(session: tab).avatar(ChatMetrics.avatar)
-                Text(tab.callsign).font(.system(size: 12, weight: .semibold)).foregroundStyle(Theme.primaryText)
+                Text(tab.displayTitle).font(.system(size: 12, weight: .semibold)).foregroundStyle(Theme.primaryText)
                     .lineLimit(1)
                 Text(ChatTime.short(ts)).font(.system(size: 11)).foregroundStyle(Theme.secondaryText)
                     .help(ChatTime.full(ts))
@@ -278,7 +283,7 @@ struct GroupWorkingRow: View {
                     .animation(reduceMotion ? nil : .easeInOut(duration: 0.22), value: index)
                 }
             }
-            .help(busy.map(\.callsign).joined(separator: ", ") + " working")
+            .help(busy.map(\.displayTitle).joined(separator: ", ") + " working")
             Spacer(minLength: 0)
         }
         .accessibilityIdentifier("group-working")
@@ -339,7 +344,7 @@ struct GroupComposer: View {
     private var candidates: [GroupMentionPicker.Candidate] {
         guard let query else { return [] }
         return GroupMentionPicker.candidates(query.partial,
-                                             members: members.map { .init(name: $0.callsign, id: $0.id) })
+                                             members: members.map { .init(name: $0.displayTitle, id: $0.id) })
     }
 
     private var pickerOpen: Bool { !candidates.isEmpty }
@@ -552,7 +557,7 @@ struct GroupMembersPopover: View {
                     .frame(width: 20, height: 20)
             }
             VStack(alignment: .leading, spacing: 0) {
-                Text(session?.callsign ?? "Closed tab").font(.system(size: 13)).foregroundStyle(Theme.primaryText)
+                Text(session?.displayTitle ?? "Closed tab").font(.system(size: 13)).foregroundStyle(Theme.primaryText)
                     .lineLimit(1)
                 Text(session.map { MemberStatus.label($0.status) } ?? "not open")
                     .font(.system(size: 11)).foregroundStyle(Theme.secondaryText)

@@ -1,0 +1,193 @@
+import XCTest
+@testable import AdmiralCore
+
+final class AcpMessagesTests: XCTestCase {
+    private func json(_ s: String) -> JSONValue {
+        try! JSONDecoder().decode(JSONValue.self, from: Data(s.utf8))
+    }
+
+    func testInitializeParamsAdvertiseExactlyElicitationCompactionTerminalOutput() {
+        let p = AcpClient.initializeParams()
+        XCTAssertEqual(p["protocolVersion"], .number(1))
+        XCTAssertEqual(p["clientInfo"]?["name"]?.stringValue, "Admiral")
+        guard case let .object(caps)? = p["clientCapabilities"] else { return XCTFail("no caps") }
+        XCTAssertEqual(Set(caps.keys), ["elicitation", "session", "_meta"])
+        XCTAssertNil(caps["fs"])
+        XCTAssertNil(caps["terminal"])
+        XCTAssertEqual(
+            p["clientCapabilities"],
+            json(#"{"elicitation":{"form":{}},"session":{"compaction":{}},"_meta":{"terminal_output":true}}"#))
+    }
+
+    func testCapabilitiesFromClaudeAgentAcpInitialize() {
+        let r = json("""
+        {"protocolVersion":1,"agentCapabilities":{"loadSession":true,
+         "sessionCapabilities":{"fork":{},"list":{},"resume":{},"close":{}},
+         "mcpCapabilities":{"http":true},"_meta":{"steering":{"supported":true}}},
+         "agentInfo":{"name":"claude-agent-acp","version":"0.100.0"}}
+        """)
+        let c = AcpCapabilities(initializeResult: r)
+        XCTAssertTrue(c.loadSession && c.resume && c.fork && c.list && c.close)
+        XCTAssertTrue(c.mcpHTTP)
+        XCTAssertTrue(c.steering)
+        XCTAssertEqual(c.agentName, "claude-agent-acp")
+        XCTAssertEqual(c.agentVersion, "0.100.0")
+    }
+
+    func testCapabilitiesDefaultFalseWhenAbsent() {
+        let c = AcpCapabilities(initializeResult: json("{}"))
+        XCTAssertFalse(c.loadSession || c.resume || c.fork || c.list || c.close || c.mcpHTTP || c.steering)
+        XCTAssertNil(c.agentName)
+        XCTAssertNil(c.agentVersion)
+    }
+
+    func testMCPServerEncodesHTTPWithBearerHeader() {
+        let s = AcpMCPServer(name: "admiral", url: "http://h:4142/mcp", bearer: "tok")
+        XCTAssertEqual(s.json, json("""
+        {"type":"http","name":"admiral","url":"http://h:4142/mcp",
+         "headers":[{"name":"Authorization","value":"Bearer tok"}]}
+        """))
+        let p = AcpClient.newSessionParams(cwd: "/w", mcpServers: [s])
+        XCTAssertEqual(p["cwd"]?.stringValue, "/w")
+        XCTAssertEqual(p["mcpServers"]?.arrayValue?.count, 1)
+        XCTAssertNil(p["_meta"], "no _meta unless the agent configures one")
+    }
+
+    /// An agent's `sessionMeta` rides on `session/new` as `_meta` (what the Sailor harness reads
+    /// to pick the agent and its params).
+    func testNewSessionCarriesConfiguredMeta() {
+        let meta: [String: JSONValue] = ["agent": .string("researcher"), "params": .object(["city": .string("Porto")])]
+        let p = AcpClient.newSessionParams(cwd: "/", mcpServers: [], meta: meta)
+        XCTAssertEqual(p, json(#"{"cwd":"/","mcpServers":[],"_meta":{"agent":"researcher","params":{"city":"Porto"}}}"#))
+    }
+
+    func testRequestParamsShapes() {
+        let l = AcpClient.loadOrResumeParams(sessionID: "s1", cwd: "/w", mcpServers: [])
+        XCTAssertEqual(l, json(#"{"sessionId":"s1","cwd":"/w","mcpServers":[]}"#))
+        let p = AcpClient.promptParams(sessionID: "s1", text: "hi")
+        XCTAssertEqual(p, json(#"{"sessionId":"s1","prompt":[{"type":"text","text":"hi"}]}"#))
+        let st = AcpClient.steeringParams(sessionID: "s1", text: "hi")
+        XCTAssertEqual(st["_meta"]?["idleBehavior"]?.stringValue, "promptRequired")
+        XCTAssertEqual(st["prompt"], p["prompt"])
+    }
+
+    func testPromptAndSteeringCarryResourceLinks() {
+        let link = AcpResourceLink(path: "src/a b.swift", cwd: "/p")
+        let p = AcpClient.promptParams(sessionID: "s1", text: "see", links: [link])
+        XCTAssertEqual(p, json(#"""
+        {"sessionId":"s1","prompt":[{"type":"text","text":"see"},
+        {"type":"resource_link","uri":"file:///p/src/a%20b.swift","name":"src/a b.swift"}]}
+        """#))
+        let st = AcpClient.steeringParams(sessionID: "s1", text: "see", links: [link])
+        XCTAssertEqual(st["prompt"], p["prompt"])
+    }
+
+    private func decode(_ update: String) -> AcpUpdate? {
+        AcpUpdate.decode(json(#"{"sessionId":"S","update":\#(update)}"#))?.updates.first
+    }
+
+    private func decodeAll(_ update: String) -> [AcpUpdate] {
+        AcpUpdate.decode(json(#"{"sessionId":"S","update":\#(update)}"#))?.updates ?? []
+    }
+
+    func testDecodeToolContentItemsKeepsDiffsAndTerminals() {
+        let updates = decodeAll("""
+        {"sessionUpdate":"tool_call_update","toolCallId":"t1","content":[
+          {"type":"diff","path":"/p/a.swift","oldText":"a\\n","newText":"b\\n"},
+          {"type":"content","content":{"type":"text","text":"ok"}},
+          {"type":"terminal","terminalId":"t1"}]}
+        """)
+        guard case let .toolCallUpdate(id, _, content, _, _, items)? = updates.first else {
+            return XCTFail("\(updates)")
+        }
+        XCTAssertEqual(id, "t1")
+        XCTAssertEqual(content, "ok")
+        XCTAssertEqual(items, [.diff(path: "/p/a.swift", oldText: "a\n", newText: "b\n"), .text("ok"),
+                               .terminal(id: "t1")])
+        let created = decodeAll("""
+        {"sessionUpdate":"tool_call_update","toolCallId":"t1","content":[
+          {"type":"diff","path":"/p/n.swift","oldText":null,"newText":"x"}]}
+        """)
+        guard case let .toolCallUpdate(_, _, _, _, _, newItems)? = created.first else { return XCTFail() }
+        XCTAssertEqual(newItems, [.diff(path: "/p/n.swift", oldText: nil, newText: "x")])
+    }
+
+    /// claude-agent-acp's terminal channel (`clientCapabilities._meta.terminal_output`) rides on a
+    /// tool call update's `_meta`: the primary update first, then the output it carried.
+    func testDecodeTerminalOutputAndExitFromMeta() {
+        let updates = decodeAll("""
+        {"sessionUpdate":"tool_call_update","toolCallId":"t1",
+         "_meta":{"terminal_output":{"terminal_id":"t1","data":"hi"}}}
+        """)
+        XCTAssertEqual(updates, [
+            .toolCallUpdate(id: "t1", status: nil, content: nil, locations: []),
+            .terminalOutput(toolCallID: "t1", data: "hi"),
+        ])
+        let exit = decodeAll("""
+        {"sessionUpdate":"tool_call_update","toolCallId":"t1",
+         "_meta":{"terminal_exit":{"terminal_id":"t1","exit_code":2,"signal":null}}}
+        """)
+        XCTAssertEqual(exit.last, .terminalExit(toolCallID: "t1", exitCode: 2))
+    }
+
+    /// When the same update both carries output and closes the call, the output comes first, so
+    /// no consumer sees output for a call it has already closed.
+    func testOutputOnAClosingUpdateIsDeliveredBeforeTheClose() {
+        let updates = decodeAll("""
+        {"sessionUpdate":"tool_call_update","toolCallId":"t1","status":"completed",
+         "_meta":{"terminal_output":{"terminal_id":"t1","data":"bye"}}}
+        """)
+        XCTAssertEqual(updates, [
+            .terminalOutput(toolCallID: "t1", data: "bye"),
+            .toolCallUpdate(id: "t1", status: "completed", content: nil, locations: []),
+        ])
+    }
+
+    func testDecodeEachUpdateKind() {
+        let chunk = #""content":{"type":"text","text":"hey"}"#
+        XCTAssertEqual(decode(#"{"sessionUpdate":"agent_message_chunk",\#(chunk)}"#), .agentMessage("hey"))
+        XCTAssertEqual(decode(#"{"sessionUpdate":"agent_thought_chunk",\#(chunk)}"#), .agentThought("hey"))
+        XCTAssertEqual(decode(#"{"sessionUpdate":"user_message_chunk",\#(chunk)}"#), .userMessage("hey"))
+        XCTAssertEqual(
+            decode("""
+            {"sessionUpdate":"tool_call","toolCallId":"t1","title":"Read","kind":"read","status":"pending",
+             "rawInput":{"p":1},"locations":[{"path":"/a"}]}
+            """),
+            .toolCall(id: "t1", title: "Read", kind: "read", status: "pending",
+                      rawInput: .object(["p": .number(1)]), locations: ["/a"]))
+        XCTAssertEqual(
+            decode("""
+            {"sessionUpdate":"tool_call_update","toolCallId":"t1","status":"completed",
+             "content":[{"type":"content","content":{"type":"text","text":"ok"}}],"locations":[{"path":"/b"}]}
+            """),
+            .toolCallUpdate(id: "t1", status: "completed", content: "ok", locations: ["/b"], items: [.text("ok")]))
+        // claude-agent-acp sends a tool call's input on an update, not on the call (0.100.0).
+        XCTAssertEqual(
+            decode(#"{"sessionUpdate":"tool_call_update","toolCallId":"t1","rawInput":{"command":"ls"}}"#),
+            .toolCallUpdate(id: "t1", status: nil, content: nil, locations: [],
+                            rawInput: .object(["command": .string("ls")])))
+        XCTAssertEqual(
+            decode(#"{"sessionUpdate":"plan","entries":[{"content":"a","status":"pending","priority":"high"}]}"#),
+            .plan([AcpPlanEntry(content: "a", status: "pending", priority: "high")]))
+        XCTAssertEqual(
+            decode(#"{"sessionUpdate":"available_commands_update","availableCommands":[{"name":"init"}]}"#),
+            .availableCommands([AcpCommandInfo(name: "init")]))
+        XCTAssertEqual(
+            decode(#"{"sessionUpdate":"current_mode_update","currentModeId":"plan"}"#), .currentMode("plan"))
+        XCTAssertEqual(decode(#"{"sessionUpdate":"compaction_update"}"#), .compaction(status: nil, error: nil))
+        XCTAssertEqual(
+            decode(#"{"sessionUpdate":"compaction_update","compactionId":"c1","status":"failed","error":"Too short."}"#),
+            .compaction(status: "failed", error: "Too short."))
+        XCTAssertEqual(
+            decode(#"{"sessionUpdate":"usage_update","used":1,"size":2,"cost":{"amount":0.1,"currency":"USD"}}"#),
+            .queryFinished)
+        XCTAssertEqual(decode(#"{"sessionUpdate":"usage_update","used":1,"size":2}"#), .unknown("usage_update"))
+        XCTAssertEqual(decode(#"{"sessionUpdate":"weird"}"#), .unknown("weird"))
+        XCTAssertEqual(AcpUpdate.decode(json(#"{"sessionId":"S","update":{"sessionUpdate":"plan"}}"#))?.sessionID, "S")
+        XCTAssertNil(AcpUpdate.decode(json("{}")))
+    }
+
+    func testStopReasonRawValues() {
+        XCTAssertEqual(AcpStopReason(rawValue: "end_turn"), .endTurn)
+    }
+}

@@ -8,7 +8,6 @@ struct BridgeAPIView: View {
     @EnvironmentObject private var model: AppModel
     @State private var portText = ""
     @State private var minutesText = ""
-    @State private var thresholdText = ""
 
     var body: some View {
         ScrollView {
@@ -47,24 +46,15 @@ struct BridgeAPIView: View {
                 }
 
                 SettingsCard("Group chat routing",
-                             "A group message that tags nobody is scored 0 to 1 for each other "
-                                + "member by a small model (haiku, on your login) reading the "
-                                + "recent conversation. It reaches every member at or above the "
-                                + "threshold, or the single highest scorer when none reaches it. "
-                                + "Members it skips read it with their next prompt. If scoring "
-                                + "fails, your message reaches everyone and an agent's reaches "
-                                + "nobody. Off = untagged goes to everyone. `@name` and `@all` "
-                                + "are never scored.") {
-                    VStack(alignment: .leading, spacing: 10) {
-                        Toggle("Score untagged group messages", isOn: $model.groupRelevanceEnabled)
-                            .toggleStyle(.switch)
-                            .accessibilityIdentifier("settings-group-relevance")
-                        SettingsField(label: "Threshold (0–1)", text: $thresholdText,
-                                      identifier: "settings-group-relevance-threshold",
-                                      onCommit: commitThreshold)
-                            .frame(maxWidth: 280)
-                            .disabled(!model.groupRelevanceEnabled)
-                    }
+                             "A group message that tags nobody goes to the members a small model "
+                                + "(haiku, on your login) picks after reading the last "
+                                + "\(GroupRelevance.contextMessages) messages. Members it skips "
+                                + "read it with their next prompt. If it picks nobody or fails, "
+                                + "your message reaches everyone and an agent's reaches nobody. "
+                                + "Off = untagged goes to everyone. `@name` and `@all` skip it.") {
+                    Toggle("Route untagged group messages", isOn: $model.groupRelevanceEnabled)
+                        .toggleStyle(.switch)
+                        .accessibilityIdentifier("settings-group-relevance")
                 }
 
                 SettingsCard("Scratch tabs",
@@ -119,7 +109,6 @@ struct BridgeAPIView: View {
         .onAppear {
             portText = String(model.apiServerPreferredPort)
             minutesText = String(model.scratchTabIdleMinutes)
-            thresholdText = String(model.groupRelevanceThreshold)
         }
     }
 
@@ -144,14 +133,6 @@ struct BridgeAPIView: View {
             return
         }
         model.apiServerPreferredPort = port  // didSet persists + restarts a running server
-    }
-
-    private func commitThreshold() {
-        guard let value = Double(thresholdText.trimmingCharacters(in: .whitespaces)), (0...1).contains(value) else {
-            thresholdText = String(model.groupRelevanceThreshold)
-            return
-        }
-        model.groupRelevanceThreshold = value
     }
 
     private func commitMinutes() {

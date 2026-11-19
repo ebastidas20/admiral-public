@@ -40,6 +40,16 @@ public struct AgentType: Sendable, Hashable, Codable, Identifiable {
 
     public static let all: [AgentType] = [.claudeCode]
 
+    /// The kind of an ACP agent tab (`SessionManager.commissionACP`). Managed — it has a
+    /// transcript (the mirror), hooks and a chat — but never launched from these args: an ACP
+    /// tab is started by its agent config, and its `SessionBackend` routes reload and restore.
+    public static func acp(agentName: String) -> AgentType {
+        AgentType(id: acpID, displayName: agentName, executableName: "",
+                  defaultArgs: ["--session-id", SessionManager.sessionIDPlaceholder], symbolName: "shippingbox")
+    }
+
+    public static let acpID = "acp"
+
     /// A managed session carries the `--session-id` placeholder: transcript, injected hooks,
     /// bridge MCP — and so a chat. A bash tab is unmanaged and only ever a terminal.
     public var isManaged: Bool {

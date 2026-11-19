@@ -23,19 +23,16 @@ extension AppModel {
         groupService.peers = { [weak self] in GroupMembers.peers(self?.sessions.sessions ?? []) }
         groupService.deliver = { [weak self] key, text in
             guard let self, let tab = self.session(forMemberKey: key) else { return false }
-            return self.sessions.deliver(tab.id, text: text, source: GroupAutoPost.promptSource)
-        }
-        // The woken turn's final reply, from the tab's chat ledger (the Stop hook writes it).
-        groupService.finalReply = { [weak self] key, since in
-            guard let self, let sid = self.session(forMemberKey: key)?.claudeSessionID else { return nil }
-            return GroupAutoPost.finalReply(ledger: ChatLedger.read(base: self.sessions.supportDir, session: sid),
-                                            since: since)
+            return self.sessions.deliver(tab.id, text: text, source: GroupPrompt.source)
         }
         groupService.enabled = { [weak self] in self?.groupsEnabled ?? false }
         let claude = Self.resolveClaude()
-        groupService.scoreRelevance = { prompt in await GroupRelevanceScorer.score(prompt: prompt, claude: claude) }
+        groupService.routeMessage = { prompt in await GroupRelevanceScorer.route(prompt: prompt, claude: claude) }
+        groupService.onRouted = { seq, picked, woken in
+            GroupRelevanceScorer.log.notice(
+                "group #\(seq, privacy: .public) routed: picked \(picked?.joined(separator: ",") ?? "<router failed>", privacy: .public); woke \(woken.joined(separator: ","), privacy: .public)")
+        }
         groupService.relevanceEnabled = { [weak self] in self?.groupRelevanceEnabled ?? true }
-        groupService.relevanceThreshold = { [weak self] in self?.groupRelevanceThreshold ?? GroupRelevance.defaultThreshold }
         sessions.onDelete = { [weak self] session in self?.groupStore.removeSession(session.stableKey) }
         applyGroupsFlag()
     }

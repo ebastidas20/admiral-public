@@ -217,6 +217,15 @@ final class SidebarOrderTests: XCTestCase {
         XCTAssertEqual(GroupMembers.peers(relaunched.sessions).first?.id, member)
     }
 
+    /// Renaming a tab renames it in its groups at once: a member's handle is the name the tab
+    /// shows, not the callsign it was created with.
+    func testARenamedTabIsNamedByItsNewNameInGroups() {
+        let m = manager()
+        let tab = m.commission(callsign: "a", cwd: "/tmp")
+        m.rename(tab.id, to: "api-v2")
+        XCTAssertEqual(GroupMembers.peers(m.sessions).first?.callsign, "api-v2")
+    }
+
     func testStableKeyFallsBackToTabID() {
         let bare = AgentSession(callsign: "x", agentType: .claudeCode, cwd: "/tmp")
         XCTAssertEqual(bare.stableKey, bare.id)

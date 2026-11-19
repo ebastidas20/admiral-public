@@ -30,7 +30,7 @@ extension AppModel {
     func mentionColors(_ group: ChatGroup) -> [String: Color] {
         var colors: [String: Color] = ["all": Theme.accent]
         for session in memberSessions(group) {
-            colors[session.callsign.lowercased()] = session.avatarColorHex.flatMap(Color.init(hexString:)) ?? Theme.accent
+            colors[session.displayTitle.lowercased()] = session.avatarColorHex.flatMap(Color.init(hexString:)) ?? Theme.accent
         }
         return colors
     }

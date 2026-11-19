@@ -7,7 +7,7 @@ import Foundation
 ///
 /// `Encodable` exists because a `HookEvent` carries one as `tool_input`, and graph
 /// state must be `Codable`.
-public enum JSONValue: Codable, Equatable, Sendable {
+public enum JSONValue: Codable, Hashable, Sendable {
     case null
     case bool(Bool)
     case number(Double)

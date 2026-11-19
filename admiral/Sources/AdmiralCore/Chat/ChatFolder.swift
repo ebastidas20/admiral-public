@@ -17,8 +17,10 @@ public struct ChatTranscript: Equatable, Sendable {
     }
 
     /// claude is blocked on the user: an unanswered question or permission prompt is last.
+    /// Tool items don't count: a call written after an open card (a parallel call, or one whose
+    /// input came late) leaves the agent no less blocked.
     public var isWaiting: Bool {
-        switch items.last {
+        switch items.last(where: { if case .tool = $0 { return false }; return true }) {
         case .ask(_, _, _, true)?, .needs(_, _, _, true)?: return true
         default: return false
         }
@@ -41,18 +43,21 @@ public enum ChatItem: Identifiable, Equatable, Sendable {
     /// Something claude's harness told the session (a `<task-notification>`), shown as a
     /// plain line — it arrives as a prompt, but the user didn't write it.
     case notice(id: Int, text: String, ts: String)
+    /// A tool call on an ACP tab (only when `ChatHistory` was asked for tools): it opens, opened
+    /// at its `tool_use`'s line and time, and shows its result once one is read.
+    case tool(id: Int, tool: ChatTool, ts: String)
 
     public var id: Int {
         switch self {
         case let .prompt(id, _, _, _), let .reply(id, _, _),
-             let .ask(id, _, _, _), let .needs(id, _, _, _), let .notice(id, _, _): return id
+             let .ask(id, _, _, _), let .needs(id, _, _, _), let .notice(id, _, _), let .tool(id, _, _): return id
         }
     }
 
     public var ts: String {
         switch self {
         case let .prompt(_, _, _, ts), let .reply(_, _, ts),
-             let .ask(_, _, ts, _), let .needs(_, _, ts, _), let .notice(_, _, ts): return ts
+             let .ask(_, _, ts, _), let .needs(_, _, ts, _), let .notice(_, _, ts), let .tool(_, _, ts): return ts
         }
     }
 }
@@ -107,6 +112,12 @@ public enum ChatFolder {
             case .notice:
                 guard let text = event.text, !text.isEmpty else { continue }
                 items.append(.notice(id: index, text: text, ts: event.ts))
+            case .resolved:
+                closeOpen(&items, asks: true)
+            case .tool:
+                // Closes nothing: a call can run while its own permission card is still open.
+                guard let tool = event.tool else { continue }
+                items.append(.tool(id: index, tool: tool, ts: event.ts))
             }
         }
         return ChatTranscript(items: items)

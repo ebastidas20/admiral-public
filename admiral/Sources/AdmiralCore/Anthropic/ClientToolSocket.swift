@@ -32,7 +32,7 @@ public final class ClientToolSocketServer: @unchecked Sendable {
 
     /// `~/Library/Application Support/Admiral/client-tools.sock`, beside the bridge socket.
     public static var defaultPath: String {
-        AdmiralPaths.defaultSupportDir.appendingPathComponent("client-tools.sock").path
+        AdmiralPaths.socketPath("client-tools.sock", in: AdmiralPaths.defaultSupportDir)
     }
 
     @discardableResult

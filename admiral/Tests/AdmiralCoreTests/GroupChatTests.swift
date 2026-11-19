@@ -218,13 +218,18 @@ final class GroupServiceTests: XCTestCase {
         XCTAssertFalse(typed.contains { $0.0 == api })
     }
 
-    func testPassIsNeverLoggedNorCounted() throws {
-        let r = try post("  [pass] ", from: .member(qa))
-        XCTAssertTrue(r.passed)
-        XCTAssertNil(r.message)
-        XCTAssertTrue(store.messages(group.id).isEmpty)
-        XCTAssertEqual(store.group(group.id)?.spent, 0)
-        XCTAssertTrue(typed.isEmpty)
+    func testPassIsAnOrdinaryMessageNow() throws {
+        let r = try post("[pass]", from: .member(qa))
+        XCTAssertEqual(r.message?.text, "[pass]", "no token is special: an agent with nothing to add does not post")
+    }
+
+    func testAWakeNamesTheAuthorByItsCurrentCallsign() throws {
+        _ = try post("contract changed", from: .member(api))
+        let renamed = GroupPrompt.text(group: "g", members: [], messages: store.messages(group.id),
+                                       names: [api: "api-v2"])
+        XCTAssertTrue(renamed.contains("@api-v2: contract changed"), renamed)
+        let closed = GroupPrompt.text(group: "g", members: [], messages: store.messages(group.id), names: [:])
+        XCTAssertTrue(closed.contains("@api-fix: contract changed"), "a closed tab keeps the stored name")
     }
 
     func testBudgetPausesAgentChatterAndAHumanMessageResumesIt() throws {

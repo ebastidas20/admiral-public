@@ -24,6 +24,12 @@ struct StatusBar: View {
             }
             // A tab on a third-party endpoint is otherwise indistinguishable from one on
             // Anthropic. The tag says that it is; hovering names the config.
+            // An ACP tab's agent, in the provider's slot (an ACP tab never has a CC Switch one).
+            if case let .acp(agentName) = session.backend {
+                chip("shippingbox", agentName)
+                    .help("Runs on the ACP agent \u{201C}\(agentName)\u{201D}")
+                    .accessibilityIdentifier("status-acp-agent")
+            }
             if let providerName = session.providerName {
                 chip("cpu", "Custom Model")
                     .help(providerProvenance(providerName))

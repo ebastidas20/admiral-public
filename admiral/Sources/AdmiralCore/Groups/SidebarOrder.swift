@@ -160,7 +160,8 @@ public final class SidebarOrderStore {
 public enum GroupMembers {
     public static func peers(_ sessions: [AgentSession]) -> [GroupPeer] {
         // TODO(groups): pass `claudeSessionID` once GroupPeer carries it (another slice adds the field).
-        sessions.map { GroupPeer(id: $0.stableKey, callsign: $0.callsign, status: $0.status,
+        // A tab's handle is the name it shows (a rename included), as everywhere on the bridge.
+        sessions.map { GroupPeer(id: $0.stableKey, callsign: $0.displayTitle, status: $0.status,
                                  colorHex: $0.avatarColorHex, symbol: $0.avatarSymbol) }
     }
 

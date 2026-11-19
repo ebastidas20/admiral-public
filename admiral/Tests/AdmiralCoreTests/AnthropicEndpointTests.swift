@@ -39,9 +39,10 @@ final class FakeAnthropicBackend: AnthropicBackend {
         guard clientToolTabs.contains(tabID) else { return }
         installedTools[tabID] = tools
     }
-    func inject(tabID: UUID, text: String) {
+    func inject(tabID: UUID, text: String) -> InjectOutcome {
         injected.append((tabID, text))
         onInject(injected.count)
+        return .typed
     }
     func liveStatus(tabID: UUID) -> SessionStatus {
         polls += 1

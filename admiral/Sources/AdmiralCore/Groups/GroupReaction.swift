@@ -34,13 +34,15 @@ public enum GroupReaction: String, CaseIterable, Sendable {
     }
 
     /// Message seq → its reactions, the emojis in `allCases` order. A member reacting twice with
-    /// the same emoji counts once.
-    public static func chips(_ messages: [GroupMessage]) -> [Int: [Chip]] {
+    /// the same emoji counts once. `live` (member key → current callsign) names the reactors
+    /// whose tabs are open by their current name.
+    public static func chips(_ messages: [GroupMessage], live: [UUID: String] = [:]) -> [Int: [Chip]] {
         var byMessage: [Int: [String: [String]]] = [:]
         for message in messages {
             guard let target = message.reactionTo, let emoji = message.reaction else { continue }
             var names = byMessage[target, default: [:]][emoji, default: []]
-            if !names.contains(message.name) { names.append(message.name) }
+            let name = message.authorName(live)
+            if !names.contains(name) { names.append(name) }
             byMessage[target, default: [:]][emoji] = names
         }
         return byMessage.mapValues { emojis in
