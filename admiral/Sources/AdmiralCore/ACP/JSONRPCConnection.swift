@@ -81,23 +81,40 @@ public actor JSONRPCConnection {
         didClose()
     }
 
+    /// Cancelling the calling task fails the request with `CancellationError` at once (the
+    /// agent's late reply is then logged as unmatched), so a caller bounding a request with a
+    /// timeout — e.g. `session/close` on tab close — is never held by an agent that never answers.
     public func request(_ method: String, params: JSONValue) async throws -> JSONValue {
         guard !closed else { throw JSONRPCError.closed }
+        try Task.checkCancellation()
         let id = nextId
         nextId += 1
-        return try await withCheckedThrowingContinuation { cont in
-            pending[id] = cont
-            do {
-                try write([
-                    "jsonrpc": .string("2.0"), "id": .number(Double(id)),
-                    "method": .string(method), "params": params,
-                ])
-            } catch {
-                pending[id] = nil
-                cont.resume(throwing: error)
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { cont in
+                pending[id] = cont
+                do {
+                    try write([
+                        "jsonrpc": .string("2.0"), "id": .number(Double(id)),
+                        "method": .string(method), "params": params,
+                    ])
+                } catch {
+                    pending[id] = nil
+                    cont.resume(throwing: error)
+                }
             }
+        } onCancel: {
+            // Runs off the actor; hop on. If the continuation is not registered yet, this runs
+            // after it is (the actor is busy registering it), so the cancel is never missed.
+            Task { await self.cancelPending(id) }
         }
     }
+
+    private func cancelPending(_ id: Int) {
+        pending.removeValue(forKey: id)?.resume(throwing: CancellationError())
+    }
+
+    /// Requests still waiting for a reply (tests).
+    var pendingCount: Int { pending.count }
 
     public func notify(_ method: String, params: JSONValue) throws {
         guard !closed else { throw JSONRPCError.closed }

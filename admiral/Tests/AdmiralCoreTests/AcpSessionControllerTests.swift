@@ -920,6 +920,21 @@ final class AcpSessionControllerTests: XCTestCase {
         await until("ended") { phases.last == .ended }
     }
 
+    /// An agent that never answers `session/close` still has its transport closed (process
+    /// killed / socket closed) once the 2 s bound passes — it used to wait forever and leak.
+    func testTerminateClosesTransportWhenAgentNeverAnswersSessionClose() async {
+        let agent = ScriptedAgent(capabilities: .object(["sessionCapabilities": .object(["close": .object([:])])]))
+        agent.on("session/close") { _ in .hold }
+        let c = await ready(agent)
+        let start = Date()
+        c.terminate()
+        let deadline = Date().addingTimeInterval(5)
+        while !agent.fake.terminated, Date() < deadline { try? await Task.sleep(nanoseconds: 10_000_000) }
+        XCTAssertTrue(agent.fake.terminated, "transport left open after a hung session/close")
+        XCTAssertTrue(agent.methods.contains("session/close"))
+        XCTAssertLessThan(Date().timeIntervalSince(start), 4)
+    }
+
     func testDriverHasNoScreenOrKeys() async {
         let c = await ready(ScriptedAgent())
         XCTAssertNil(c.readScreen())

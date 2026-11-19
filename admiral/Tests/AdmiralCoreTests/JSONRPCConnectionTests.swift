@@ -148,6 +148,30 @@ final class JSONRPCConnectionTests: XCTestCase {
         }
     }
 
+    /// A request the agent never answers fails as soon as its task is cancelled, and is no
+    /// longer pending — so a timeout around it (tab close's `session/close`) really bounds it.
+    func testCancelledRequestThrowsAndIsNoLongerPending() async throws {
+        let (t, c) = await make()
+        let task = Task { try await c.request("session/close", params: .null) }
+        _ = await t.waitForSent(1)
+        task.cancel()
+        do {
+            _ = try await task.value
+            XCTFail("expected throw")
+        } catch {
+            XCTAssertTrue(error is CancellationError, "\(error)")
+        }
+        let pending = await c.pendingCount
+        XCTAssertEqual(pending, 0)
+        // A late reply is harmless, and the connection still works.
+        t.feed(#"{"jsonrpc":"2.0","id":1,"result":null}"#)
+        async let r = c.request("ping", params: .null)
+        _ = await t.waitForSent(2)
+        t.feed(#"{"jsonrpc":"2.0","id":2,"result":"pong"}"#)
+        let result = try await r
+        XCTAssertEqual(result, .string("pong"))
+    }
+
     func testCloseTerminatesTransport() async throws {
         let (t, c) = await make()
         await c.close()
